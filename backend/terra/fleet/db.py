@@ -71,6 +71,7 @@ ACTIVE = ("assigned", "acknowledged", "active")
 TELEMETRY_KEEP_S = 20 * 60
 MESSAGE_KEEP = 5000
 
+_pruned = {"at": 0.0}
 _ready: set[str] = set()
 _ready_lock = threading.Lock()
 
@@ -179,7 +180,8 @@ class FleetDB:
             db.execute("INSERT INTO fleet_telemetry VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                        (telemetry["id"], t, telemetry["lon"], telemetry["lat"], telemetry["alt_m"], telemetry.get("agl_m"), telemetry["heading_deg"], telemetry["speed_mps"],
                         telemetry.get("battery_pct"), telemetry.get("link_dbm"), g.get("heading_deg"), g.get("pitch_deg")))
-            if telemetry["seq"] % 200 == 0:
+            if t - _pruned["at"] > 60:  # by time, whatever sequence numbers a ground station uses
+                _pruned["at"] = t
                 db.execute("DELETE FROM fleet_telemetry WHERE t < ?", (t - TELEMETRY_KEEP_S,))
             db.execute("COMMIT")
         return True
