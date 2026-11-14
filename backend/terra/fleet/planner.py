@@ -20,7 +20,8 @@ EARTH = 6_371_000.0
 RESERVE_PCT = 15.0          # battery kept in hand after returning
 LOW_MARGIN_PCT = 8.0        # start home this far above the bare minimum
 STATION_S = 300.0           # planning horizon on a job (re-planned continuously), seconds
-STICKY_S = 150.0            # a better bid must beat the current holder by this much to take a job over
+STICKY_S = 300.0            # a better bid must beat the current holder by this much (five minutes of flying) to take a job
+                            # over: a swap costs both aircraft a transit and leaves a gap in coverage
 QUAD_LAYERS = [110, 150, 190, 230, 270, 310]       # metres above ground
 WING_LAYERS = [430, 500, 570]
 SEPARATION_M = 40.0         # vertical separation between overlapping volumes
