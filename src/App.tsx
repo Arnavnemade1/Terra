@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { ArrowUpRight, BarChart3, Calendar, Check, ChevronDown, Copy, Expand, Eye, Info, Menu as MenuIcon, Navigation, Satellite, Settings, Share2, Shrink, X } from 'lucide-react';
+import { ArrowUpRight, BarChart3, Calendar, Check, ChevronDown, ChevronUp, Copy, Expand, Eye, Info, Menu as MenuIcon, Navigation, Plane, Satellite, Settings, Share2, Shrink, X } from 'lucide-react';
 import Globe, { type GlobeHandle, type Hover, type Mark, type Overlay, type Telemetry } from './Globe';
 import { decodeGrid, type Grid, type ReliefOptions, type TerrainContext } from './relief';
 import Search, { boxAround, type Hazard } from './Search';
@@ -15,11 +15,14 @@ import { EventList, Timeline, stamp, type EventItem, type Marker } from './Dock'
 import { Bars, ChartFrame, Columns, LinePlot } from './charts';
 import { crossTrack, predictPasses, swathPass, SWATH, trackSeries, useFleet, type Sat } from './fleet';
 import SensorView from './SensorView';
+import DroneFeed, { type Thermal } from './DroneFeed';
+import DronesPanel from './DronesPanel';
+import { droneStore, type Patch, type Place } from './drones';
 import { nextApproach } from './geo';
 
-type Mode = 'investigation' | 'hazards' | 'satellites';
+type Mode = 'investigation' | 'hazards' | 'satellites' | 'drones';
 type Tab = 'layers' | 'analysis' | 'evidence' | 'notes';
-type LayerId = 'terrain' | 'imagery' | 'contours' | 'landcover' | 'trees' | 'peaks' | 'roads' | 'radar' | 'change' | 'hotspots' | 'optical' | 'nisar' | 'coverage' | 'events' | 'quakes' | 'fires' | 'fleet' | 'labels';
+type LayerId = 'terrain' | 'imagery' | 'contours' | 'landcover' | 'trees' | 'peaks' | 'roads' | 'drones' | 'radar' | 'change' | 'hotspots' | 'optical' | 'nisar' | 'coverage' | 'events' | 'quakes' | 'fires' | 'fleet' | 'labels';
 type Setting = { on: boolean; value: number };
 type Quake = { id: string; place: string; mag: number; lon: number; lat: number; time: number; url?: string; alert?: string | null };
 type Probe = { lon: number; lat: number; values: { layer: string; value: number | null; units: string }[] } | null;
@@ -46,7 +49,7 @@ const DEFAULT_LAYERS: Record<LayerId, Setting> = {
   terrain: { on: true, value: 1 }, imagery: { on: true, value: 1 }, contours: { on: true, value: 1 }, landcover: { on: true, value: 1 }, trees: { on: true, value: 1 },
   peaks: { on: true, value: 1 }, roads: { on: true, value: 1 }, radar: { on: false, value: 0.9 }, change: { on: true, value: 0.85 }, hotspots: { on: true, value: 1 },
   optical: { on: false, value: 1 }, nisar: { on: true, value: 1 }, coverage: { on: false, value: 1 }, events: { on: true, value: 1 }, quakes: { on: true, value: 1 },
-  fires: { on: false, value: 1 }, fleet: { on: false, value: 1 }, labels: { on: true, value: 0.9 },
+  fires: { on: false, value: 1 }, fleet: { on: false, value: 1 }, labels: { on: true, value: 0.9 }, drones: { on: true, value: 1 },
 };
 
 // Camera telemetry arrives at 4 Hz; keep it out of App's render path.
@@ -124,6 +127,9 @@ export default function App() {
   const [activeEvent, setActiveEvent] = useState<string | null>(null);
   const [selectedSat, setSelectedSat] = useState<number>(65053);
   const [sensor, setSensor] = useState<{ norad: number; at: number } | null>(null);
+  const [selectedDrone, setSelectedDrone] = useState<string | null>(null);
+  const [feed, setFeed] = useState<{ id: string; expanded: boolean } | null>(null);
+  const [dockOpen, setDockOpen] = useState<boolean>(() => readJSON('terra.dock', false));
   const [sensorBig, setSensorBig] = useState(false);
   const [copied, setCopied] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -196,6 +202,7 @@ export default function App() {
   // A saved Photoreal choice falls back to terrain and imagery until (and unless) the tiles are available.
   const mapStyle: Exclude<MapStyle, 'photoreal'> | 'photoreal' = style === 'photoreal' && !photorealReady ? 'photo' : style;
   const onPhotorealError = useCallback((message: string) => { setPhotorealState({ available: false, reason: message }); }, []);
+  useEffect(() => { writeJSON('terra.dock', dockOpen); }, [dockOpen]);
   // Land cover and named features for the relief map and the pointer readout (areas up to 2 degrees across).
   useEffect(() => {
     setTerrain(null); const b = region.bbox;
@@ -241,6 +248,7 @@ export default function App() {
       if (e.key === '/') { e.preventDefault(); setMenu('area'); }
       if (e.key === ' ') { e.preventDefault(); setPlaying(p => !p); }
       if (e.key === 'l') { setMode('investigation'); setTab('layers'); }
+      if (e.key === 't') setDockOpen(v => !v);
       const k = Number(e.key); if (k >= 1 && k <= DISPLAY_MODES.length) setDisplay(DISPLAY_MODES[k - 1].id);
     };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
@@ -340,11 +348,48 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.id, Boolean(result)]);
 
+  // ---------------------------------------------------------------- drones
+  const patches: Patch[] = useMemo(() => hotspots.map(h => ({ rank: h.rank, centre: h.centre, bounds: h.bounds, label: `change patch ${h.rank}` })), [hotspots]);
+  const places: Place[] = useMemo(() => (terrain?.ctx.features || []).map(f => ({ name: f.name, lon: f.lon, lat: f.lat, kind: f.kind, elevation_m: f.elevation_m })), [terrain]);
+  // The fleet lives in the server's central database; durable agents coordinate it. Publish this area and its targets
+  // (changed patches first, then summits) so the coordinator can plan jobs, and follow the fleet once a second.
+  useEffect(() => { droneStore.start(); return () => droneStore.stop(); }, []);
+  // Browsing never moves the fleet. The monitoring area changes only when someone asks (Drones panel); when the
+  // workspace shows the fleet's own area, new results (patches, summits) refresh its targets automatically.
+  const [fleetReady, setFleetReady] = useState(false);
+  useEffect(() => droneStore.subscribe(() => setFleetReady(droneStore.ready)), []);
+  const sameBox = (a: Bounds | null | undefined, b: Bounds) => Boolean(a) && a!.every((v, i) => Math.abs(v - b[i]) < 1e-6);
+  useEffect(() => {
+    if (!fleetReady) return; const current = droneStore.info.area?.bbox;
+    if (current && !sameBox(current, region.bbox)) return;
+    const id = setTimeout(() => { void droneStore.publishArea(region.name, region.bbox, patches, places); }, 900);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fleetReady, region.bbox.join(','), patches, places]);
+  const monitorHere = useCallback(() => { void droneStore.publishArea(region.name, region.bbox, patches, places); }, [region, patches, places]);
+  const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
+  useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
+  const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); }, []);
+  const onDroneSight = useCallback((p: { id: string; lon: number; lat: number } | null) => globe.current?.droneSight(p), []);
+  const jobId = job?.id;
+  const sampleChange = useCallback(async (lon: number, lat: number) => {
+    if (!jobId) return null; const v = await api<{ values: { layer: string; value: number | null }[] }>(`/investigations/${jobId}/sample?lon=${lon}&lat=${lat}`);
+    return v.values.find(x => x.layer === 'change')?.value ?? null;
+  }, [jobId]);
+  // Measured surface temperature for the drone cameras' IR mode, fetched when drones are in use.
+  const [thermal, setThermal] = useState<Thermal | null>(null);
+  const wantThermal = mode === 'drones' || Boolean(feed);
+  useEffect(() => {
+    setThermal(null); const b = region.bbox; if (!wantThermal || b[2] - b[0] > 1 || b[3] - b[1] > 1) return; const c = new AbortController();
+    void api<Thermal & { available: boolean }>(`/thermal?bbox=${b.join(',')}`, { signal: c.signal }).then(v => { if (!c.signal.aborted && v.available) setThermal(v); }).catch(() => {});
+    return () => c.abort();
+  }, [region, wantThermal]);
+
   // ---------------------------------------------------------------- satellites
   const aoiCentre = { lat: (region.bbox[1] + region.bbox[3]) / 2, lon: (region.bbox[0] + region.bbox[2]) / 2 };
   const keySats = useMemo(() => fleet.sats.filter(s => s.key), [fleet.sats]);
   const passStart = Math.floor(now / 600_000) * 600_000;
-  const passes = useMemo(() => mode === 'satellites' || mode === 'investigation' ? predictPasses(keySats, aoiCentre.lat, aoiCentre.lon, passStart, 48, 60) : [],
+  const passes = useMemo(() => mode !== 'hazards' ? predictPasses(keySats, aoiCentre.lat, aoiCentre.lon, passStart, 48, 60) : [],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [keySats, aoiCentre.lat, aoiCentre.lon, passStart, mode === 'satellites']);
   const sat: Sat | null = fleet.sats.find(s => s.norad === selectedSat) || null;
@@ -400,7 +445,7 @@ export default function App() {
   const fmtDay = (v: number) => new Date(v).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
   const fmtHour = (v: number) => new Date(v).toISOString().slice(11, 16);
   let charts: React.ReactNode = null; let side: React.ReactNode = null;
-  if (mode === 'investigation') {
+  if (mode === 'investigation' || mode === 'drones') {
     const h0 = obs[0]?.histogram, h1 = obs[1]?.histogram, hc = change?.histogram;
     const afterNow = radarNow && radar.length === 2 && radarNow === radar[1];
     const elev = profile?.points.map(p => p.elevation_m) || [];
@@ -474,6 +519,7 @@ export default function App() {
     { id: 'fires', name: 'Active fires, 24 h', swatch: Swatch.heat('#f6c24a'), on: ls.fires.on },
     { id: 'fleet', name: 'Earth-observation satellites', swatch: Swatch.ring('#d8d4c8'), on: ls.fleet.on },
     { id: 'labels', name: 'Places and borders', swatch: Swatch.text('Aa'), on: ls.labels.on, value: ls.labels.value },
+    { id: 'drones', name: 'Drones', note: `${fleetCount} airborne · virtual${liveDrones ? ` and ${liveDrones} real` : ''}`, swatch: Swatch.drone(), on: ls.drones.on, disabled: flat },
   ];
 
   // ---------------------------------------------------------------- sizes and blockers
@@ -528,7 +574,7 @@ export default function App() {
           <li><i className={`led ${originals ? 'ok' : ''}`} /><span>NASA Earthdata<small>{originals ? 'Original NISAR products available' : 'No credential set'}</small></span></li>
           <li><i className={`led ${writer ? 'ok' : ''}`} /><span>Language model<small>{writer ? `${writer} plans and writes; every number is checked` : 'Not configured'}</small></span></li>
           <li><i className={`led ${photorealReady ? 'ok' : ''}`} /><span>Google Map Tiles<small>{photorealReady ? 'Photorealistic 3D available (View menu)' : photorealState?.reason || 'Checking'}</small></span></li></>;
-  return <div className={`app workspace mode-${mode}`} onClick={() => menu && setMenu(null)}>
+  return <div className={`app workspace mode-${mode} ${dockOpen ? 'dock-open' : ''}`} onClick={() => menu && setMenu(null)}>
     {/* ------------------------------------------------ top bar */}
     <header className="topbar" onClick={e => e.stopPropagation()}>
       <button className="brand" onClick={() => globe.current?.home()} aria-label="Terra: show the whole Earth">
@@ -542,13 +588,14 @@ export default function App() {
       </div>
       <span className="daterange"><Calendar size={14} />{dates}</span>
       <nav className="modes" aria-label="Workspace">
-        {([['investigation', 'Investigation', job ? (running ? '…' : '') : ''], ['hazards', 'Hazards', alertCount ? String(alertCount) : ''], ['satellites', 'Satellites', passes.length ? String(passes.length) : '']] as const).map(([id, label, badge]) =>
+        {([['investigation', 'Investigation', job ? (running ? '…' : '') : ''], ['drones', 'Drones', String(fleetCount || '')], ['hazards', 'Hazards', alertCount ? String(alertCount) : ''], ['satellites', 'Satellites', passes.length ? String(passes.length) : '']] as const).map(([id, label, badge]) =>
           <button key={id} className={mode === id ? 'on' : ''} onClick={() => { setMode(id); setSelection(null);
             // Each mode opens on the view that suits it: the whole planet for hazards, a wide orbit view for satellites.
             if (id === 'hazards' && mode !== 'hazards') globe.current?.home();
             else if (id === 'satellites' && mode !== 'satellites') globe.current?.flyToPoint(aoiCentre.lon, aoiCentre.lat, 9_000_000);
-            else if (id === 'investigation' && mode !== 'investigation') globe.current?.flyTo(region.bbox); }} aria-current={mode === id ? 'page' : undefined}>
-            {id === 'investigation' ? <BarChart3 size={14} /> : id === 'hazards' ? <Info size={14} /> : <Navigation size={14} />}{label}{badge && <span className="badge">{badge}</span>}</button>)}
+            else if ((id === 'investigation' || id === 'drones') && (mode === 'hazards' || mode === 'satellites')) globe.current?.flyTo(region.bbox);
+            if (id === 'drones' && !selectedDrone) setSelectedDrone(droneStore.ids()[0] ?? null); }} aria-current={mode === id ? 'page' : undefined}>
+            {id === 'investigation' ? <BarChart3 size={14} /> : id === 'drones' ? <Plane size={14} /> : id === 'hazards' ? <Info size={14} /> : <Navigation size={14} />}{label}{badge && <span className="badge">{badge}</span>}</button>)}
       </nav>
       <div className="menus">
         <MenuButton id="view" label="View" icon={<Eye size={14} />} menu={menu} setMenu={setMenu}>
@@ -590,16 +637,21 @@ export default function App() {
         exaggeration={ls.terrain.on ? Math.max(0.01, ls.terrain.value) : 1} mode={display} layers={liveLayers} marks={marks} flat={flat} profiling={drawingProfile} profileVertices={profileVertices}
         satTime={satTime} satFocus={mode === 'satellites' ? selectedSat : null} onPathPoint={onPathPoint}
         relief={mapStyle === 'relief'} reliefOptions={reliefOptions} terrainContext={terrainContext} onHover={onHover}
+        drones={ls.drones.on || mode === 'drones'} selectedDrone={selectedDrone} onSelectDrone={onSelectDrone}
         onPick={pick} onQuickPick={quickPick} onSelect={onSelect} onProbe={onProbe} onTelemetry={onTelemetry} onFeeds={onFeeds} onReady={() => {}} />
       <MapChrome flat={flat} setFlat={setFlat} style={mapStyle} setStyle={setStyle} photoreal={photorealReady} globe={globe} bbox={region.bbox} />
       <HoverCard jobId={result ? job?.id : undefined} hasPatches={hotspots.length > 0} changeBounds={delta?.bounds} />
-      {!sensor && nisarSat && !flat && <button className="map-tool" onClick={() => openSensor(nisarSat)} title="A simulated view of this area from NISAR at its next pass"><Satellite size={14} />NISAR view</button>}
+      {!sensor && !feed && nisarSat && !flat && mode !== 'drones' && <button className="map-tool" onClick={() => openSensor(nisarSat)} title="A simulated view of this area from NISAR at its next pass"><Satellite size={14} />NISAR view</button>}
       {sensor && (() => { const s = fleet.sats.find(x => x.norad === sensor.norad); if (!s) return null;
         const afterRadar = radar.at(-1); const afterOptical = optical.at(-1);
         return <SensorView key={`${sensor.norad}-${sensor.at}`} sat={s} at={sensor.at} target={aoiCentre} bbox={region.bbox} expanded={sensorBig} onExpand={() => setSensorBig(v => !v)} onClose={() => { setSensor(null); setSensorBig(false); }}
           eo={job && afterOptical ? { url: artifactUrl(job, afterOptical.artifact_name), bounds: afterOptical.bounds as Bounds, date: afterOptical.date } : undefined}
           sar={job && afterRadar ? { url: url(afterRadar), bounds: afterRadar.bounds, date: String(afterRadar.date) } : undefined}
           change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} />; })()}
+      {feed && <DroneFeed key={feed.id} id={feed.id} store={droneStore} terrain={terrainContext} relief={style === 'relief'} reliefOptions={reliefOptions}
+        change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={feed.expanded}
+        onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
+      {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}
       {(picking || drawingProfile) && <div className="map-hint">{picking ? 'Click two opposite corners of the new area. Right-click anywhere marks a 30 km area.' : 'Click the start and end of the profile path.'}<button onClick={() => { setPicking(false); setDrawingProfile(false); }}>Cancel</button></div>}
       {(ls.change.on && delta || ls.radar.on && radarNow) && mode === 'investigation' && <div className="map-legend">
         <b>{ls.change.on && delta ? 'Backscatter change' : `Radar · ${prettyDate(String(radarNow?.date))}`}</b>
@@ -704,10 +756,15 @@ export default function App() {
         onInvestigate={h => selectRegion({ name: h.title.slice(0, 60), context: [h.category_title, h.provider].filter(Boolean).join(' · '), bbox: boxAround(h.lon, h.lat, 0.15), tag: h.category_title })} />}
       {mode === 'satellites' && <SatellitesPanel sats={fleet.sats} passes={passes} now={satTime ?? Date.now()} selected={sat} onSelect={s => setSelectedSat(s.norad)} source={fleet.source} nisarNext={nisarNext} error={fleet.error}
         onFly={flyToSat} onSensor={openSensor} />}
+      {mode === 'drones' && <DronesPanel store={droneStore} selected={selectedDrone} patches={patches} places={places} regionName={region.name} regionBox={region.bbox} onMonitorHere={monitorHere}
+        onSelect={id => { setSelectedDrone(id); globe.current?.followDrone(id); }}
+        onCamera={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: false }); }}
+        onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }} />}
     </aside>
 
     {/* ------------------------------------------------ dock */}
-    <section className="dock" aria-label="Timeline and charts">
+    <section className={`dock ${dockOpen ? 'open' : ''}`} id="timeline-drawer" aria-label="Timeline and charts" aria-hidden={!dockOpen} inert={!dockOpen}>
+      <button className="dock-close icon-btn" onClick={() => setDockOpen(false)} aria-label="Hide the timeline and charts" title="Hide (T)"><ChevronDown size={14} /></button>
       <div className="dock-main">
         <Timeline range={timeline.range} t={t} onTime={v => { setT(v); setPlaying(false); }} markers={timeline.markers} band={timeline.band} playing={playing} onPlay={() => setPlaying(p => !p)}
           speed={speed} onSpeed={setSpeed} onStep={stepNext} title={timeline.title} withTime={timeline.withTime} />
@@ -730,12 +787,12 @@ export default function App() {
     if (SWATH[s.norad]) {
       const at = (s.norad === nisarNext?.norad && nisarNext.at >= Date.now() - 600_000 ? nisarNext.at : null) ?? swathPass(s, aoiCentre.lat, aoiCentre.lon, Date.now() - 600_000, 13);
       if (!at) { setError(`${s.name}'s radar swath does not cover this area in the next 13 days.`); return; }
-      setSensor({ norad: s.norad, at }); setMenu(null); return;
+      setSensor({ norad: s.norad, at }); setFeed(null); setMenu(null); return;
     }
     const known = passes.find(p => p.norad === s.norad && p.at >= Date.now() - 600_000);
     const at = known?.at ?? nextApproach(s.orbit, aoiCentre.lat, aoiCentre.lon, s.reachKm, new Date(), 13)?.at.getTime();
     if (!at) { setError(`${s.name} does not pass within ${s.reachKm} km of this area in the next 13 days.`); return; }
-    setSensor({ norad: s.norad, at }); setMenu(null);
+    setSensor({ norad: s.norad, at }); setFeed(null); setMenu(null);
   }
 
   function flyToSat(s: Sat) {
