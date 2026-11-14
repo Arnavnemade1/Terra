@@ -82,9 +82,15 @@ async def lifespan(app: FastAPI):
     settings.ensure_directories()
     app.state.store = Store(settings.database)
     app.state.temporal = None
+    # Map tiles around the fleet are fetched ahead of time into the shared tile cache (see fleet/warm.py).
+    from .fleet.warm import Warmer, enabled as warming_enabled
+    app.state.warmer = Warmer()
+    warming = asyncio.create_task(app.state.warmer.run()) if warming_enabled() else None
     try:
         yield
     finally:
+        if warming:
+            warming.cancel()
         await connector.close()
 
 
@@ -93,7 +99,9 @@ app = FastAPI(title="TERRA Investigation API", version="0.1.0", lifespan=lifespa
 app.include_router(google_tiles_router)
 app.include_router(connector_router)
 app.include_router(fleet_router)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", *filter(None, os.getenv("TERRA_ALLOWED_HOSTS", "").split(","))])
+# *.localhost always resolves to this machine; the workspace spreads map tiles over a few such names so the browser
+# opens more than six connections at once (it allows six per host over HTTP/1.1).
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "*.localhost", "127.0.0.1", "[::1]", *filter(None, os.getenv("TERRA_ALLOWED_HOSTS", "").split(","))])
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]
 allowed_origins.extend(filter(None, os.getenv("TERRA_ALLOWED_ORIGINS", "").split(",")))
 app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
