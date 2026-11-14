@@ -57,7 +57,16 @@ CREATE TABLE IF NOT EXISTS fleet_agents (
 CREATE TABLE IF NOT EXISTS fleet_control (
     drone_id TEXT PRIMARY KEY, setpoint TEXT NOT NULL, updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fleet_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, t REAL NOT NULL, drone_id TEXT NOT NULL, task_id TEXT, kind TEXT NOT NULL,
+    lon REAL NOT NULL, lat REAL NOT NULL, text TEXT NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS fleet_notes_drone ON fleet_notes (drone_id, t);
+CREATE TABLE IF NOT EXISTS fleet_credentials (
+    token_hash TEXT PRIMARY KEY, drone_id TEXT NOT NULL, label TEXT, created_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
+);
 """
+MIGRATIONS = ["ALTER TABLE fleet_area ADD COLUMN investigation_id TEXT", "ALTER TABLE fleet_area ADD COLUMN profile TEXT DEFAULT 'change'"]
 ACTIVE = ("assigned", "acknowledged", "active")
 TELEMETRY_KEEP_S = 20 * 60
 MESSAGE_KEEP = 5000
@@ -87,6 +96,11 @@ class FleetDB:
                 with self.connect() as db:
                     db.execute("PRAGMA journal_mode=WAL")
                     db.executescript(SCHEMA)
+                    for statement in MIGRATIONS:  # columns added after the first release of this schema
+                        try:
+                            db.execute(statement)
+                        except sqlite3.OperationalError:
+                            pass
                 _ready.add(key)
 
     def connect(self) -> sqlite3.Connection:
@@ -96,19 +110,21 @@ class FleetDB:
         return db
 
     # ------------------------------------------------------------------ area and targets
-    def set_area(self, name: str, bbox: list[float], targets: list[dict]) -> dict:
+    def set_area(self, name: str, bbox: list[float], targets: list[dict], investigation_id: str | None = None, profile: str = "change") -> dict:
         launch = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]  # launch from the centre: shortest reach to every target
         t = now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            previous = db.execute("SELECT bbox FROM fleet_area WHERE id='active'").fetchone()
-            db.execute("INSERT INTO fleet_area VALUES ('active', ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, bbox=excluded.bbox, launch=excluded.launch, updated_at=excluded.updated_at",
-                       (name, json.dumps(bbox), json.dumps(launch), t))
+            previous = db.execute("SELECT bbox, profile FROM fleet_area WHERE id='active'").fetchone()
+            db.execute("INSERT INTO fleet_area (id, name, bbox, launch, updated_at, investigation_id, profile) VALUES ('active', ?, ?, ?, ?, ?, ?) "
+                       "ON CONFLICT(id) DO UPDATE SET name=excluded.name, bbox=excluded.bbox, launch=excluded.launch, updated_at=excluded.updated_at, investigation_id=excluded.investigation_id, profile=excluded.profile",
+                       (name, json.dumps(bbox), json.dumps(launch), t, investigation_id, profile))
+            changed_profile = previous is not None and (previous["profile"] or "change") != profile
             db.execute("DELETE FROM fleet_targets WHERE area_id='active' AND source != 'operator'")
             for item in targets:
                 db.execute("INSERT INTO fleet_targets VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(id) DO UPDATE SET label=excluded.label, lon=excluded.lon, lat=excluded.lat, radius_m=excluded.radius_m, priority=excluded.priority, needs=excluded.needs, updated_at=excluded.updated_at",
                            (item["id"], item["kind"], item["label"], item["lon"], item["lat"], item["radius_m"], item["priority"], json.dumps(item.get("needs", [])), item.get("source", "investigation"), t))
-            moved = not previous or json.loads(previous["bbox"]) != bbox
+            moved = not previous or json.loads(previous["bbox"]) != bbox or changed_profile
             if moved:
                 # A new area: every automatic task and reservation is void; people's tasks stay until they end.
                 db.execute("UPDATE fleet_tasks SET status='superseded', updated_at=?, reason='The monitoring area changed.' WHERE status IN ('assigned','acknowledged','active') AND created_by != 'operator'", (t,))
@@ -121,7 +137,8 @@ class FleetDB:
     def area(self) -> dict | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM fleet_area WHERE id='active'").fetchone()
-        return {"name": row["name"], "bbox": json.loads(row["bbox"]), "launch": json.loads(row["launch"]), "updated_at": row["updated_at"]} if row else None
+        return {"name": row["name"], "bbox": json.loads(row["bbox"]), "launch": json.loads(row["launch"]), "updated_at": row["updated_at"],
+                "investigation_id": row["investigation_id"], "profile": row["profile"] or "change"} if row else None
 
     def targets(self) -> list[dict]:
         with self.connect() as db:
@@ -222,6 +239,13 @@ class FleetDB:
             rows = db.execute(query, (limit,)).fetchall()
         return [{**dict(r), "params": _loads(r["params"], {})} for r in rows]
 
+    def benched(self, within_s: float = 120) -> set[str]:
+        """Aircraft that rejected two or more tasks recently, or rejected one for a vehicle-level reason: not tasked for a while."""
+        with self.connect() as db:
+            rows = db.execute("SELECT drone_id, COUNT(*) AS n, MAX(CASE WHEN reason LIKE 'vehicle:%' THEN 1 ELSE 0 END) AS vehicle FROM fleet_tasks "
+                              "WHERE status='rejected' AND updated_at > ? GROUP BY drone_id", (now() - within_s,)).fetchall()
+        return {r["drone_id"] for r in rows if r["n"] >= 2 or r["vehicle"]}
+
     def refusals(self, within_s: float = 600) -> set[tuple[str, str]]:
         """(aircraft, job) pairs the aircraft rejected recently: not offered to it again for a while."""
         with self.connect() as db:
@@ -262,7 +286,8 @@ class FleetDB:
             # Lifecycle only moves forward; a superseded task stays superseded.
             if row["status"] in ("superseded", "cancelled") or order.get(status, -1) < order.get(row["status"], 0):
                 db.execute("ROLLBACK"); return {**dict(row), "params": _loads(row["params"], {})}
-            db.execute("UPDATE fleet_tasks SET status=?, updated_at=?, acked_at=COALESCE(acked_at, ?) WHERE id=?", (status, t, t, task_id))
+            db.execute("UPDATE fleet_tasks SET status=?, updated_at=?, acked_at=COALESCE(acked_at, ?), reason=CASE WHEN ? IN ('rejected','failed') AND ? IS NOT NULL THEN ? ELSE reason END WHERE id=?",
+                       (status, t, t, status, detail, detail, task_id))
             if status in ("completed", "failed", "rejected"):
                 db.execute("UPDATE fleet_operations SET state='ended', updated_at=? WHERE task_id=?", (t, task_id))
             elif status == "active":
@@ -335,6 +360,53 @@ class FleetDB:
             rows = db.execute("SELECT * FROM fleet_agents ORDER BY id").fetchall()
         t = now()
         return [{**dict(r), "summary": _loads(r["summary"], {}), "age_s": round(t - r["heartbeat"], 1)} for r in rows]
+
+
+# ---------------------------------------------------------------- field notes and credentials (methods added to FleetDB)
+def _add_note(self, drone_id: str, task_id: str | None, kind: str, lon: float, lat: float, text: str, data: dict) -> int:
+    with self.connect() as db:
+        cur = db.execute("INSERT INTO fleet_notes (t, drone_id, task_id, kind, lon, lat, text, data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (now(), drone_id, task_id, kind, lon, lat, text, json.dumps(data)))
+        return cur.lastrowid
+
+
+def _notes(self, limit: int = 60, drone_id: str | None = None, since: float = 0) -> list[dict]:
+    query = "SELECT * FROM fleet_notes WHERE t > ?" + (" AND drone_id=?" if drone_id else "") + " ORDER BY id DESC LIMIT ?"
+    with self.connect() as db:
+        rows = db.execute(query, (since, drone_id, limit) if drone_id else (since, limit)).fetchall()
+    return [{**dict(r), "data": _loads(r["data"], {})} for r in rows]
+
+
+def _last_note(self, drone_id: str, task_id: str | None) -> dict | None:
+    with self.connect() as db:
+        row = db.execute("SELECT * FROM fleet_notes WHERE drone_id=? AND task_id IS ? ORDER BY id DESC LIMIT 1", (drone_id, task_id)).fetchone()
+    return dict(row) if row else None
+
+
+def _add_credential(self, token_hash: str, drone_id: str, label: str) -> None:
+    with self.connect() as db:
+        db.execute("INSERT INTO fleet_credentials VALUES (?, ?, ?, ?, 0)", (token_hash, drone_id, label, now()))
+
+
+def _credential(self, token_hash: str) -> dict | None:
+    with self.connect() as db:
+        row = db.execute("SELECT * FROM fleet_credentials WHERE token_hash=? AND revoked=0", (token_hash,)).fetchone()
+    return dict(row) if row else None
+
+
+def _credentials(self) -> list[dict]:
+    with self.connect() as db:
+        rows = db.execute("SELECT drone_id, label, created_at, revoked FROM fleet_credentials ORDER BY created_at DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def _revoke(self, drone_id: str) -> int:
+    with self.connect() as db:
+        return db.execute("UPDATE fleet_credentials SET revoked=1 WHERE drone_id=? AND revoked=0", (drone_id,)).rowcount
+
+
+FleetDB.add_note, FleetDB.notes, FleetDB.last_note = _add_note, _notes, _last_note
+FleetDB.add_credential, FleetDB.credential, FleetDB.credentials, FleetDB.revoke = _add_credential, _credential, _credentials, _revoke
 
 
 def fleet_db() -> FleetDB:
