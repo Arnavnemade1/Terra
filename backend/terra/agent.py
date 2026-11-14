@@ -356,6 +356,9 @@ Rules:
   the newly low-return area; for buildings or urban growth, the high-return area; for any change question, the largest hotspots
   (direction, area and mean change) with their locations as "near <lat>, <lon>" using the centre values given. Say where change is
   concentrated rather than only quoting area-wide medians, which can hide localized change.
+- When change.polarizations lists more than one polarization, say which one shows the change more clearly (derived.leading_polarization), citing each
+  polarization's mean_abs_standardized_change (change in speckle standard deviations) or a hotspot's by_polarization values. These scale by speckle only.
+  A polarization with null standardized values could not be scaled; do not rank it.
 - Low-return area is a proxy, not a water map: call it "water-like" or "very low return" and never "flooded area".
 - surface_conditions are modelled weather at the radar acquisition dates, at one grid point near the area's centre, not ground measurements.
   If relevant, report the dated precipitation or soil moisture as a possible confounder, never as a proven cause of radar change.
@@ -487,6 +490,8 @@ def _evidence(investigation: dict, context: dict | None) -> dict:
     up, down = change.get("increasing_km2"), change.get("decreasing_km2")
     if isinstance(up, (int, float)) and isinstance(down, (int, float)):
         derived["changed_by_threshold_km2"] = round(up + down, 2)
+    if change.get("leading_polarization"):
+        derived["leading_polarization"] = change["leading_polarization"]
     if change.get("hotspots") is not None:
         derived["hotspot_count"] = len(change["hotspots"])
         # Prose can legitimately say "darker by 5 dB" for a signed -5 dB
@@ -584,6 +589,10 @@ def measured_answer(investigation: dict, context: dict | None = None) -> dict:
             answer += (f"\n\nThe largest changed patch is {area}{where}, {word} by {abs(top['mean_change_db']):.1f} dB on average; "
                        f"{len(spots)} patches are listed in the report.")
             bullets.append(f"Largest patch: {area}{where}, mean change {top['mean_change_db']:.1f} dB.")
+        scored = [r for r in change.get("polarizations") or [] if r.get("mean_abs_standardized_change") is not None]
+        if change.get("leading_polarization") and len(scored) > 1:
+            bullets.append("Change in speckle standard deviations (mean absolute): " + ", ".join(f"{r['polarization']} {r['mean_abs_standardized_change']:.1f}" for r in scored)
+                           + f"; {change['leading_polarization']} shows it more clearly.")
         if change.get("low_return_before_km2") is not None and change.get("low_return_after_km2") is not None:
             bullets.append(f"Water-like (very low return) area: {change['low_return_before_km2']:.2f} km² before, {change['low_return_after_km2']:.2f} km² after.")
     elif observations:

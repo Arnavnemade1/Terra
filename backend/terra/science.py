@@ -364,8 +364,13 @@ def _surface_classes(values: np.ndarray, meta: dict) -> dict:
             "high_return_km2": float(high.sum() * km2) if km2 else None}
 
 
-def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, threshold: float) -> list[dict]:
-    """The largest connected patches whose smoothed change exceeds the threshold, with locations."""
+def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, threshold: float,
+              by_pol: dict[str, tuple[np.ndarray, float]] | None = None) -> list[dict]:
+    """The largest connected patches whose smoothed change exceeds the threshold, with locations.
+
+    `by_pol` maps each polarization to its change raster and the speckle standard deviation (dB) of a
+    two-date difference; every patch then carries each polarization's mean change and that change in
+    speckle standard deviations, and names the polarization where it stands out most."""
     from scipy import ndimage
     from pyproj import Transformer
     finite = np.isfinite(delta)
@@ -397,6 +402,12 @@ def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, thresh
             cy, cx = rows.mean() + r0 + 0.5, cols.mean() + c0 + 0.5
             x, y = transform * (cx, cy)
             lon, lat = to_geo.transform(x, y)
+            per = {}
+            for pol, (d, sd) in (by_pol or {}).items():
+                v = d[slices[label - 1]][region]
+                v = v[np.isfinite(v)]
+                if v.size:
+                    per[pol] = {"mean_change_db": round(float(v.mean()), 3), "standardized_change": round(float(v.mean() / sd), 2)}
             corners = [transform * (c, r) for c, r in ((c0, r0), (slices[label - 1][1].stop, slices[label - 1][0].stop))]
             (w, n), (e, s) = [to_geo.transform(*corner) for corner in corners]
             patches.append({"direction": direction, "pixels": int(sizes[label - 1]),
@@ -404,11 +415,70 @@ def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, thresh
                             "mean_change_db": round(float(values.mean()), 3) if values.size else None,
                             "peak_change_db": round(float(values[np.argmax(np.abs(values))]), 3) if values.size else None,
                             "centre": [round(float(lat), 5), round(float(lon), 5)],
+                            "by_polarization": per,
+                            "leading_polarization": max(per, key=lambda q: abs(per[q]["standardized_change"])) if len(per) > 1 else None,
                             "bounds": [round(float(min(w, e)), 5), round(float(min(s, n)), 5), round(float(max(w, e)), 5), round(float(max(s, n)), 5)]})
     patches.sort(key=lambda p: -p["pixels"])
     for rank, patch in enumerate(patches[:HOTSPOT_LIMIT], 1):
         patch["rank"] = rank
     return patches[:HOTSPOT_LIMIT]
+
+
+ENL_WINDOW = 7
+ENL_MIN_WINDOWS = 30
+Z_CHANGE = 2.0
+
+
+def estimate_enl(db: np.ndarray) -> float | None:
+    """Equivalent number of looks: mean² / variance of linear power in the most homogeneous 7×7 windows.
+
+    Windows are ranked by coefficient of variation and the lowest decile is used, so scene texture
+    (fields, roads, edges) does not lower the estimate. Selecting the flattest windows biases it
+    slightly high; it is an estimate for scaling speckle, not a product calibration."""
+    from scipy import ndimage
+    finite = np.isfinite(db)
+    power = np.where(finite, 10 ** (np.where(finite, db, 0.0) / 10), 0.0)
+    full = ndimage.uniform_filter(finite.astype(np.float64), ENL_WINDOW, mode="constant") > 1 - 1e-9
+    mean = ndimage.uniform_filter(power, ENL_WINDOW, mode="constant")
+    var = ndimage.uniform_filter(power ** 2, ENL_WINDOW, mode="constant") - mean ** 2
+    ok = full & (mean > 0) & (var > 0)
+    if int(ok.sum()) < ENL_MIN_WINDOWS:
+        return None
+    enl = mean[ok] ** 2 / var[ok]
+    return float(np.median(enl[enl >= np.percentile(enl, 90)]))
+
+
+def speckle_sd_db(enl: float) -> float:
+    """Standard deviation in dB of fully developed speckle averaged over `enl` independent looks (gamma power)."""
+    from scipy.special import polygamma
+    return float(10 / math.log(10) * math.sqrt(polygamma(1, enl)))
+
+
+def _polarization_change(paths: list[Path], metas: list[dict], bbox: list[float] | None, threshold: float) -> tuple[list[dict], dict]:
+    """Change in every polarization both dates share, scaled by the speckle expected at that polarization's ENL."""
+    pols = [p for p in metas[0]["polarizations"] if p in metas[1]["polarizations"]]
+    if any(m["derivative"] for m in metas):
+        pols = [metas[0]["selected_polarization"]]
+    rows, rasters = [], {}
+    for pol in pols:
+        before, after = (_read(path, {**meta, "selected_polarization": pol}, bbox)[0] for path, meta in zip(paths, metas))
+        common = np.isfinite(before) & np.isfinite(after)
+        if not common.any():
+            continue
+        delta = np.full(before.shape, np.nan, dtype=np.float32)
+        delta[common] = after[common] - before[common]
+        enl = [estimate_enl(before), estimate_enl(after)]
+        row = {"polarization": pol, "valid_pixels": int(common.sum()), "enl_before": enl[0], "enl_after": enl[1],
+               "mean_change_db": float(delta[common].mean(dtype=np.float64)), "median_change_db": float(np.median(delta[common])),
+               "threshold_exceedance_pct": float((np.abs(delta[common]) >= threshold).mean() * 100),
+               "expected_speckle_sd_db": None, "mean_abs_standardized_change": None, "standardized_exceedance_pct": None}
+        if None not in enl:
+            sd = math.hypot(speckle_sd_db(enl[0]), speckle_sd_db(enl[1]))
+            z = np.abs(delta[common]) / sd
+            row.update(expected_speckle_sd_db=sd, mean_abs_standardized_change=float(z.mean()), standardized_exceedance_pct=float((z >= Z_CHANGE).mean() * 100))
+            rasters[pol] = (delta, sd)
+        rows.append(row)
+    return rows, rasters
 
 
 def _colors(values: np.ndarray, low: float, high: float, diverging: bool) -> np.ndarray:
@@ -536,15 +606,23 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
                    "low_return_before_pct": float(low_before / common.sum() * 100), "low_return_after_pct": float(low_after / common.sum() * 100),
                    "low_return_before_km2": float(low_before * km2) if km2 else None, "low_return_after_km2": float(low_after * km2) if km2 else None,
                    "newly_low_return_km2": float(became * km2) if km2 else None, "no_longer_low_return_km2": float(ceased * km2) if km2 else None}
+        pol_rows, pol_rasters = _polarization_change(paths, metadata, bbox, threshold)
+        scored = [r for r in pol_rows if r["mean_abs_standardized_change"] is not None]
         measurements.update({"kind": "backscatter_change", "change": {
             **summary, "threshold_db": threshold, "increasing_pixels": increasing, "decreasing_pixels": decreasing,
             "threshold_exceedance_pct": float((increasing + decreasing) / common.sum() * 100),
             "increasing_km2": float(increasing * km2) if km2 else None, "decreasing_km2": float(decreasing * km2) if km2 else None,
             "threshold_interpretation": "Descriptive magnitude threshold; not a calibrated significance test or event classification.",
-            **surface, "hotspots": _hotspots(delta, transforms[0], metadata[0]["crs"], metadata[0], threshold),
+            **surface, "hotspots": _hotspots(delta, transforms[0], metadata[0]["crs"], metadata[0], threshold, pol_rasters),
+            "polarizations": pol_rows,
+            "leading_polarization": max(scored, key=lambda r: r["mean_abs_standardized_change"])["polarization"] if len(scored) > 1 else None,
+            "standardized_change_method": f"Per-pixel change divided by the speckle standard deviation of a two-date difference, from each date's estimated ENL "
+                                         f"(mean²/variance in the most homogeneous {ENL_WINDOW}×{ENL_WINDOW} windows). Compared across polarizations by mean absolute value.",
             "hotspot_method": f"Connected patches of at least {HOTSPOT_MIN_PIXELS} pixels whose 3×3-averaged change is at least {threshold:g} dB in one direction; largest first.",
         }})
         layers.append(_export(delta, transforms[0], metadata[0]["crs"], out, "change", "Backscatter change · later minus earlier", True))
+        if len(pol_rows) > 1:
+            limitations.append("Standardized change scales by speckle only. It ignores calibration error, geometry and moisture differences, so it ranks polarizations for this area but is not a significance test.")
         limitations.append("Change thresholds are descriptive. No statistical significance, flood extent, vegetation loss, displacement, or causal attribution is inferred.")
         limitations.append(f"Low-return area (below {LOW_RETURN_DB:g} dB after a 3×3 average) is a descriptive proxy: calm open water usually falls below it, "
                            "but so can smooth pavement, dry sand and radar shadow, while wind-roughened water and flooded vegetation may not.")
@@ -554,7 +632,7 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
     provenance = {
         "method": METHOD_VERSION, "formula": "gamma0_db = 10 * log10(gamma0_power); change_db = later_db - earlier_db",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "parameters": {"bbox": bbox, "frequency": frequency, "polarization": metadata[0]["selected_polarization"], "threshold_db": threshold, "speckle_filter": "none", "maximum_native_pixels": MAX_PIXELS},
+        "parameters": {"bbox": bbox, "frequency": frequency, "polarization": metadata[0]["selected_polarization"], "polarizations_analyzed": [r["polarization"] for r in measurements.get("change", {}).get("polarizations", [])], "threshold_db": threshold, "speckle_filter": "none", "maximum_native_pixels": MAX_PIXELS},
         "inputs": [{"filename": p.name, "sha256": _hash(p), "metadata": m, "window": w, "catalog": e.get("observation", {}),
                     "sidecar_sha256": _hash(Path(str(p) + ".provenance.json")) if m["derivative"] else None} for p, m, w, e in zip(paths, metadata, windows, inputs)],
         "software": {"numpy": np.__version__, "rasterio": rasterio.__version__, "h5py": h5py.__version__},
