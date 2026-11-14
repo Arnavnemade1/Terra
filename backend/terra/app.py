@@ -26,6 +26,7 @@ from .workflows import InvestigationWorkflow
 from . import connector
 from .gateway import router as connector_router
 from .google_tiles import api_key as google_tiles_key, router as google_tiles_router
+from .fleet.api import router as fleet_router
 
 
 def validate_bbox(values: list[float], bounded: bool = False) -> list[float]:
@@ -88,6 +89,7 @@ app = FastAPI(title="TERRA Investigation API", version="0.1.0", lifespan=lifespa
               docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
 app.include_router(google_tiles_router)
 app.include_router(connector_router)
+app.include_router(fleet_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", *filter(None, os.getenv("TERRA_ALLOWED_HOSTS", "").split(","))])
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]
 allowed_origins.extend(filter(None, os.getenv("TERRA_ALLOWED_ORIGINS", "").split(",")))
@@ -329,6 +331,23 @@ async def terrain_features(bbox: str = Query(...)):
     if region[2] - region[0] > 2 or region[3] - region[1] > 2:
         raise HTTPException(422, "Terrain detail is available for areas up to 2 degrees across.")
     return await terrain_context(region)
+
+
+@app.get("/api/thermal")
+async def surface_temperature(bbox: str = Query(...)):
+    """Measured land-surface temperature (Landsat band 10) for the drone cameras' IR mode."""
+    from .connector import ConnectorError
+    from .thermal import thermal
+    try:
+        region = validate_bbox([float(v) for v in bbox.split(",")], bounded=True)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    if region[2] - region[0] > 1 or region[3] - region[1] > 1:
+        raise HTTPException(422, "Thermal scenes are read for areas up to 1 degree across.")
+    try:
+        return await thermal(region)
+    except (ConnectorError, TimeoutError) as exc:
+        return {"available": False, "reason": f"Thermal imagery is unavailable right now ({exc}).", "bounds": region}
 
 
 @app.get("/api/conditions")
