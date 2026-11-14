@@ -1,0 +1,344 @@
+"""Fleet API: the ground-station protocol (bearer token) and the workspace's view and controls (same origin).
+
+Ground station → Terra (Authorization: Bearer $TERRA_DRONE_TOKEN):
+  POST /api/fleet/register             who the aircraft is and what it can do
+  POST /api/fleet/telemetry            position, height, speed, battery, link, gimbal; numbered (seq) so late or
+                                       repeated messages are ignored. The reply carries the current task, any manual
+                                       setpoint (virtual aircraft only) and the monitoring area.
+  POST /api/fleet/tasks/{id}/ack       task lifecycle: acknowledged → active → completed | failed | rejected
+  GET  /api/fleet/area                 the monitoring area and launch site
+
+Workspace → Terra:
+  GET  /api/fleet                      drones, tracks, tasks, airspace, targets, jobs, agents, messages
+  POST /api/fleet/area                 the monitoring area and its targets (starts the coordinator)
+  POST /api/fleet/tasks                a person's task for one aircraft (held for 15 minutes or until it ends)
+  POST /api/fleet/drones/{id}/control  manual flight setpoints for a virtual aircraft (never a real one)
+  POST /api/fleet/drones/{id}/release  hand a manually flown aircraft back to the coordinator
+  GET  /api/fleet/operations           reserved airspace as operational intents (ASTM F3548-shaped)
+"""
+from __future__ import annotations
+
+import asyncio
+import hmac
+import logging
+import os
+import re
+import time
+from datetime import datetime, timezone
+from typing import Literal
+from urllib.parse import urlsplit
+
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+from .db import fleet_db
+from .workflows import COORDINATOR_ID
+
+router = APIRouter(prefix="/api/fleet")
+ID = r"^[A-Za-z0-9_-]{1,32}$"
+log = logging.getLogger(__name__)
+_coordinator = {"checked": 0.0, "ok": False}
+_client: dict = {"value": None}
+
+
+class Capabilities(BaseModel):
+    sensors: list[Literal["eo", "ir", "lidar", "multispectral", "gas", "sar"]] = Field(default_factory=lambda: ["eo"], max_length=6)
+    relay: bool = False
+    cruise_mps: float = Field(default=10, gt=0, le=80)
+    max_mps: float = Field(default=18, gt=0, le=120)
+    endurance_min: float = Field(default=30, gt=1, le=1440)
+    protocol: Literal["mavlink", "terra-sim", "dji-cloud", "other"] = "other"
+    # The kinds of task this aircraft's ground station can carry out (a MAVLink bridge cannot fly survey routes itself).
+    tasks: list[Literal["orbit", "survey", "perimeter", "relay", "hold", "standby", "return"]] = Field(
+        default_factory=lambda: ["orbit", "survey", "perimeter", "relay", "hold", "standby", "return"], max_length=7)
+    autopilot: str | None = Field(default=None, max_length=40)
+
+
+class Register(BaseModel):
+    id: str = Field(pattern=ID)
+    name: str = Field(min_length=1, max_length=40)
+    origin: Literal["real", "virtual"] = "real"
+    aircraft: Literal["quad", "fixed-wing", "vtol", "other"] = "quad"
+    capabilities: Capabilities = Field(default_factory=Capabilities)
+
+
+class Gimbal(BaseModel):
+    heading_deg: float = Field(ge=0, le=360)
+    pitch_deg: float = Field(ge=-90, le=30)
+
+
+class Telemetry(BaseModel):
+    id: str = Field(pattern=ID)
+    seq: int = Field(ge=0)
+    lon: float = Field(ge=-180, le=180)
+    lat: float = Field(ge=-90, le=90)
+    alt_m: float = Field(ge=-500, le=12_000, description="Above mean sea level")
+    agl_m: float | None = Field(default=None, ge=-100, le=10_000)
+    heading_deg: float = Field(default=0, ge=0, le=360)
+    speed_mps: float = Field(default=0, ge=0, le=150)
+    battery_pct: float | None = Field(default=None, ge=0, le=100)
+    link_dbm: float | None = Field(default=None, ge=-150, le=0)
+    mode: str | None = Field(default=None, max_length=32)
+    landed: bool = False
+    gimbal: Gimbal | None = None
+    video_url: str | None = Field(default=None, max_length=500)
+
+    @field_validator("video_url")
+    @classmethod
+    def http_only(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
+            raise ValueError("Video must be an http(s) URL without credentials.")
+        return value
+
+
+class Ack(BaseModel):
+    id: str = Field(pattern=ID)
+    status: Literal["acknowledged", "active", "completed", "failed", "rejected"]
+    detail: str | None = Field(default=None, max_length=200)
+
+
+class Target(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,48}$")
+    kind: Literal["change", "summit", "hazard", "point"] = "point"
+    label: str = Field(min_length=1, max_length=60)
+    lon: float = Field(ge=-180, le=180)
+    lat: float = Field(ge=-90, le=90)
+    radius_m: float = Field(default=300, ge=20, le=20_000)
+    priority: float = Field(default=0.5, ge=0, le=1)
+    needs: list[Literal["eo", "ir", "lidar", "multispectral", "gas", "sar", "relay"]] = Field(default_factory=list, max_length=4)
+
+
+class Area(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    bbox: list[float] = Field(min_length=4, max_length=4)
+    targets: list[Target] = Field(default_factory=list, max_length=12)
+
+    @field_validator("bbox")
+    @classmethod
+    def small_box(cls, v: list[float]) -> list[float]:
+        w, s, e, n = v
+        if not (-180 <= w < e <= 180 and -90 <= s < n <= 90 and e - w <= 2 and n - s <= 2):
+            raise ValueError("Use an area up to 2 degrees across.")
+        return v
+
+
+class OperatorTask(BaseModel):
+    drone_id: str = Field(pattern=ID)
+    kind: Literal["orbit", "survey", "perimeter", "relay", "hold", "return"]
+    label: str = Field(default="", max_length=60)
+    lon: float | None = Field(default=None, ge=-180, le=180)
+    lat: float | None = Field(default=None, ge=-90, le=90)
+    radius_m: float = Field(default=250, ge=20, le=5000)
+    agl_m: float = Field(default=150, ge=20, le=1000)
+    bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+
+
+class Setpoint(BaseModel):
+    lon: float = Field(ge=-180, le=180)
+    lat: float = Field(ge=-90, le=90)
+    agl_m: float = Field(ge=10, le=1200)
+    heading_deg: float = Field(ge=0, le=360)
+    gimbal_pitch_deg: float = Field(default=-35, ge=-90, le=20)
+
+
+def _token(authorization: str | None) -> None:
+    expected = os.getenv("TERRA_DRONE_TOKEN", "")
+    if not expected:
+        raise HTTPException(403, "Drone connections are off. Set TERRA_DRONE_TOKEN on the server to accept them.")
+    supplied = (authorization or "").removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(401, "The drone token is missing or wrong.")
+
+
+async def _db(fn, *args):
+    return await asyncio.to_thread(fn, *args)
+
+
+async def ensure_coordinator(reason: str) -> bool:
+    """Start the durable coordinator if it is not running, then nudge it. False when Temporal is unreachable."""
+    try:
+        from temporalio.client import Client
+        from temporalio.common import WorkflowIDConflictPolicy
+        from ..config import get_settings
+        settings = get_settings()
+        client = _client["value"] or await asyncio.wait_for(Client.connect(settings.temporal_address, namespace=settings.temporal_namespace), timeout=2.5)
+        _client["value"] = client
+        handle = await client.start_workflow("FleetCoordinatorWorkflow", 0, id=COORDINATOR_ID, task_queue=settings.task_queue,
+                                             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING)
+        await handle.signal("nudge", reason)
+        _coordinator.update(checked=time.time(), ok=True)
+        return True
+    except Exception as exc:  # the workspace shows the coordinator as offline; data is kept and used when it starts
+        log.warning("Fleet coordinator unavailable: %s", exc.__class__.__name__)
+        _client["value"] = None
+        _coordinator.update(checked=time.time(), ok=False)
+        return False
+
+
+def _task_view(task: dict | None) -> dict | None:
+    if not task:
+        return None
+    return {k: task[k] for k in ("id", "kind", "label", "params", "status", "created_by", "reason", "created_at", "updated_at", "acked_at")}
+
+
+# ---------------------------------------------------------------- ground stations
+@router.post("/register", status_code=201)
+async def register(body: Register, authorization: str | None = Header(default=None)):
+    _token(authorization)
+    db = fleet_db()
+    await _db(db.register, body.model_dump())
+    return {"registered": body.id, "server_time": time.time(), "area": await _db(db.area)}
+
+
+@router.post("/telemetry", status_code=202)
+async def telemetry(body: Telemetry, authorization: str | None = Header(default=None)):
+    _token(authorization)
+    db = fleet_db()
+    try:
+        accepted = await _db(db.record, body.model_dump())
+    except KeyError:
+        raise HTTPException(409, "Register this aircraft first (POST /api/fleet/register).") from None
+    task = await _db(db.current_task, body.id)
+    drones = await _db(db.drones)
+    me = next((d for d in drones if d["id"] == body.id), None)
+    control = (await _db(db.control, body.id)).get(body.id) if me and me["origin"] == "virtual" else None
+    return {"accepted": accepted, "server_time": time.time(), "task": _task_view(task), "control": control, "area": await _db(db.area)}
+
+
+@router.post("/tasks/{task_id}/ack")
+async def acknowledge(task_id: str, body: Ack, authorization: str | None = Header(default=None)):
+    _token(authorization)
+    if not re.fullmatch(r"^[a-f0-9]{12}$", task_id):
+        raise HTTPException(404, "Unknown task.")
+    db = fleet_db()
+    task = await _db(db.ack, task_id, body.id, body.status, body.detail)
+    if task is None:
+        raise HTTPException(404, "Unknown task for this aircraft.")
+    if body.status in ("completed", "failed", "rejected"):
+        asyncio.create_task(ensure_coordinator(f"{body.id} reported {body.status}"))
+    return {"task": _task_view(task)}
+
+
+@router.get("/area")
+async def area_for_ground_stations(authorization: str | None = Header(default=None)):
+    _token(authorization)
+    return {"area": await _db(fleet_db().area), "server_time": time.time()}
+
+
+# ---------------------------------------------------------------- workspace
+@router.get("")
+async def fleet_state():
+    db = fleet_db()
+    drones, tasks, operations, agents, messages, area, targets, jobs = await asyncio.gather(
+        _db(db.drones), _db(db.tasks), _db(db.operations), _db(db.agents), _db(db.messages, 60), _db(db.area), _db(db.targets), _db(db.jobs))
+    by_drone = {t["drone_id"]: t for t in tasks}
+    ops = {o["drone_id"]: o for o in operations}
+    tracks = await asyncio.gather(*[_db(db.track, d["id"], 20) for d in drones])
+    agent = {a["id"]: a for a in agents}
+    coordinator = agent.get("coordinator")
+    # Keep the coordinator alive while someone is watching an area.
+    if area and (not coordinator or coordinator["age_s"] > 20) and time.time() - _coordinator["checked"] > 15:
+        asyncio.create_task(ensure_coordinator("workspace opened"))
+    return {
+        "server_time": time.time(), "connections_enabled": bool(os.getenv("TERRA_DRONE_TOKEN")), "area": area, "targets": targets, "jobs": jobs,
+        "coordinator": {"running": bool(coordinator and coordinator["age_s"] < 15), "summary": (coordinator or {}).get("summary", {}), "age_s": (coordinator or {}).get("age_s")},
+        "drones": [{**{k: d[k] for k in ("id", "name", "origin", "aircraft", "capabilities", "age_s", "link_state", "registered_at")}, "state": d["state"],
+                    "track": tr, "task": _task_view(by_drone.get(d["id"])), "operation": ops.get(d["id"]),
+                    "agent": {k: agent[f"agent:{d['id']}"][k] for k in ("status", "age_s", "summary")} if f"agent:{d['id']}" in agent else None}
+                   for d, tr in zip(drones, tracks)],
+        "messages": messages,
+    }
+
+
+@router.post("/area")
+async def set_area(body: Area):
+    db = fleet_db()
+    area = await _db(db.set_area, body.name, body.bbox, [t.model_dump() for t in body.targets])
+    running = await ensure_coordinator("monitoring area updated")
+    return {"area": area, "coordinator": running}
+
+
+@router.post("/tasks", status_code=201)
+async def operator_task(body: OperatorTask):
+    db = fleet_db()
+    drones = await _db(db.drones)
+    drone = next((d for d in drones if d["id"] == body.drone_id), None)
+    if not drone:
+        raise HTTPException(404, "That aircraft is not connected.")
+    area = await _db(db.area)
+    launch = (area or {}).get("launch") or [drone["state"].get("lon"), drone["state"].get("lat")]
+    params: dict = {"agl_m": body.agl_m, "speed_mps": drone["capabilities"].get("cruise_mps", 10)}
+    if body.kind in ("orbit", "relay", "hold"):
+        if body.lon is None or body.lat is None:
+            raise HTTPException(422, "This task needs a position.")
+        params.update(lon=body.lon, lat=body.lat, radius_m=body.radius_m if body.kind != "hold" else 30)
+    elif body.kind in ("survey", "perimeter"):
+        box = body.bbox or (area or {}).get("bbox")
+        if not box:
+            raise HTTPException(422, "This task needs an area.")
+        w, s, e, n = box
+        if not (w < e and s < n and e - w <= 1 and n - s <= 1):
+            raise HTTPException(422, "Use an area up to 1 degree across.")
+        params.update(bbox=box, lane_m=150, inset=0.08)
+    else:
+        params.update(lon=launch[0], lat=launch[1], agl_m=min(body.agl_m, 120))
+    label = body.label or {"orbit": "Orbit", "survey": "Survey", "perimeter": "Map the perimeter", "relay": "Radio relay", "hold": "Hold", "return": "Return to launch"}[body.kind]
+    task = await _db(db.create_task, body.drone_id, body.kind, label, params, "operator", "Assigned in the workspace", 1.0, None, time.time() + 15 * 60)
+    await _db(db.message, "operator", body.drone_id, "operator-task", {"text": f"{drone['name']}: {label} (assigned by a person; held for 15 min).", "task_id": task["id"]})
+    asyncio.create_task(ensure_coordinator("operator task"))
+    return {"task": _task_view(task), "advisory": drone["origin"] == "real"}
+
+
+@router.post("/drones/{drone_id}/control")
+async def manual_control(drone_id: str, body: Setpoint):
+    if not re.fullmatch(ID, drone_id):
+        raise HTTPException(404, "Unknown aircraft.")
+    db = fleet_db()
+    drone = next((d for d in await _db(db.drones) if d["id"] == drone_id), None)
+    if not drone:
+        raise HTTPException(404, "That aircraft is not connected.")
+    if drone["origin"] != "virtual":
+        raise HTTPException(403, "Real aircraft are never flown from the browser; give them a task instead.")
+    first = not (await _db(db.control, drone_id))
+    await _db(db.set_control, drone_id, body.model_dump())
+    if first:
+        await _db(db.message, "operator", drone_id, "manual", {"text": f"{drone['name']} is being flown manually from the workspace."})
+        asyncio.create_task(ensure_coordinator("manual flight"))
+    return {"ok": True}
+
+
+@router.post("/drones/{drone_id}/release")
+async def release_control(drone_id: str):
+    if not re.fullmatch(ID, drone_id):
+        raise HTTPException(404, "Unknown aircraft.")
+    db = fleet_db()
+    await _db(db.set_control, drone_id, None)
+    await _db(db.message, "operator", drone_id, "manual-end", {"text": f"{drone_id} handed back to the coordinator."})
+    asyncio.create_task(ensure_coordinator("manual flight ended"))
+    return {"ok": True}
+
+
+@router.get("/operations")
+async def operational_intents():
+    """Reserved airspace in the shape of ASTM F3548 operational intents, for exchange with a UTM service supplier.
+    Altitudes here are above ground level; convert to WGS84 with terrain before submitting to a USS."""
+    ops = await _db(fleet_db().operations)
+    iso = lambda t: datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")  # noqa: E731
+    state = {"accepted": "Accepted", "activated": "Activated", "nonconforming": "Nonconforming"}
+    out = []
+    for o in ops:
+        g = o["geometry"]
+        outline = ({"outline_circle": {"center": {"lng": g["lon"], "lat": g["lat"]}, "radius": {"value": round(g["radius_m"], 1), "units": "M"}}}
+                   if g["type"] == "circle" else
+                   {"outline_polygon": {"vertices": [{"lng": g["bbox"][0], "lat": g["bbox"][1]}, {"lng": g["bbox"][2], "lat": g["bbox"][1]},
+                                                     {"lng": g["bbox"][2], "lat": g["bbox"][3]}, {"lng": g["bbox"][0], "lat": g["bbox"][3]}]}})
+        out.append({"reference": {"id": o["id"], "manager": "terra", "state": state.get(o["state"], "Accepted"), "time_start": {"value": iso(o["t_start"]), "format": "RFC3339"},
+                                  "time_end": {"value": iso(o["t_end"]), "format": "RFC3339"}, "aircraft": o["drone_id"]},
+                    "details": {"volumes": [{"volume": {**outline, "altitude_lower": {"value": o["alt_lower_m"], "reference": "AGL", "units": "M"},
+                                                       "altitude_upper": {"value": o["alt_upper_m"], "reference": "AGL", "units": "M"}},
+                                             "time_start": {"value": iso(o["t_start"]), "format": "RFC3339"}, "time_end": {"value": iso(o["t_end"]), "format": "RFC3339"}}],
+                                "priority": 0}})
+    return {"operational_intents": out, "note": "Altitudes are above ground level. Terra is not a certified USS; share these through one."}
