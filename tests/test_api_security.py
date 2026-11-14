@@ -48,10 +48,11 @@ def test_client_cannot_supply_upstream_credentials(client):
     assert response.status_code == 422
 
 
-def test_map_proxy_forwards_only_image_bytes_and_reuses_cache(client, monkeypatch):
+def test_map_proxy_forwards_only_image_bytes_and_reuses_cache(client, monkeypatch, tmp_path):
     from terra import gateway
-    gateway._cache.clear()
-    gateway._cache_bytes = 0
+    gateway._memory.clear()
+    gateway._memory_bytes = 0
+    monkeypatch.setattr(gateway, "_directory", lambda: tmp_path / "tiles")
     calls = []
     async def fake_request(provider, method, url, **kwargs):
         calls.append((provider, method, url))
