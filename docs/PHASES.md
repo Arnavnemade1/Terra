@@ -182,6 +182,76 @@ hazards and satellites:
   map controls reduced to style and full screen; timeline ticks thinned by pixel spacing; one-column report; sensor view fits.
 - Removed every infinite pulse and blink (running-step dots, the sensor "rec" dot).
 
+## Phase 4f — Drones, camera feeds and real-drone connections (2026-11-14)
+- **Timeline and charts** are a drawer (closed by default, **T** or the "Timeline" button) so the globe is unobstructed.
+- **Drones workspace**: five simulated aircraft fly over different parts of the area, chosen from the investigation: a fixed-wing
+  maps the perimeter; two quadcopters orbit the largest changed patches (or the highest summits / sectors); one flies a lawnmower
+  survey; one relays and overwatches the centre. Orbits are sized so the camera looks down at about 40°. Flight heights follow the
+  ground (terrain sampled once along each route, smoothed with a moving maximum so aircraft never dip into ridges). Quads pitch with
+  speed and fixed wings bank into turns (coordinated-turn roll). Everything simulated is labelled SIM.
+- **Map**: low-poly glTF aircraft built in code (unlit, baked shading, nav lights, translucent rotor discs), label tags with call sign,
+  height and SIM/LIVE, a line to the ground, the selected aircraft's line of sight and its route.
+- **Fleet panel**: list (mission, status, height, battery), detail card (altitude, ground speed, heading, battery and endurance, link,
+  flight time; aircraft, mission, task, sensor, position, gimbal), **Full camera view** / **Camera**, and **Assign a task**
+  (orbit a patch or summit, survey, perimeter, overwatch, hold, return).
+- **Camera** (per aircraft): a second globe rendered from the aircraft's position and gimbal (relief world with trees, or imagery),
+  with the heads-up display: REC clock, call sign, sensor, UTC time, mission, heading tape, gimbal scale, ALT ft AGL, GS kt, HDG,
+  SPI in degrees and decimal minutes, range, ground elevation, BAT, LNK dBm, zoom and field of view. Drag slews the gimbal, the wheel
+  zooms. **IR** drapes measured land-surface temperature (Landsat 8/9 band 10, the most recent mostly cloud-free scene, clouds
+  masked) in Ironbow, White-hot or Black-hot, and reads the temperature at the crosshair. **Δ** drapes the radar change.
+  **Fly** takes manual control of a simulated aircraft (W/S, A/D, Q/E, R/F, arrows for the gimbal, Shift for speed, Esc to hand
+  back; it eases back onto its route).
+- **Real drones**: `TERRA_DRONE_TOKEN` on the server enables `/api/drones/telemetry` (bearer token) and task polling;
+  `scripts/drone_bridge.py` connects a MAVLink autopilot (PX4/ArduPilot via pymavlink) or simulates connected aircraft.
+  Tasks are advisory; orbit, hold and return are forwarded to the autopilot only with `--allow-commands`; the pilot in command
+  can always override. A ground station can share an MJPEG/snapshot URL, shown in the camera as live video.
+- Cesium details: a second globe can receive undefined eye-space positions in globe materials unless globe lighting is on (the
+  relief's fixed light makes that harmless); its atmosphere must not follow the real sun or a night-time camera renders black.
+
+## Phase 4g — Fleet coordination: one central database, durable agents, real aircraft (2026-11-14)
+**Architecture.** Every aircraft, real or virtual, talks to Terra through one protocol; every report, task, airspace
+reservation, bid and message is a row in the central fleet database (SQLite in WAL mode, the same file as investigations,
+shared by the API and the worker). Durable agents (Temporal workflows) coordinate only through that database and signals.
+
+    ground station (MAVLink bridge, or the virtual fleet) ──HTTPS + bearer token──▶ /api/fleet ──▶ central database
+    FleetCoordinatorWorkflow ─┬─ coordination_round activity ──▶ central database (jobs, tasks, airspace, messages)
+    DroneAgentWorkflow × N  ──┴─ drone_agent_round activity  ──▶ central database (bids, health, conformance, messages)
+    workspace (browser) ──same origin──▶ /api/fleet (state once a second; areas, people's tasks, manual setpoints)
+
+- **Protocol** (`backend/terra/fleet/api.py`): register (identity, sensors, relay radio, speeds, endurance, autopilot);
+  telemetry twice a second with a sequence number (late or repeated messages are ignored; re-registering starts a new
+  session); the reply carries the current task, any manual setpoint and the area; task acknowledgements move only forward
+  (assigned → acknowledged → active → completed / failed / rejected).
+- **Coordinator** (one durable workflow, every 4 s or at once when signalled): turns monitoring targets (changed patches,
+  summits; volcanoes need an IR sensor) into jobs (orbits, a survey, perimeter mapping, a relay when anyone is beyond radio
+  range or reports a weak link); assigns aircraft by an exhaustive search that maximises the priority covered, then minimises
+  cost, so scarce capabilities (a relay radio) go where only they can help; keeps current holders unless a bid is clearly
+  better; sends aircraft home before their battery falls below what they need to return plus a 15 % reserve and hands their
+  job to another; reopens jobs whose real aircraft did not acknowledge within 30 s; respects people's tasks (15 minutes)
+  and manual flight; starts an agent for every aircraft without a live one. Each task reserves an operation volume (area,
+  altitude band above ground, time window), and overlapping volumes get altitude layers at least 40 m apart, after the
+  strategic-deconfliction idea in NASA's UAS Traffic Management research.
+- **Drone agents** (one durable workflow per aircraft, every 3 s): bid on every job from the aircraft's own position, battery,
+  speed and sensors (and say whether it could do the job and still get home with the reserve); report lost or late telemetry,
+  low battery, weak links, leaving the reserved airspace, and the nearest traffic inside 60 m / 25 m (departures near the
+  launch site excepted); mark targets observed; signal the coordinator when something needs a decision now; retire after ten
+  minutes of silence. Messages are posted only when something changes.
+- **Real aircraft**: `scripts/drone_bridge.py --mavlink …` (PX4 or ArduPilot via pymavlink) registers the aircraft, relays
+  position, battery, terrain height and gimbal attitude, and acknowledges tasks. Tasks are advisory: orbit
+  (MAV_CMD_DO_ORBIT), hold and relay (MAV_CMD_DO_REPOSITION) and return (MAV_CMD_NAV_RETURN_TO_LAUNCH) reach the autopilot
+  only with `--allow-commands`, survey and perimeter are rejected with a note to plan them in the ground-control software,
+  and the pilot in command can always override. Real aircraft are never flown from the browser.
+- **Virtual fleet** (`--virtual 5`, started by the dev stack when `TERRA_DRONE_TOKEN` is set): a fixed-wing mapper and four
+  quadcopters (IR, lidar, relay radio) that fly their tasks with turn, climb and acceleration limits, drain and swap batteries,
+  launch one at a time from separate departure heights, and acknowledge tasks exactly like a real ground station.
+- **Interoperability**: reserved airspace is published as ASTM F3548-shaped operational intents at `/api/fleet/operations`
+  (altitudes above ground; Terra is not a certified UTM service supplier). DJI aircraft would need an adapter for DJI's Cloud
+  API, which requires DJI developer credentials; the protocol has a slot for it but no adapter yet.
+- **Workspace**: the fleet is rendered from telemetry 1.2 s in the past with interpolation; reserved airspace is drawn as
+  translucent volumes; the panel shows the coordinator's round, each task's lifecycle and reason, the airspace band, the
+  agent's status, and the shared coordination log. Manual flight of a virtual aircraft is predicted locally and streamed to
+  the server as setpoints.
+
 ## Phase 5 — Advanced science (§18–21)
 - Physics‑aware checks: speckle filtering, incidence angle and terrain normalization, statistical significance
 - Multisensor fusion (Sentinel‑1, Sentinel‑2, precipitation via GIBS/CMR)
