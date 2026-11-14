@@ -184,10 +184,11 @@ class FleetDB:
             db.execute("COMMIT")
         return True
 
-    def drones(self) -> list[dict]:
+    def drones(self, retire_after_s: float = 15 * 60) -> list[dict]:
+        """Aircraft in the fleet. One silent for 15 minutes has left it (its record stays; registering again rejoins)."""
         t = now()
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM fleet_drones ORDER BY id").fetchall()
+            rows = db.execute("SELECT * FROM fleet_drones WHERE last_seen IS NULL OR last_seen > ? OR registered_at > ? ORDER BY id", (t - retire_after_s, t - retire_after_s)).fetchall()
         out = []
         for r in rows:
             age = t - r["last_seen"] if r["last_seen"] else None
