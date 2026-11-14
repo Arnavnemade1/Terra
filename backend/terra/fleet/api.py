@@ -45,7 +45,8 @@ from .db import fleet_db
 from .workflows import COORDINATOR_ID
 
 router = APIRouter(prefix="/api/fleet")
-LOCAL = {"127.0.0.1", "::1", "localhost", "testclient"}  # testclient: FastAPI's in-process test transport
+LOCAL = {"127.0.0.1", "::1", "localhost", "testclient"}
+_refused: set[tuple] = set()  # testclient: FastAPI's in-process test transport
 ID = r"^[A-Za-z0-9_-]{1,32}$"
 log = logging.getLogger(__name__)
 _coordinator = {"checked": 0.0, "ok": False}
@@ -200,8 +201,22 @@ def operator(request: Request, authorization: str | None = Header(default=None))
     if (request.client.host if request.client else "") not in LOCAL:
         raise HTTPException(403, "From another machine, fleet controls need the drone token (Authorization: Bearer).")
     origin = request.headers.get("origin")
-    if request.headers.get("sec-fetch-site") != "same-origin" or (origin and origin != f"{request.url.scheme}://{request.url.netloc}"):
+    site = request.headers.get("sec-fetch-site")
+    if site != "same-origin" or (origin and not _workspace_origin(origin, request)):
+        reason = (site, origin, request.headers.get("user-agent", "")[:60])
+        if reason not in _refused:  # one log line per kind of caller, so a misconfigured page is easy to spot
+            _refused.add(reason); log.warning("fleet control refused: sec-fetch-site=%s origin=%s agent=%s", *reason)
         raise HTTPException(403, "Fleet controls answer the Terra workspace (same-origin browser requests) or callers with the drone token.")
+
+
+def _workspace_origin(origin: str, request: Request) -> bool:
+    """A page served from this machine. The dev server's proxy rewrites Host to the API's own address, so the
+    page's origin (for example http://127.0.0.1:5173) is compared with loopback names, not with Host."""
+    if origin == f"{request.url.scheme}://{request.url.netloc}" or origin in filter(None, os.getenv("TERRA_ALLOWED_ORIGINS", "").split(",")):
+        return True
+    parts = urlsplit(origin)
+    host = parts.hostname or ""
+    return parts.scheme in ("http", "https") and (host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost"))
 
 
 async def _db(fn, *args):

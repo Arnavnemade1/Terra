@@ -364,3 +364,12 @@ def test_old_telemetry_is_pruned_whatever_the_sequence_numbers(client, tmp_path,
         _fly(client, "d1", seq); clock["t"] += fleet_db_module.TELEMETRY_KEEP_S + 120
     _fly(client, "d1", 11)
     assert len(FleetDB(tmp_path / "terra.db").track("d1", 10**9)) == 1
+
+
+def test_the_workspace_behind_the_dev_proxy_is_accepted(client):
+    # Vite's proxy rewrites Host to the API (127.0.0.1:8010) while the browser sends the page's own Origin.
+    proxied = TestClient(api.app, base_url="http://127.0.0.1:8010", headers={"sec-fetch-site": "same-origin"})
+    for page in ("http://127.0.0.1:5173", "http://localhost:5173"):
+        assert proxied.get("/api/fleet", headers={"origin": page}).status_code == 200, page
+        assert proxied.post("/api/fleet/area", json=AREA, headers={"origin": page}).status_code == 200, page
+    assert proxied.get("/api/fleet", headers={"origin": "http://evil.example:5173"}).status_code == 403
