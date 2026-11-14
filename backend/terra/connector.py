@@ -42,13 +42,15 @@ PROVIDERS: dict[str, tuple[str, ...]] = {
     "google": ("tile.googleapis.com",),
     "planetary": ("planetarycomputer.microsoft.com",),
     "landsat": ("landsateuwest.blob.core.windows.net",),
+    "jrc": ("global-surface-water.storage.googleapis.com",),
 }
 LABELS = {"openai": "Language model", "asf": "NASA/ASF catalog", "earthdata": "NASA Earthdata",
           "celestrak": "CelesTrak", "tle": "TLE mirror", "usgs": "USGS", "eonet": "NASA EONET", "firms": "NASA FIRMS",
           "gdacs": "GDACS alerts", "geocode": "Place search", "stac": "Optical catalog", "sentinel": "Sentinel imagery",
           "imagery": "World imagery", "terrain": "Terrain", "gibs": "NASA imagery", "openmeteo": "Weather and elevation models",
           "worldcover": "ESA WorldCover land cover", "wikidata": "Wikidata named places",
-          "google": "Google Map Tiles", "planetary": "Microsoft Planetary Computer", "landsat": "Landsat thermal imagery"}
+          "google": "Google Map Tiles", "planetary": "Microsoft Planetary Computer", "landsat": "Landsat thermal imagery",
+          "jrc": "JRC Global Surface Water"}
 _pools: WeakKeyDictionary = WeakKeyDictionary()
 _sync_pool: httpx.Client | None = None
 _sync_lock = threading.Lock()

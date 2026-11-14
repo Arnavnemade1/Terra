@@ -28,6 +28,7 @@ METHOD_VERSION = "terra-gcov-1.0.0"
 DIAGONALS = ("HHHH", "HVHV", "VVVV", "VHVH", "RHRH", "RVRV")
 MAX_PIXELS = 2048 * 2048
 NODATA = -9999.0
+NEWLY_WATER_MASK = "newly-low-return-mask.tif"
 
 
 class ScienceError(ValueError):
@@ -481,6 +482,14 @@ def _polarization_change(paths: list[Path], metas: list[dict], bbox: list[float]
     return rows, rasters
 
 
+def _write_mask(mask: np.ndarray, transform: Affine, crs: str, path: Path) -> None:
+    """Pixels that became low-return, on the analysis grid (1 = yes), so later context can be read on the same pixels."""
+    with rasterio.open(path, "w", driver="GTiff", width=mask.shape[1], height=mask.shape[0], count=1, dtype="uint8",
+                       crs=crs, transform=transform, compress="deflate") as ds:
+        ds.write(mask.astype(np.uint8), 1)
+        ds.update_tags(method=METHOD_VERSION, description="1 where the pixel became low-return between the two dates")
+
+
 def _colors(values: np.ndarray, low: float, high: float, diverging: bool) -> np.ndarray:
     # Fixed, documented colors. Scientific values remain unchanged in the COG.
     palette = np.array([[45, 97, 165], [116, 173, 209], [242, 242, 232], [233, 150, 90], [180, 66, 55]] if diverging else
@@ -602,6 +611,8 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
         dark = [np.nan_to_num(_smoothed_db(a), nan=0.0) < LOW_RETURN_DB for a in arrays]
         low_before, low_after = int((common & dark[0]).sum()), int((common & dark[1]).sum())
         became, ceased = int((common & ~dark[0] & dark[1]).sum()), int((common & dark[0] & ~dark[1]).sum())
+        if became:
+            _write_mask(common & ~dark[0] & dark[1], transforms[0], metadata[0]["crs"], out / NEWLY_WATER_MASK)
         surface = {"low_return_threshold_db": LOW_RETURN_DB,
                    "low_return_before_pct": float(low_before / common.sum() * 100), "low_return_after_pct": float(low_after / common.sum() * 100),
                    "low_return_before_km2": float(low_before * km2) if km2 else None, "low_return_after_km2": float(low_after * km2) if km2 else None,

@@ -359,6 +359,8 @@ Rules:
 - When change.polarizations lists more than one polarization, say which one shows the change more clearly (derived.leading_polarization), citing each
   polarization's mean_abs_standardized_change (change in speckle standard deviations) or a hotspot's by_polarization values. These scale by speckle only.
   A polarization with null standardized values could not be scaled; do not rank it.
+- water_context (when status is "available") splits the newly water-like area by how often JRC mapped it as water from 1984 to 2021: permanent, seasonal, or never.
+  Cite the split for water or flood questions; water-like returns where it was never mapped are the stronger new-wetting signal. It is history, not proof of flooding.
 - Low-return area is a proxy, not a water map: call it "water-like" or "very low return" and never "flooded area".
 - surface_conditions are modelled weather at the radar acquisition dates, at one grid point near the area's centre, not ground measurements.
   If relevant, report the dated precipitation or soil moisture as a possible confounder, never as a proven cause of radar change.
@@ -507,6 +509,7 @@ def _evidence(investigation: dict, context: dict | None) -> dict:
             "observation_count": len(inputs), "derived": derived, "capability_boundary": investigation_scope(investigation.get("question") or ""),
             "plan": {k: (investigation.get("plan") or {}).get(k) for k in ("interpretation", "can_answer", "cannot_answer", "selection")},
             "nearby_context": context or {}, "surface_conditions": result.get("surface_conditions") or investigation.get("surface_conditions") or {},
+            "water_context": result.get("water_context") or investigation.get("water_context"),
             "context_timing_note": "Recent event feeds may be months apart from the radar acquisitions. Spatial proximity alone is not temporal coincidence or causal evidence."}
 
 
@@ -535,7 +538,7 @@ async def write_answer(investigation: dict, context: dict | None) -> dict:
 
 def _verification_evidence(evidence: dict) -> dict:
     # A user's question, an earlier model answer, or a plan is not evidence.
-    verified = {k: evidence[k] for k in ("measurements", "inputs", "observation_count", "derived", "nearby_context") if k in evidence}
+    verified = {k: evidence[k] for k in ("measurements", "inputs", "observation_count", "derived", "nearby_context", "water_context") if k in evidence}
     conditions = evidence.get("surface_conditions") or {}
     # Source prose/URLs are provenance, not a pool of numbers for the writer.
     if conditions:
@@ -589,6 +592,11 @@ def measured_answer(investigation: dict, context: dict | None = None) -> dict:
             answer += (f"\n\nThe largest changed patch is {area}{where}, {word} by {abs(top['mean_change_db']):.1f} dB on average; "
                        f"{len(spots)} patches are listed in the report.")
             bullets.append(f"Largest patch: {area}{where}, mean change {top['mean_change_db']:.1f} dB.")
+        water = evidence.get("water_context") or {}
+        if water.get("status") == "available" and water["mapped_pixels"]:
+            parts = [f"{water[k]['pct_of_mapped']:.1f}% {label}" for k, label in (("permanent", "permanent water"), ("seasonal", "seasonal water"), ("never", "never mapped as water"))
+                     if water[k].get("pct_of_mapped") is not None]
+            bullets.append("Newly water-like area by JRC water history (1984-2021): " + ", ".join(parts) + ".")
         scored = [r for r in change.get("polarizations") or [] if r.get("mean_abs_standardized_change") is not None]
         if change.get("leading_polarization") and len(scored) > 1:
             bullets.append("Change in speckle standard deviations (mean absolute): " + ", ".join(f"{r['polarization']} {r['mean_abs_standardized_change']:.1f}" for r in scored)
