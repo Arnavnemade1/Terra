@@ -35,6 +35,7 @@ export const Swatch = {
   trees: () => <svg viewBox="0 0 30 30"><rect width="30" height="30" fill="#1c1d19" /><path d="M9 6 L14 20 H4 Z" fill="#5b6b3c" /><path d="M20 9 L25 23 H15 Z" fill="#4a5832" /><ellipse cx="12" cy="24" rx="3" ry="2" fill="#77713f" /></svg>,
   peak: () => <svg viewBox="0 0 30 30"><rect width="30" height="30" fill="#1c1d19" /><path d="M15 8 L23 22 H7 Z" fill="#f8f4ea" stroke="#16130e" strokeWidth="1.5" strokeLinejoin="round" /></svg>,
   road: () => <svg viewBox="0 0 30 30"><rect width="30" height="30" fill="#1c1d19" /><path d="M4 26 C10 18 12 12 26 4" fill="none" stroke="#e9e3d2" strokeWidth="2" /></svg>,
+  drone: () => <svg viewBox="0 0 30 30"><rect width="30" height="30" fill="#1c1d19" /><g fill="none" stroke="#ece9df" strokeWidth="1.4"><path d="M11 11l8 8M19 11l-8 8" /><circle cx="9.5" cy="9.5" r="3" /><circle cx="20.5" cy="9.5" r="3" /><circle cx="9.5" cy="20.5" r="3" /><circle cx="20.5" cy="20.5" r="3" /></g></svg>,
   text: (t: string) => <svg viewBox="0 0 30 30"><rect width="30" height="30" fill="#1c1d19" /><text x="15" y="19" textAnchor="middle" fontSize="11" fill="#d8d4c8" fontFamily="Archivo, sans-serif">{t}</text></svg>,
 };
 
