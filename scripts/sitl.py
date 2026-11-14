@@ -37,6 +37,9 @@ BIN = SRC / "build" / "sitl" / "bin"
 RUN = HOME / "run"
 JOBS = int(os.getenv("TERRA_SITL_JOBS", "4"))  # four compiler jobs; the memory guard below is the hard limit
 MIN_FREE_MB = 1536
+# Physics steps per second. ArduPilot's default 1200 Hz costs about 16 % of a core per vehicle; 400 Hz matches the
+# copter's 400 Hz main loop (and is far above the plane's 50 Hz) and costs roughly a third of that.
+SIM_RATE_HZ = int(os.getenv("TERRA_SITL_RATE", "400"))
 
 # The fleet: one fixed-wing mapper and four multirotors, as in the virtual fleet.
 FLEET = [
@@ -200,7 +203,7 @@ def launch(spec: dict, instance: int, slot: int, site: tuple[float, float, float
     # Spread the vehicles 15 m apart on the pad, facing north.
     hlon = lon + slot * 15 / (111_320 * max(0.2, math.cos(math.radians(lat))))
     sim = [str(BIN / ("arduplane" if plane else "arducopter")), "--model", "plane" if plane else "quad", "--home", f"{lat:.7f},{hlon:.7f},{alt:.1f},0",
-           "--instance", str(instance), "--defaults", defaults, "-w", "--speedup", "1"]
+           "--instance", str(instance), "--defaults", defaults, "-w", "--speedup", "1", "--rate", str(SIM_RATE_HZ)]
     procs.append(subprocess.Popen(sim, cwd=workdir, stdout=open(workdir / "sitl.log", "w"), stderr=subprocess.STDOUT))
     time.sleep(1.5)
     bridge = [sys.executable, str(ROOT / "scripts" / "drone_bridge.py"), "--mavlink", f"tcp:127.0.0.1:{5760 + 10 * instance}", "--id", spec["id"], "--name", spec["name"],
