@@ -69,7 +69,7 @@ export class Relief {
   private labels: C.EntityCollection;
   private grid: Grid | null = null; private features: TerrainFeature[] = [];
   private active = false; private opts: ReliefOptions = { contours: true, cover: true, trees: true, features: true, roads: true };
-  private timer: ReturnType<typeof setTimeout> | undefined; private plantKey = ''; private plantHeights: number[] = []; plantings = 0;
+  private timer: ReturnType<typeof setTimeout> | undefined; private plantKey = ''; private plantHeights: number[] = []; plantings = 0; private settle: ReturnType<typeof setTimeout> | undefined;
   private sun: C.Light; private lamp: C.DirectionalLight | null = null; private lighting = false;
   private ground: C.Color; private hidden: C.ImageryLayer[] = [];
   private removers: (() => void)[] = [];
@@ -130,10 +130,10 @@ export class Relief {
     const schedule = () => this.schedule();
     this.removers.push(v.camera.moveEnd.addEventListener(schedule));
     // Re-plant when the terrain under the view has finished refining, so trees sit on the surface that is drawn.
-    this.removers.push(v.scene.globe.tileLoadProgressEvent.addEventListener((queued: number) => { if (queued === 0) { schedule(); this.declutter(); } }));
+    this.removers.push(v.scene.globe.tileLoadProgressEvent.addEventListener((queued: number) => { if (queued === 0) { schedule(); this.declutterSoon(); } }));
     this.removers.push(v.scene.preRender.addEventListener(() => this.retune()));
     this.removers.push(v.camera.changed.addEventListener(() => this.declutter()));
-    this.removers.push(v.camera.moveEnd.addEventListener(() => this.declutter()));
+    this.removers.push(v.camera.moveEnd.addEventListener(() => { this.declutter(); this.declutterSoon(); }));
     v.camera.percentageChanged = 0.02;
   }
 
@@ -185,7 +185,7 @@ export class Relief {
   }
 
   destroy() {
-    clearTimeout(this.timer); this.removers.forEach(r => r());
+    clearTimeout(this.timer); clearTimeout(this.settle); this.removers.forEach(r => r());
     if (this.v.isDestroyed()) return;
     for (const p of [this.plants, this.pending]) if (p && !p.isDestroyed()) this.v.scene.primitives.remove(p);
     this.v.scene.globe.material = undefined; this.v.scene.light = this.sun; this.v.scene.globe.baseColor = this.ground;
@@ -233,6 +233,9 @@ export class Relief {
     }
     this.declutter(); this.v.scene.requestRender();
   }
+
+  /** Ground-clamped labels settle a moment after terrain tiles arrive; check overlaps once they have. */
+  private declutterSoon() { clearTimeout(this.settle); this.settle = setTimeout(() => this.declutter(), 450); }
 
   /** Hide labels that would overlap a more important one (higher summits first, then larger towns). */
   private declutter() {
