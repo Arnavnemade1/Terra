@@ -24,7 +24,8 @@ def client(monkeypatch, tmp_path):
     async def no_temporal(reason):
         return False
     monkeypatch.setattr("terra.fleet.api.ensure_coordinator", no_temporal)
-    with TestClient(api.app, base_url="http://localhost") as instance:
+    # The workspace: a same-origin browser request from this machine.
+    with TestClient(api.app, base_url="http://localhost", headers={"sec-fetch-site": "same-origin"}) as instance:
         yield instance
 
 
@@ -312,3 +313,54 @@ def test_bridge_flies_every_task_kind_as_an_ardupilot_mission():
     assert bridge.CMD_TAKEOFF not in [i["command"] for i in airborne] and airborne[2]["p3"] >= 80
     with pytest.raises(ValueError):
         bridge.mission_items({"kind": "dance", "params": {}}, home, False, "quad")
+
+
+# ---------------------------------------------------------------- operator routes: the workspace or the token, never a guess
+OPERATOR_ROUTES = [("GET", "/api/fleet", None), ("GET", "/api/fleet/operations", None), ("POST", "/api/fleet/area", AREA),
+                   ("POST", "/api/fleet/tasks", {"drone_id": "d1", "kind": "hold", "lon": 15.0, "lat": 37.7}),
+                   ("POST", "/api/fleet/drones/d1/control", {"lon": 15.0, "lat": 37.7, "agl_m": 100, "heading_deg": 0}),
+                   ("POST", "/api/fleet/drones/d1/release", None), ("GET", "/api/fleet/enrollments", None),
+                   ("POST", "/api/fleet/enroll", {"id": "x1", "name": "x1"}), ("POST", "/api/fleet/enrollments/x1/revoke", None)]
+
+
+def test_operator_routes_need_the_workspace_or_the_token(client):
+    _register(client, "d1"); _fly(client, "d1", 1)
+    aircraft_token = client.post("/api/fleet/enroll", json={"id": "d1", "name": "d1"}).json()["token"]
+    bare = TestClient(api.app, base_url="http://localhost")  # curl, a script, or anything that is not the workspace
+    for method, path, body in OPERATOR_ROUTES:
+        call = lambda c, **kw: c.request(method, path, json=body, **kw)  # noqa: E731
+        assert call(bare).status_code == 403, path
+        assert call(bare, headers={"authorization": "Bearer wrong"}).status_code == 401, path
+        assert call(bare, headers={"authorization": f"Bearer {aircraft_token}"}).status_code == 401, path  # an aircraft's token is not an operator's
+        assert call(bare, headers={"sec-fetch-site": "same-origin", "origin": "https://evil.example"}).status_code == 403, path
+        assert call(bare, headers=AUTH).status_code < 400, path
+        assert call(client).status_code < 400, path
+
+
+def test_other_machines_need_the_token_even_with_browser_headers(client, monkeypatch):
+    monkeypatch.setattr("terra.fleet.api.LOCAL", {"127.0.0.1"})  # the test transport now counts as another machine
+    assert client.get("/api/fleet").status_code == 403
+    assert client.get("/api/fleet", headers=AUTH).status_code == 200
+
+
+def test_operator_tasks_are_checked(client):
+    _register(client, "d1"); _fly(client, "d1", 1)
+    task = lambda **kw: client.post("/api/fleet/tasks", json={"drone_id": "d1", **kw})  # noqa: E731
+    assert task(kind="survey", bbox=[1e9, 0, 1e9 + 0.5, 0.5]).status_code == 422
+    assert task(kind="survey", bbox=[15.0, 37.7, 15.1, 37.8]).status_code == 201
+    assert task(kind="search", lon=15.0, lat=37.7, size_m=900).json()["task"]["params"]["size_m"] == 900
+    assert client.post("/api/fleet/drones/nobody/release").status_code == 404
+    _register(client, "blank")  # registered, never reported a position, and no monitoring area yet
+    assert client.post("/api/fleet/tasks", json={"drone_id": "blank", "kind": "return"}).status_code == 422
+
+
+def test_old_telemetry_is_pruned_whatever_the_sequence_numbers(client, tmp_path, monkeypatch):
+    from terra.fleet import db as fleet_db_module
+    _register(client, "d1")
+    clock = {"t": 1_000_000.0}
+    monkeypatch.setattr(fleet_db_module, "now", lambda: clock["t"])
+    monkeypatch.setitem(fleet_db_module._pruned, "at", 0.0)
+    for seq in (3, 7):  # odd sequence numbers never hit a "every 200th message" rule
+        _fly(client, "d1", seq); clock["t"] += fleet_db_module.TELEMETRY_KEEP_S + 120
+    _fly(client, "d1", 11)
+    assert len(FleetDB(tmp_path / "terra.db").track("d1", 10**9)) == 1

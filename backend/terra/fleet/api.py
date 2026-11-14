@@ -10,7 +10,8 @@ Ground station → Terra (Authorization: Bearer $TERRA_DRONE_TOKEN):
   The bearer token is either the server's TERRA_DRONE_TOKEN or a per-aircraft token from enrollment (which only
   works for the aircraft id it was issued to and can be revoked).
 
-Workspace → Terra:
+Workspace → Terra (same-origin browser requests from this machine, or anyone with TERRA_DRONE_TOKEN; requests from
+another machine always need the token, and an aircraft's own token never grants these):
   GET  /api/fleet                      drones, tracks, tasks, airspace, targets, jobs, agents, messages
   POST /api/fleet/area                 the monitoring area and its targets (starts the coordinator)
   POST /api/fleet/tasks                a person's task for one aircraft (held for 15 minutes or until it ends)
@@ -37,13 +38,14 @@ from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from .db import fleet_db
 from .workflows import COORDINATOR_ID
 
 router = APIRouter(prefix="/api/fleet")
+LOCAL = {"127.0.0.1", "::1", "localhost", "testclient"}  # testclient: FastAPI's in-process test transport
 ID = r"^[A-Za-z0-9_-]{1,32}$"
 log = logging.getLogger(__name__)
 _coordinator = {"checked": 0.0, "ok": False}
@@ -148,6 +150,16 @@ class OperatorTask(BaseModel):
     bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
     size_m: float = Field(default=1200, ge=200, le=4000)  # search: the side of the square searched
 
+    @field_validator("bbox")
+    @classmethod
+    def real_box(cls, v: list[float] | None) -> list[float] | None:
+        if v is None:
+            return v
+        w, s, e, n = v
+        if not (-180 <= w < e <= 180 and -90 <= s < n <= 90 and e - w <= 1 and n - s <= 1):
+            raise ValueError("Use a west, south, east, north box on Earth up to 1 degree across.")
+        return v
+
 
 class Setpoint(BaseModel):
     lon: float = Field(ge=-180, le=180)
@@ -174,6 +186,22 @@ def _token(authorization: str | None, drone_id: str | None = None) -> None:
         raise HTTPException(401, "The drone token is missing, wrong or revoked.")
     if drone_id is not None and credential["drone_id"] != drone_id:
         raise HTTPException(403, "This token was issued to a different aircraft.")
+
+
+def operator(request: Request, authorization: str | None = Header(default=None)) -> None:
+    """Fleet controls and the fleet picture: the workspace in a browser on this machine, or a caller with the server's
+    drone token. A request from another machine always needs the token (its address cannot be forged; headers can)."""
+    expected = os.getenv("TERRA_DRONE_TOKEN", "")
+    supplied = (authorization or "").removeprefix("Bearer ").strip()
+    if supplied:
+        if expected and hmac.compare_digest(supplied.encode(), expected.encode()):
+            return
+        raise HTTPException(401, "The token is wrong. Fleet controls take the server's drone token, not an aircraft's.")
+    if (request.client.host if request.client else "") not in LOCAL:
+        raise HTTPException(403, "From another machine, fleet controls need the drone token (Authorization: Bearer).")
+    origin = request.headers.get("origin")
+    if request.headers.get("sec-fetch-site") != "same-origin" or (origin and origin != f"{request.url.scheme}://{request.url.netloc}"):
+        raise HTTPException(403, "Fleet controls answer the Terra workspace (same-origin browser requests) or callers with the drone token.")
 
 
 async def _db(fn, *args):
@@ -252,7 +280,7 @@ async def area_for_ground_stations(authorization: str | None = Header(default=No
 
 
 # ---------------------------------------------------------------- workspace
-@router.get("")
+@router.get("", dependencies=[Depends(operator)])
 async def fleet_state():
     db = fleet_db()
     drones, tasks, operations, agents, messages, area, targets, jobs, notes = await asyncio.gather(
@@ -303,7 +331,7 @@ async def thermal_targets(bbox: list[float]) -> list[dict]:
              "radius_m": 250, "priority": round(0.9 - 0.1 * i, 2), "needs": ["ir"], "surface_c": spot["surface_c"]} for i, spot in enumerate(spots)]
 
 
-@router.post("/area")
+@router.post("/area", dependencies=[Depends(operator)])
 async def set_area(body: Area):
     db = fleet_db()
     targets = [t.model_dump() for t in body.targets]
@@ -316,7 +344,7 @@ async def set_area(body: Area):
     return {"area": area, "coordinator": running, "targets": len(targets)}
 
 
-@router.post("/tasks", status_code=201)
+@router.post("/tasks", status_code=201, dependencies=[Depends(operator)])
 async def operator_task(body: OperatorTask):
     db = fleet_db()
     drones = await _db(db.drones)
@@ -343,6 +371,8 @@ async def operator_task(body: OperatorTask):
             raise HTTPException(422, "A search needs a starting point (datum).")
         params.update(lon=body.lon, lat=body.lat, size_m=body.size_m, lane_m=120, agl_m=min(body.agl_m, 120), speed_mps=min(params["speed_mps"], 8))
     else:
+        if launch[0] is None or launch[1] is None:
+            raise HTTPException(422, "There is no launch site to return to yet (no monitoring area and no position from this aircraft).")
         params.update(lon=launch[0], lat=launch[1], agl_m=min(body.agl_m, 120))
     label = body.label or {"orbit": "Orbit", "survey": "Survey", "perimeter": "Map the perimeter", "search": "Search", "relay": "Radio relay", "hold": "Hold", "return": "Return to launch"}[body.kind]
     task = await _db(db.create_task, body.drone_id, body.kind, label, params, "operator", "Assigned in the workspace", 1.0, None, time.time() + 15 * 60)
@@ -351,7 +381,7 @@ async def operator_task(body: OperatorTask):
     return {"task": _task_view(task), "advisory": drone["origin"] == "real"}
 
 
-@router.post("/drones/{drone_id}/control")
+@router.post("/drones/{drone_id}/control", dependencies=[Depends(operator)])
 async def manual_control(drone_id: str, body: Setpoint):
     if not re.fullmatch(ID, drone_id):
         raise HTTPException(404, "Unknown aircraft.")
@@ -369,18 +399,20 @@ async def manual_control(drone_id: str, body: Setpoint):
     return {"ok": True}
 
 
-@router.post("/drones/{drone_id}/release")
+@router.post("/drones/{drone_id}/release", dependencies=[Depends(operator)])
 async def release_control(drone_id: str):
     if not re.fullmatch(ID, drone_id):
         raise HTTPException(404, "Unknown aircraft.")
     db = fleet_db()
+    if not any(d["id"] == drone_id for d in await _db(db.drones)):
+        raise HTTPException(404, "That aircraft is not connected.")
     await _db(db.set_control, drone_id, None)
     await _db(db.message, "operator", drone_id, "manual-end", {"text": f"{drone_id} handed back to the coordinator."})
     asyncio.create_task(ensure_coordinator("manual flight ended"))
     return {"ok": True}
 
 
-@router.get("/operations")
+@router.get("/operations", dependencies=[Depends(operator)])
 async def operational_intents():
     """Reserved airspace in the shape of ASTM F3548 operational intents, for exchange with a UTM service supplier.
     Altitudes here are above ground level; convert to WGS84 with terrain before submitting to a USS."""
@@ -414,17 +446,10 @@ class Enroll(BaseModel):
     relay: bool = False
 
 
-def _local(request: Request) -> None:
-    host = request.client.host if request.client else ""
-    if host not in ("127.0.0.1", "::1", "localhost", "testclient"):
-        raise HTTPException(403, "Aircraft can be enrolled only from the machine running Terra.")
-
-
-@router.post("/enroll", status_code=201)
+@router.post("/enroll", status_code=201, dependencies=[Depends(operator)])
 async def enroll(body: Enroll, request: Request):
     """Issue a token for one aircraft and the command that connects its ground station. The token is shown once;
     only its SHA-256 is stored. It works only for this aircraft id and can be revoked."""
-    _local(request)
     if not os.getenv("TERRA_DRONE_TOKEN"):
         raise HTTPException(403, "Drone connections are off. Set TERRA_DRONE_TOKEN on the server to accept them.")
     token = "terra_" + secrets.token_urlsafe(32)
@@ -442,15 +467,13 @@ async def enroll(body: Enroll, request: Request):
     return {"id": body.id, "token": token, "command": command, "server": str(request.base_url).rstrip("/")}
 
 
-@router.get("/enrollments")
-async def enrollments(request: Request):
-    _local(request)
+@router.get("/enrollments", dependencies=[Depends(operator)])
+async def enrollments():
     return {"enrollments": await _db(fleet_db().credentials)}
 
 
-@router.post("/enrollments/{drone_id}/revoke")
-async def revoke(drone_id: str, request: Request):
-    _local(request)
+@router.post("/enrollments/{drone_id}/revoke", dependencies=[Depends(operator)])
+async def revoke(drone_id: str):
     if not re.fullmatch(ID, drone_id):
         raise HTTPException(404, "Unknown aircraft.")
     return {"revoked": await _db(fleet_db().revoke, drone_id)}
