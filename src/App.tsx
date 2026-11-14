@@ -130,6 +130,11 @@ export default function App() {
   const [sensor, setSensor] = useState<{ norad: number; at: number } | null>(null);
   const [selectedDrone, setSelectedDrone] = useState<string | null>(null);
   const [feed, setFeed] = useState<{ id: string; expanded: boolean } | null>(null);
+  // The drone camera is created once the Drones workspace is first opened and then kept (warm, out of sight) so
+  // opening a camera is immediate; it follows the opened aircraft, else the selected one.
+  const [cameraWarm, setCameraWarm] = useState(false);
+  const [firstDrone, setFirstDrone] = useState<string | null>(null);
+  useEffect(() => droneStore.subscribe(() => setFirstDrone(droneStore.ids()[0] ?? null)), []);
   const [dockOpen, setDockOpen] = useState<boolean>(() => readJSON('terra.dock', false));
   const [sensorBig, setSensorBig] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -379,6 +384,8 @@ export default function App() {
   const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
   useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
   const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); }, []);
+  useEffect(() => { if (mode === 'drones' || feed) setCameraWarm(true); }, [mode, feed]);
+  const cameraId = cameraWarm ? (feed?.id ?? selectedDrone ?? firstDrone) : null;
   const onDroneSight = useCallback((p: { id: string; lon: number; lat: number } | null) => globe.current?.droneSight(p), []);
   const jobId = job?.id;
   const sampleChange = useCallback(async (lon: number, lat: number) => {
@@ -661,8 +668,8 @@ export default function App() {
           eo={job && afterOptical ? { url: artifactUrl(job, afterOptical.artifact_name), bounds: afterOptical.bounds as Bounds, date: afterOptical.date } : undefined}
           sar={job && afterRadar ? { url: url(afterRadar), bounds: afterRadar.bounds, date: String(afterRadar.date) } : undefined}
           change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} />; })()}
-      {feed && <DroneFeed key={feed.id} id={feed.id} store={droneStore} terrain={terrainContext} relief={mapStyle === 'relief'} reliefOptions={reliefOptions}
-        change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={feed.expanded}
+      {cameraId && <DroneFeed id={cameraId} visible={Boolean(feed)} store={droneStore} terrain={terrainContext} relief={mapStyle === 'relief'} reliefOptions={reliefOptions}
+        change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={Boolean(feed?.expanded)}
         onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
       {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}
       {(picking || drawingProfile) && <div className="map-hint">{picking ? 'Click two opposite corners of the new area. Right-click anywhere marks a 30 km area.' : 'Click the start and end of the profile path.'}<button onClick={() => { setPicking(false); setDrawingProfile(false); }}>Cancel</button></div>}

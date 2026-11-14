@@ -3,6 +3,7 @@ import * as C from 'cesium';
 import { Crosshair, Gamepad2, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
 import { ft, kt, type DroneState, type DroneStore } from './drones';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature } from './relief';
+import { imagery, terrainUrl } from './tiles';
 import type { Bounds } from './types';
 
 export type Thermal = { png: string; bounds: Bounds; minC: number; maxC: number; date: string; source: string };
@@ -75,9 +76,9 @@ export function dm(lat: number, lon: number) {
  * and imagery, not footage; IR shows measured land-surface temperature where a thermal scene exists.
  * A real drone's own video, when its ground station provides a stream, is shown instead of the rendering.
  */
-export default function DroneFeed({ id, store, terrain, relief, reliefOptions, change, thermal, expanded, onExpand, onClose, onSight, onSample }: {
+export default function DroneFeed({ id, store, terrain, relief, reliefOptions, change, thermal, expanded, visible, onExpand, onClose, onSight, onSample }: {
   id: string; store: DroneStore; terrain: { grid: Grid | null; features: TerrainFeature[] } | null; relief: boolean; reliefOptions: ReliefOptions;
-  change?: { url: string; bounds: Bounds }; thermal?: Thermal | null; expanded: boolean; onExpand: () => void; onClose: () => void;
+  change?: { url: string; bounds: Bounds }; thermal?: Thermal | null; expanded: boolean; visible: boolean; onExpand: () => void; onClose: () => void;
   onSight: (p: { id: string; lon: number; lat: number } | null) => void; onSample?: (lon: number, lat: number) => Promise<number | null>;
 }) {
   const mount = useRef<HTMLDivElement>(null);
@@ -101,8 +102,11 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const [video, setVideo] = useState(false);
   const keys = useRef(new Set<string>());
   const live = useRef({ zoom, aim, flying }); live.current = { zoom, aim, flying };
+  const idRef = useRef(id); idRef.current = id;
 
-  // A dedicated globe for this camera.
+  // One globe for the camera, kept for the life of the workspace. A WebGL context compiles its shaders and caches
+  // its tiles once, so the camera is created as soon as the Drones workspace opens, warms up out of sight (shaders,
+  // terrain and imagery around the aircraft), and opening it or switching aircraft only re-points it.
   useEffect(() => {
     if (!mount.current) return; let disposed = false;
     const v = new C.Viewer(mount.current, {
@@ -121,12 +125,12 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     if (scene.skyAtmosphere) { scene.skyAtmosphere.show = true; scene.skyAtmosphere.saturationShift = -0.25; scene.skyAtmosphere.brightnessShift = 0.05; }
     // Sharper rendering without overloading the GPU: up to 1.5× pixels, finer terrain detail, FXAA on top of MSAA.
     v.resolutionScale = Math.min(window.devicePixelRatio, 1.5); scene.globe.maximumScreenSpaceError = 1.25; scene.postProcessStages.fxaa.enabled = true;
-    const base = v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ url: `${MAPS}/imagery/{z}/{y}/{x}`, tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
+    const base = v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...imagery('maps/imagery/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
     layers.current.base = base;
     world.current = new Relief(v, base, [base]);
     const ir = new C.PostProcessStage({ fragmentShader: IR_SHADER, uniforms: { palette: 0 } }); ir.enabled = false; scene.postProcessStages.add(ir); stage.current = ir;
     const eo = new C.PostProcessStage({ fragmentShader: EO_SHADER }); scene.postProcessStages.add(eo); eoStage.current = eo;
-    void C.ArcGISTiledElevationTerrainProvider.fromUrl('/api/connector/terrain').then(t => { if (!disposed && !v.isDestroyed()) v.terrainProvider = t; }).catch(() => {});
+    void C.ArcGISTiledElevationTerrainProvider.fromUrl(terrainUrl()).then(t => { if (!disposed && !v.isDestroyed()) v.terrainProvider = t; }).catch(() => {});
     // Manual flight reads the ground from this view, which has the finest terrain around the aircraft.
     store.feedGroundAt = (lon, lat) => { if (v.isDestroyed()) return undefined; return scene.globe.getHeight(C.Cartographic.fromDegrees(lon, lat)); };
 
@@ -136,9 +140,9 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       const now = performance.now(); const dt = Math.min(0.1, (now - last) / 1000); last = now;
       if (live.current.flying) {
         const k = keys.current; const ax = (a: string, b: string) => (k.has(a) ? 1 : 0) - (k.has(b) ? 1 : 0);
-        store.fly(id, { forward: ax('w', 's'), right: ax('d', 'a'), yaw: ax('e', 'q'), climb: ax('r', 'f'), gimbal: ax('arrowup', 'arrowdown'), boost: k.has('shift') }, dt);
+        store.fly(idRef.current, { forward: ax('w', 's'), right: ax('d', 'a'), yaw: ax('e', 'q'), climb: ax('r', 'f'), gimbal: ax('arrowup', 'arrowdown'), boost: k.has('shift') }, dt);
       }
-      const st = store.state(id); if (!st) return;
+      const st = store.state(idRef.current); if (!st) return;
       const ground = scene.globe.getHeight(C.Cartographic.fromDegrees(st.lon, st.lat));
       const height = Math.max(st.amslM, (ground ?? -1e9) + 8);
       const { aim: a, zoom: z } = live.current;
@@ -160,9 +164,25 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       }
       setMarks(out);
     };
-    const ui = setInterval(() => { setS(store.state(id)); project(); }, 120);
+    const ui = setInterval(() => { setS(store.state(idRef.current)); project(); }, 120);
     return () => { disposed = true; tick(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; stage.current = null; eoStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
-  }, [id, store]);
+  }, [store]);
+
+  // Shown: full frame rate. Parked: two frames a second at the detail the small view will show, so the tiles it
+  // needs are already loaded when it opens, for little cost while it waits.
+  useEffect(() => {
+    const v = viewer.current; if (!v) return;
+    const dpr = window.devicePixelRatio || 1;
+    v.useDefaultRenderLoop = visible;
+    v.resolutionScale = Math.min(dpr, expanded && visible ? 1.5 : 1.25);
+    v.scene.globe.maximumScreenSpaceError = expanded && visible ? 1.25 : 1.6;
+    if (visible) return;
+    const slow = setInterval(() => { if (!v.isDestroyed()) v.render(); }, 500);
+    return () => clearInterval(slow);
+  }, [visible, expanded]);
+
+  // Another aircraft: re-point the same camera.
+  useEffect(() => { setAim({ az: 0, el: 0 }); setZoom(1); setFlying(false); setMarks([]); setS(store.state(id)); }, [id, store]);
 
   // The world as styled on the main map (relief or photographic), its land cover and named places.
   useEffect(() => { world.current?.setContext(terrain?.grid ?? null, terrain?.features ?? []); }, [terrain]);
@@ -216,6 +236,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
 
   // The ground under the crosshair, its temperature and measured change; and a recording clock.
   useEffect(() => {
+    if (!visible) return;
     let alive = true; let lastKey = '';
     const read = async () => {
       const v = viewer.current; if (!v || v.isDestroyed()) return;
@@ -234,7 +255,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     };
     const a = setInterval(() => { void read(); }, 400); const b = setInterval(() => setRec(r => r + 1), 1000);
     return () => { alive = false; clearInterval(a); clearInterval(b); onSight(null); };
-  }, [id, mode, thermal, onSight, onSample]);
+  }, [id, mode, thermal, onSight, onSample, visible]);
 
   // Keyboard flight. Keys are captured only while flying, so the rest of the workspace keeps its shortcuts.
   useEffect(() => {
@@ -259,7 +280,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   };
   const onWheel = (e: React.WheelEvent) => setZoom(z => C.Math.clamp(z * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 1, 16));
 
-  if (!s) return null;
+  if (!s) return <div className="sensor drone-feed parked" aria-hidden="true"><div className="sensor-screen"><div ref={mount} className="sensor-canvas" /></div><div ref={credits} className="sensor-credits" /></div>;
   const gimbalHeading = ((s.gimbal.headingDeg + aim.az) % 360 + 360) % 360;
   const gimbalPitch = C.Math.clamp(s.gimbal.pitchDeg + aim.el, -90, 20);
   const ticks: number[] = []; for (let a = Math.floor((gimbalHeading - 40) / 5) * 5; a <= gimbalHeading + 40; a += 5) ticks.push(a);
@@ -270,7 +291,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const note = store.info.notes.find(n => n.drone_id === id);
   const recText = `${Math.floor(rec / 3600)}:${String(Math.floor(rec / 60) % 60).padStart(2, '0')}:${String(rec % 60).padStart(2, '0')}`;
 
-  return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`}>
+  return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible}>
     <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onWheel={onWheel}>
       <div ref={mount} className="sensor-canvas" />
       {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" />}

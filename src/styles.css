@@ -850,3 +850,6 @@ details.more[open] summary { margin-bottom: 8px; }
   .map-area .coord-readout { bottom: calc(var(--chrome-b, 0px) + var(--chrome-bottom, 30px) + 58px); }
   .workspace.dock-open .sidebar { padding-bottom: var(--dock-h); }
 }
+
+/* The drone camera, parked: kept rendering slowly out of sight so it opens warm. */
+.sensor.drone-feed.parked { position: fixed; left: -12000px; top: 0; right: auto; width: 640px; visibility: hidden; pointer-events: none; }
