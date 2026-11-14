@@ -155,6 +155,9 @@ hazards and satellites:
   track heading, slant range, off-nadir and incidence angles, look side, field of view, ground elevation at the crosshair).
   EO drapes Sentinel-2 or the basemap; SAR drapes the investigation's NISAR layer in grey or iron-bow false colour; Δ drapes the change
   layer. It is labelled SIM: it shows look geometry, not imagery the satellite took. Drag slews, wheel zooms.
+- **NISAR passes by swath, not proximity**: NISAR's L-band SAR looks left at 33–47° incidence, about 420–680 km from its ground
+  track, so its next pass is now the next pass whose swath covers the area (`swathPass`), used by the Satellites KPI, the satellite
+  card and the sensor view, which shows IN SWATH / OUTSIDE SWATH. (The closest overpass over Etna, 199 km away, would not image it.)
 - New endpoint `/api/terrain?bbox=` (cached on disk 30 days); connector providers `worldcover`, `wikidata`; tiles `hillshade`,
   `transport`, `terrain-base`.
 - Cesium detail worth knowing: a globe material whose source mentions the surface-normal input is silently dropped when the terrain
