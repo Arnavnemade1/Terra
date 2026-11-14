@@ -648,7 +648,7 @@ export default function App() {
           eo={job && afterOptical ? { url: artifactUrl(job, afterOptical.artifact_name), bounds: afterOptical.bounds as Bounds, date: afterOptical.date } : undefined}
           sar={job && afterRadar ? { url: url(afterRadar), bounds: afterRadar.bounds, date: String(afterRadar.date) } : undefined}
           change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} />; })()}
-      {feed && <DroneFeed key={feed.id} id={feed.id} store={droneStore} terrain={terrainContext} relief={style === 'relief'} reliefOptions={reliefOptions}
+      {feed && <DroneFeed key={feed.id} id={feed.id} store={droneStore} terrain={terrainContext} relief={mapStyle === 'relief'} reliefOptions={reliefOptions}
         change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={feed.expanded}
         onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
       {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}
