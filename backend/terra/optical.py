@@ -100,12 +100,13 @@ async def _search(client: httpx.AsyncClient, bbox: list[float], start: datetime,
     return response.json().get("features", [])
 
 
-def _read_cog(url: str, bands: list[int], bbox: list[float], transform: Affine, dtype, resampling: Resampling) -> np.ndarray:
+def _read_cog(url: str, bands: list[int], bbox: list[float], transform: Affine, dtype, resampling: Resampling, provider: str = "sentinel",
+              shape: tuple[int, int] | None = None) -> np.ndarray:
     """Read only the area's window, at roughly the output resolution, through the shared connector.
 
     The COG's overviews make this a few hundred kilobytes instead of warping the full 10 m band.
     """
-    shared = RangeFile("sentinel", url, block=128 * 1024, workers=16, timeout=20)
+    shared = RangeFile(provider, url, block=128 * 1024, workers=16, timeout=20)
 
     def opener(path, mode="rb"):
         # GDAL also probes sibling paths (.aux.xml, .ovr, "test"); only the COG itself exists.
@@ -140,7 +141,7 @@ def _read_cog(url: str, bands: list[int], bbox: list[float], transform: Affine, 
         out_h, out_w = max(1, int(window.height / scale)), max(1, int(window.width / scale))
         data = src.read(bands, window=window, out_shape=(len(bands), out_h, out_w), resampling=resampling)
         source_transform = src.window_transform(window) * Affine.scale(window.width / out_w, window.height / out_h)
-        destination = np.zeros((len(bands), *_shape(bbox)), dtype=dtype)
+        destination = np.zeros((len(bands), *(shape or _shape(bbox))), dtype=dtype)
         warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
         reproject(data, destination, src_transform=source_transform, src_crs=src.crs, dst_transform=transform,
                   dst_crs="EPSG:4326", src_nodata=0, dst_nodata=0, resampling=resampling)
