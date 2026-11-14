@@ -42,7 +42,8 @@ def upstream(monkeypatch, tmp_path):
     monkeypatch.setattr(connector, "_async_client", lambda: client)
     monkeypatch.setenv("TERRA_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("GOOGLE_MAPS_TILES_KEY", CANARY)
-    google_tiles._status.update(checked=0.0, value=None)
+    monkeypatch.delenv("GOOGLE_MAPS_TILES_REFERER", raising=False)
+    google_tiles._status.update(checked=0.0, value=None, referer=None)
     return seen, behaviour
 
 
@@ -129,7 +130,7 @@ def test_status_reports_availability_and_probes_once(upstream, client):
     assert client.get("/api/connector/google3d/status").json() == {"configured": True, "available": True, "reason": None}
     client.get("/api/connector/google3d/status")
     assert len(seen) == 1  # cached for ten minutes
-    google_tiles._status.update(checked=0.0, value=None)
+    google_tiles._status.update(checked=0.0, value=None, referer=None)
     behaviour["status"] = 403
     state = client.get("/api/connector/google3d/status").json()
     assert state["available"] is False and "Map Tiles API" in state["reason"]
@@ -166,3 +167,40 @@ async def test_google_key_is_stripped_on_cross_host_redirect():
     with pytest.raises(connector.ConnectorError):
         connector._redirect("google", "https://tile.googleapis.com/v1/3dtiles/root.json",
                             httpx.Response(302, headers={"location": "https://attacker.example/x"}), {"X-Goog-Api-Key": CANARY})
+
+
+def test_page_referer_is_forwarded_for_website_restricted_keys(upstream, client):
+    """A key restricted to websites is checked against the Referer (Google: API_KEY_HTTP_REFERRER_BLOCKED without it)."""
+    seen, _ = upstream
+    client.get("/api/connector/google3d/datasets/CgIYAQ/files/AJVsH2def.glb?session=CJjs2NODzvfd",
+               headers={"referer": "http://localhost:5173/?investigation=abc123def456"})
+    assert seen[-1].headers["referer"] == "http://localhost:5173/"  # page only, never the query string
+
+
+def test_status_probe_uses_the_asking_page(upstream, client):
+    seen, _ = upstream
+    client.get("/api/connector/google3d/status", headers={"referer": "http://127.0.0.1:5173/"})
+    assert seen[-1].headers["referer"] == "http://127.0.0.1:5173/"
+    client.get("/api/connector/google3d/status", headers={"referer": "https://terra.example.org/"})
+    assert len(seen) == 2  # a different page is probed again, not answered from another page's result
+
+
+def test_configured_referer_wins(upstream, client, monkeypatch):
+    seen, _ = upstream
+    monkeypatch.setenv("GOOGLE_MAPS_TILES_REFERER", "https://terra.example.org/app")
+    client.get("/api/connector/google3d/root.json", headers={"referer": "http://localhost:5173/"})
+    assert seen[-1].headers["referer"] == "https://terra.example.org/app"
+
+
+@pytest.mark.parametrize("value", ["javascript:alert(1)", "file:///etc/passwd", "http://", "http://a b/", "x" * 600])
+def test_unusable_referers_are_not_sent(upstream, client, value):
+    seen, _ = upstream
+    client.get("/api/connector/google3d/root.json", headers={"referer": value})
+    assert "referer" not in seen[-1].headers
+
+
+def test_refusal_names_the_real_causes(upstream, client):
+    _, behaviour = upstream
+    behaviour["status"] = 403
+    reason = client.get("/api/connector/google3d/status").json()["reason"]
+    assert "restricted to websites" in reason and "Map Tiles API" in reason and CANARY not in reason
