@@ -13,7 +13,7 @@ import { ACTIVE, Composer, ContextBlock, DEFAULT_QUESTION, Results, Steps, num, 
 import { Card, ConditionsGrid, HazardsPanel, KeyValues, LayersList, SatellitesPanel, Swatch, hazardColor, type LayerRowSpec, type Profile } from './Panels';
 import { EventList, Timeline, stamp, type EventItem, type Marker } from './Dock';
 import { Bars, ChartFrame, Columns, LinePlot } from './charts';
-import { predictPasses, trackSeries, useFleet, type Sat } from './fleet';
+import { crossTrack, predictPasses, swathPass, SWATH, trackSeries, useFleet, type Sat } from './fleet';
 import SensorView from './SensorView';
 import { nextApproach } from './geo';
 
@@ -337,7 +337,9 @@ export default function App() {
   const sat: Sat | null = fleet.sats.find(s => s.norad === selectedSat) || null;
   // NISAR repeats its ground track every 12 days, so its next pass is searched over a full cycle.
   const nisarSat = fleet.sats.find(s => s.norad === 65053);
-  const nisarNext = useMemo(() => nisarSat ? predictPasses([nisarSat], aoiCentre.lat, aoiCentre.lon, passStart, 13 * 24, 60)[0] || null : null,
+  // NISAR's radar looks to one side, so "next pass" means the next pass whose swath covers the area.
+  const nisarNext = useMemo(() => { if (!nisarSat) return null; const at = swathPass(nisarSat, aoiCentre.lat, aoiCentre.lon, passStart, 13); if (!at) return null;
+    return { norad: nisarSat.norad, name: nisarSat.name, group: nisarSat.group, at, km: Math.round(crossTrack(nisarSat, aoiCentre.lat, aoiCentre.lon, at)?.km ?? 0) }; },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [nisarSat, aoiCentre.lat, aoiCentre.lon, Math.floor(passStart / 3_600_000)]);
 
@@ -686,7 +688,13 @@ export default function App() {
 
   /** Open the simulated sensor view for a satellite's next pass over the area (searching ahead up to 13 days). */
   function openSensor(s: Sat) {
-    const known = s.norad === 65053 && nisarNext ? nisarNext : passes.find(p => p.norad === s.norad && p.at >= Date.now() - 600_000);
+    // Side-looking radars with a known swath: the next pass that actually images the area, not merely the closest overpass.
+    if (SWATH[s.norad]) {
+      const at = (s.norad === nisarNext?.norad && nisarNext.at >= Date.now() - 600_000 ? nisarNext.at : null) ?? swathPass(s, aoiCentre.lat, aoiCentre.lon, Date.now() - 600_000, 13);
+      if (!at) { setError(`${s.name}'s radar swath does not cover this area in the next 13 days.`); return; }
+      setSensor({ norad: s.norad, at }); setMenu(null); return;
+    }
+    const known = passes.find(p => p.norad === s.norad && p.at >= Date.now() - 600_000);
     const at = known?.at ?? nextApproach(s.orbit, aoiCentre.lat, aoiCentre.lon, s.reachKm, new Date(), 13)?.at.getTime();
     if (!at) { setError(`${s.name} does not pass within ${s.reachKm} km of this area in the next 13 days.`); return; }
     setSensor({ norad: s.norad, at }); setMenu(null);
