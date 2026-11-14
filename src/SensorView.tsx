@@ -184,7 +184,6 @@ export default function SensorView({ sat, at, target, bbox, eo, sar, change, exp
   return <div className={`sensor ${expanded ? 'expanded' : ''} ${mode}`} role="region" aria-label={`Simulated view from ${sat.name}`}>
     <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onWheel={onWheel}>
       <div ref={mount} className="sensor-canvas" />
-      <div ref={credits} className="sensor-credits" />
       <div className="hud" aria-hidden="true">
         <i className="br tl" /><i className="br tr" /><i className="br bl" /><i className="br bottom-r" />
         <div className="hud-tl"><span><b className="rec" />SIM {fmtClock}</span><span>{sat.name.toUpperCase()}</span><span className="dim">{sensor}</span></div>
@@ -203,6 +202,7 @@ export default function SensorView({ sat, at, target, bbox, eo, sar, change, exp
           {inSwath !== null && <span className={inSwath ? 'ok' : 'warn'} title={swath?.label}>{inSwath ? 'IN SWATH' : 'OUTSIDE SWATH'}</span>}</div>
       </div>
     </div>
+    <div ref={credits} className="sensor-credits" aria-label="Imagery and data credits" />
     <div className="sensor-bar">
       <b>{sat.name}</b><span className="dim">{sat.group}</span>
       <div className="sensor-modes" role="group" aria-label="Sensor view">

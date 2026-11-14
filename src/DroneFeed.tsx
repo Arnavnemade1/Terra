@@ -48,6 +48,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   onSight: (p: { id: string; lon: number; lat: number } | null) => void; onSample?: (lon: number, lat: number) => Promise<number | null>;
 }) {
   const mount = useRef<HTMLDivElement>(null);
+  const credits = useRef<HTMLDivElement>(null);
   const viewer = useRef<C.Viewer | null>(null);
   const world = useRef<Relief | null>(null);
   const layers = useRef<{ base?: C.ImageryLayer; change?: C.ImageryLayer; thermal?: C.ImageryLayer; thermalKey?: string }>({});
@@ -70,7 +71,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     if (!mount.current) return; let disposed = false;
     const v = new C.Viewer(mount.current, {
       baseLayer: false, animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
-      navigationHelpButton: false, fullscreenButton: false, selectionIndicator: false, infoBox: false, creditContainer: document.createElement('div'),
+      navigationHelpButton: false, fullscreenButton: false, selectionIndicator: false, infoBox: false, creditContainer: credits.current ?? document.createElement('div'),
       requestRenderMode: false, skyBox: false, contextOptions: { webgl: { alpha: false, powerPreference: 'high-performance' } }, msaaSamples: 4,
     });
     viewer.current = v; const scene = v.scene;
@@ -134,14 +135,14 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   // Draped layers: the investigation's change layer and the thermal scene (as greyscale temperature).
   useEffect(() => {
     const v = viewer.current; if (!v) return; let cancelled = false;
-    if (change && !layers.current.change) void C.SingleTileImageryProvider.fromUrl(change.url, { rectangle: C.Rectangle.fromDegrees(...change.bounds) }).then(p => {
+    if (change && !layers.current.change) void C.SingleTileImageryProvider.fromUrl(change.url, { rectangle: C.Rectangle.fromDegrees(...change.bounds), credit: new C.Credit('NISAR backscatter change (NASA-ISRO) · Terra') }).then(p => {
       if (cancelled || v.isDestroyed()) return; const l = v.imageryLayers.addImageryProvider(p); l.alpha = 0.9; l.show = mode === 'change'; layers.current.change = l;
     }).catch(() => {});
     const key = thermal ? `${thermal.date}:${thermal.bounds.join(',')}` : '';
     if (thermal && layers.current.thermalKey !== key) {
       if (layers.current.thermal) { v.imageryLayers.remove(layers.current.thermal, true); layers.current.thermal = undefined; }
       layers.current.thermalKey = key; const url = `data:image/png;base64,${thermal.png}`;
-      void C.SingleTileImageryProvider.fromUrl(url, { rectangle: C.Rectangle.fromDegrees(...thermal.bounds) }).then(p => {
+      void C.SingleTileImageryProvider.fromUrl(url, { rectangle: C.Rectangle.fromDegrees(...thermal.bounds), credit: new C.Credit(`${thermal.source}, ${thermal.date} · USGS/NASA via Microsoft Planetary Computer`) }).then(p => {
         if (cancelled || v.isDestroyed()) return; const l = v.imageryLayers.addImageryProvider(p); l.show = mode === 'ir'; layers.current.thermal = l;
       }).catch(() => {});
       const img = new Image(); img.src = url; void img.decode().then(() => {
@@ -233,6 +234,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
           <span>ZOOM {zoom.toFixed(1)}× · {Math.round(FOV / zoom)}° FOV</span></div>
       </div>
     </div>
+    <div ref={credits} className="sensor-credits" aria-label="Imagery and data credits" />
     <div className="sensor-bar">
       <b>{s.callsign}</b><span className="dim">{s.name || (s.source === 'real' ? 'connected aircraft' : 'virtual aircraft')}</span>
       <div className="sensor-modes" role="group" aria-label="Camera mode">
