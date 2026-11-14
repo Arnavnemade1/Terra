@@ -252,6 +252,38 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
   agent's status, and the shared coordination log. Manual flight of a virtual aircraft is predicted locally and streamed to
   the server as setpoints.
 
+## Phase 4h — Real autopilot firmware, field notes, mission profiles, adding aircraft (2026-11-14)
+- **ArduPilot SITL** (`scripts/sitl.py`): the real ArduCopter and ArduPlane flight firmware on simulated airframes, built
+  once into `~/.terra/sitl` (outside the repo) at low priority with a memory guard that pauses the compiler below 1.5 GB
+  free. `sitl.py fleet` runs five vehicles (one ArduPlane mapper, four ArduCopter quads) at the monitoring area's launch
+  site, one MAVLink bridge each, and relaunches them at the new site when the area moves more than 40 km;
+  `sitl.py add --id … --sensors …` adds one more. The dev stack flies this fleet when it is built, otherwise the virtual
+  fleet (`TERRA_FLEET=sitl|virtual|off`).
+- **MAVLink missions** (`scripts/drone_bridge.py`): every task kind is uploaded with the MAVLink mission protocol: takeoff,
+  speed, then LOITER_TURNS for orbits, LOITER_UNLIM for holds and relays, waypoint loops for surveys, perimeters and
+  expanding-square searches (DO_JUMP repeats them until re-tasked), RTL for return. The bridge waits for a 3D fix, the EKF
+  position estimate and home before registering, retries arming, and reports a task active only when the aircraft is on
+  station at the asked height. Arming and GUIDED-mode manual flight need `--allow-arming` / `--allow-manual` and are
+  refused for real aircraft.
+- **Field notes** (`backend/terra/fleet/observe.py`): on station and every two minutes, each drone agent notes where its
+  camera looks (line of sight to the ground) and the measured values there: Landsat 8/9 surface temperature, this
+  investigation's radar backscatter change, ESA WorldCover land cover, ground height and Open-Meteo weather. Each value
+  names its source; nothing is invented. Warmer than the area's 95th percentile or a change of 3 dB or more becomes an
+  observation broadcast to the fleet. Notes appear in the panel, as pins on the map and on the camera's HUD.
+- **Communication**: an aircraft that takes over a job tells the one it relieves; observations, hand-offs, joins and
+  rejoins go to the shared log. The map draws each aircraft's radio link to the launch site or, beyond direct range,
+  through the relay aircraft, coloured by reported signal strength.
+- **Mission profiles**: change watch (orbit measured change, then summits), thermal watch (IR aircraft orbit the warmest
+  ground in the latest cloud-free Landsat scene; readings at the top of the scene's scale are shown as "≥"), and search
+  (four sectors, each an expanding-square search at 90 m). People can also assign a search to one aircraft.
+- **Adding aircraft**: the panel's Add a drone issues a token for that aircraft alone (only its SHA-256 is stored; it can
+  be revoked) and one command: `sitl.py add` for a simulated aircraft, or the MAVLink bridge for a real one (advisory
+  until `--allow-commands`). Enrollment works only from the machine running Terra. Aircraft silent for 15 minutes leave
+  the fleet until they register again.
+- **Camera**: IR shows measured temperature (ironbow, white or black hot) over a dim view of the ground so terrain stays
+  legible, with the scene's temperature scale and bracketed markers on the warmest measured ground; the crosshair reads
+  the temperature or says there is none. EO has a sensor-style grade.
+
 ## Phase 5 — Advanced science (§18–21)
 - Physics‑aware checks: speckle filtering, incidence angle and terrain normalization, statistical significance
 - Multisensor fusion (Sentinel‑1, Sentinel‑2, precipitation via GIBS/CMR)
