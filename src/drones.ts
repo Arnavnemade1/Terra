@@ -8,12 +8,19 @@ import { api, type Bounds } from './types';
  * setpoints; real aircraft are never flown from the browser.
  */
 export type Aircraft = 'quad' | 'fixed-wing';
+/** real: a flying aircraft; sitl: real autopilot firmware (ArduPilot SITL) on a simulated airframe; virtual: Terra's own simulator. */
+export type Source = 'virtual' | 'sitl' | 'real';
+export type Profile = 'change' | 'thermal' | 'search';
+export type FieldNote = { id: number; t: number; drone_id: string; task_id: string | null; kind: 'station' | 'observation' | 'warm' | 'change' | string; lon: number; lat: number; text: string;
+  data: { surface_c?: number; surface_p95_c?: number; surface_source?: string; cover?: string; change_db?: number; elevation_m?: number; weather?: { temperature_2m?: number; wind_speed_10m?: number; wind_direction_10m?: number } } };
+export type Enrollment = { drone_id: string; label: string; created_at: number; revoked: number };
+export type EnrollRequest = { id: string; name: string; kind: 'mavlink' | 'sitl'; connection: string; aircraft: 'quad' | 'fixed-wing' | 'vtol'; sensors: string[]; relay: boolean };
 export type TaskView = { id: string; kind: string; label: string; params: Record<string, unknown> & { lon?: number; lat?: number; radius_m?: number; agl_m?: number; bbox?: Bounds; inset?: number; lane_m?: number }; status: string; created_by: string; reason: string | null; created_at: number; updated_at: number; acked_at: number | null };
 export type Volume = { id: string; drone_id: string; task_id: string; geometry: { type: 'circle'; lon: number; lat: number; radius_m: number } | { type: 'box'; bbox: Bounds }; alt_lower_m: number; alt_upper_m: number; t_start: number; t_end: number; state: string };
 export type FleetMessage = { id: number; t: number; sender: string; recipient: string; kind: string; body: { text?: string; [k: string]: unknown } };
 export type Mission = { kind: string; label: string; status: string; task: string; centre?: [number, number]; radiusM?: number; box?: Bounds; aglM: number; speedMps: number };
 export type DroneState = {
-  id: string; callsign: string; name: string; source: 'virtual' | 'real'; aircraft: Aircraft; color: string;
+  id: string; callsign: string; name: string; source: Source; aircraft: Aircraft; color: string;
   mission: Mission; lon: number; lat: number; aglM: number; groundM: number | null; amslM: number;
   headingDeg: number; speedMps: number; pitchDeg: number; rollDeg: number;
   gimbal: { headingDeg: number; pitchDeg: number }; batteryPct: number; minutesLeft: number; linkDbm: number; flightS: number;
@@ -25,15 +32,15 @@ export type Patch = { rank: number; centre: [number, number]; bounds: Bounds; la
 export type Place = { name: string; lon: number; lat: number; kind: string; elevation_m: number | null };
 export type GroundAt = (lon: number, lat: number) => number | undefined;
 export type FleetInfo = {
-  connections: boolean; area: { name: string; bbox: Bounds; launch: [number, number] } | null;
+  connections: boolean; area: { name: string; bbox: Bounds; launch: [number, number]; profile?: Profile; investigation_id?: string | null } | null;
   coordinator: { running: boolean; summary: { round?: number; text?: string; online?: number; jobs?: number; assigned?: number }; age_s: number | null };
-  messages: FleetMessage[]; jobs: { key: string; kind: string; label: string; priority: number; assigned_drone: string | null }[];
-  targets: { id: string; label: string; lon: number; lat: number; radius_m: number; priority: number; last_observed: number | null }[];
+  messages: FleetMessage[]; notes: FieldNote[]; jobs: { key: string; kind: string; label: string; priority: number; assigned_drone: string | null }[];
+  targets: { id: string; kind?: string; label: string; lon: number; lat: number; radius_m: number; priority: number; needs?: string[]; last_observed: number | null }[];
   error: string | null;
 };
 type Sample = { t: number; lon: number; lat: number; agl: number | null; alt: number; heading: number; speed: number; gh: number | null; gp: number | null };
 type ServerDrone = {
-  id: string; name: string; origin: 'virtual' | 'real'; aircraft: string; age_s: number | null; link_state: 'online' | 'stale' | 'lost'; registered_at: number;
+  id: string; name: string; origin: Source; aircraft: string; age_s: number | null; link_state: 'online' | 'stale' | 'lost'; registered_at: number;
   capabilities: { sensors?: string[]; relay?: boolean; cruise_mps?: number; max_mps?: number; endurance_min?: number; protocol?: string; autopilot?: string | null };
   state: { lon?: number; lat?: number; alt_m?: number; agl_m?: number | null; heading_deg?: number; speed_mps?: number; battery_pct?: number | null; link_dbm?: number | null; mode?: string; landed?: boolean; gimbal?: { heading_deg: number; pitch_deg: number } | null; video_url?: string | null };
   track: { t: number; lon: number; lat: number; agl_m: number | null; alt_m: number; heading: number; speed: number; gimbal_heading: number | null; gimbal_pitch: number | null }[];
@@ -44,7 +51,7 @@ type Manual = { lon: number; lat: number; agl: number; heading: number; gimbalPi
 const G = 9.81;
 const DEG = Math.PI / 180;
 const DELAY = 1.2;
-const STATUS: Record<string, string> = { orbit: 'Orbit', survey: 'Survey', perimeter: 'Mapping', relay: 'Relay', hold: 'Hold', standby: 'Standby', return: 'Returning' };
+const STATUS: Record<string, string> = { orbit: 'Orbit', survey: 'Survey', perimeter: 'Mapping', search: 'Searching', relay: 'Relay', hold: 'Hold', standby: 'Standby', return: 'Returning' };
 const SENSOR: Record<string, string> = { eo: 'EO', ir: 'IR', lidar: 'lidar', multispectral: 'multispectral', gas: 'gas', sar: 'SAR' };
 export const ft = (m: number) => m * 3.28084;
 export const kt = (mps: number) => mps * 1.943844;
@@ -58,6 +65,16 @@ function lanes(bbox: Bounds, laneM = 150): [number, number][] {
   for (let i = 0; i <= count; i++) { const lat = s + (n - s) * i / count; out.push(...(i % 2 ? [[e, lat], [w, lat]] : [[w, lat], [e, lat]]) as [number, number][]); }
   return out;
 }
+/** An expanding-square search from a datum: legs of 1, 1, 2, 2, 3, 3 … lanes, turning right (as the coordinator plans it). */
+function expandingSquare(lon: number, lat: number, laneM = 120, sizeM = 1200): [number, number][] {
+  const out: [number, number][] = [[lon, lat]]; let x = 0, y = 0, heading = 0, leg = 1;
+  const dirs = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+  while (Math.max(Math.abs(x), Math.abs(y)) * 2 < sizeM && out.length < 80) {
+    for (let k = 0; k < 2; k++) { const [dx, dy] = dirs[heading % 4]; x += dx * leg * laneM; y += dy * leg * laneM; heading++; out.push([lon + x / (111_320 * Math.cos(lat * DEG)), lat + y / 110_574]); }
+    leg++;
+  }
+  return out;
+}
 const ring = (lon: number, lat: number, r: number, k = 72): [number, number][] =>
   Array.from({ length: k }, (_, i) => { const a = i / k * 2 * Math.PI; return [lon + Math.sin(a) * r / (111_320 * Math.cos(lat * DEG)), lat + Math.cos(a) * r / 110_574] as [number, number]; });
 
@@ -69,7 +86,7 @@ export class DroneStore {
   private resume = new Map<string, { from: DroneState; at: number }>();
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  info: FleetInfo = { connections: false, area: null, coordinator: { running: false, summary: {}, age_s: null }, messages: [], jobs: [], targets: [], error: null };
+  info: FleetInfo = { connections: false, area: null, coordinator: { running: false, summary: {}, age_s: null }, messages: [], notes: [], jobs: [], targets: [], error: null };
   groundAt: GroundAt | null = null;
   /** Ground height from an open camera view, which has the finest terrain around its aircraft. */
   feedGroundAt: GroundAt | null = null;
@@ -90,7 +107,7 @@ export class DroneStore {
   async poll() {
     try {
       const v = await api<{ server_time: number; connections_enabled: boolean; area: FleetInfo['area']; coordinator: FleetInfo['coordinator']; messages: FleetMessage[];
-        jobs: FleetInfo['jobs']; targets: FleetInfo['targets']; drones: ServerDrone[] }>('/fleet');
+        notes?: FieldNote[]; jobs: FleetInfo['jobs']; targets: FleetInfo['targets']; drones: ServerDrone[] }>('/fleet');
       const offset = v.server_time - Date.now() / 1000; this.offset = this.offset === null ? offset : this.offset * 0.8 + offset * 0.2;
       const seen = new Set<string>();
       for (const d of v.drones) {
@@ -101,7 +118,8 @@ export class DroneStore {
         this.samples.set(d.id, buf);
       }
       for (const id of [...this.meta.keys()]) if (!seen.has(id)) { this.meta.delete(id); this.samples.delete(id); }
-      this.info = { connections: v.connections_enabled, area: v.area, coordinator: v.coordinator, messages: v.messages, jobs: v.jobs, targets: v.targets, error: null };
+      const notes = v.notes ?? []; if (notes[0]?.id !== this.info.notes[0]?.id) this.notesVersion++;
+      this.info = { connections: v.connections_enabled, area: v.area, coordinator: v.coordinator, messages: v.messages, notes, jobs: v.jobs, targets: v.targets, error: null };
       this.ready = true;
       const key = v.drones.map(d => `${d.id}:${d.task?.id}:${JSON.stringify(d.task?.params ?? null)}:${this.manual.has(d.id)}`).join('|');
       if (key !== this.routeKey) { this.routeKey = key; this.routes++; }
@@ -111,8 +129,10 @@ export class DroneStore {
     this.emit();
   }
 
-  /** Publish the monitoring area and its targets; the coordinator plans jobs from them. */
-  async publishArea(name: string, bbox: Bounds, patches: Patch[], places: Place[]) {
+  /** Publish the monitoring area and its targets; the coordinator plans jobs from them. The profile says what the
+   * fleet is for: watching measured change (targets below), the warmest ground in the latest Landsat thermal scene
+   * (the server picks those), or searching the area in four sectors. */
+  async publishArea(name: string, bbox: Bounds, patches: Patch[], places: Place[], profile: Profile = this.info.area?.profile ?? 'change', investigationId?: string | null) {
     const targets: Record<string, unknown>[] = [
       ...patches.slice(0, 4).map((p, i) => ({ id: `patch-${p.rank}`, kind: 'change', label: p.label, lon: p.centre[1], lat: p.centre[0], priority: [1, 0.85, 0.7, 0.6][i],
         radius_m: Math.max(150, Math.min(3000, Math.hypot((p.bounds[2] - p.bounds[0]) * 111_320 * Math.cos(p.centre[0] * DEG), (p.bounds[3] - p.bounds[1]) * 110_574) / 2)) })),
@@ -120,9 +140,23 @@ export class DroneStore {
         .map((p, i) => ({ id: `summit-${i}`, kind: 'summit', label: p.name, lon: p.lon, lat: p.lat, radius_m: 500, priority: i ? 0.45 : 0.55, needs: p.kind === 'volcano' ? ['ir'] : [] })),
     ];
     if (!targets.length) targets.push({ id: 'centre', kind: 'point', label: 'the centre of the area', lon: (bbox[0] + bbox[2]) / 2, lat: (bbox[1] + bbox[3]) / 2, radius_m: 400, priority: 0.5 });
-    await api('/fleet/area', { method: 'POST', body: JSON.stringify({ name: name.slice(0, 80), bbox, targets }) }).catch(() => {});
+    // The same area, targets and profile again is not news: send it once (the coordinator keeps it).
+    const body = JSON.stringify({ name: name.slice(0, 80), bbox, targets, profile, investigation_id: investigationId ?? null });
+    const current = this.info.area;
+    const unchanged = current && current.bbox.every((v, i) => Math.abs(v - bbox[i]) < 1e-9) && (current.profile ?? 'change') === profile;
+    if (body === this.published && unchanged) return; this.published = body;
+    await api('/fleet/area', { method: 'POST', body }).catch(() => { this.published = ''; });
     void this.poll();
   }
+
+  // ------------------------------------------------------------------ adding aircraft
+  /** A per-aircraft token and the command that connects its ground station (the token is shown once). */
+  enroll(body: EnrollRequest) { return api<{ id: string; token: string; command: string; server: string }>('/fleet/enroll', { method: 'POST', body: JSON.stringify(body) }); }
+  async enrollments() { return (await api<{ enrollments: Enrollment[] }>('/fleet/enrollments')).enrollments; }
+  revoke(id: string) { return api<{ revoked: number }>(`/fleet/enrollments/${encodeURIComponent(id)}/revoke`, { method: 'POST' }); }
+  /** Changes when a new field note arrives. */
+  notesVersion = 0;
+  private published = '';
 
   /** A person's task for one aircraft; held by the coordinator for 15 minutes or until it ends. */
   async assign(id: string, task: { kind: string; label: string; lon?: number; lat?: number; radius_m?: number; agl_m?: number; bbox?: Bounds }) {
@@ -132,7 +166,7 @@ export class DroneStore {
 
   // ------------------------------------------------------------------ manual flight (virtual aircraft only)
   takeControl(id: string) {
-    const s = this.state(id); if (!s || s.source !== 'virtual') return;
+    const s = this.state(id); if (!s || s.source === 'real') return;
     this.manual.set(id, { lon: s.lon, lat: s.lat, agl: Math.max(30, s.aglM), heading: s.headingDeg, gimbalPitch: s.gimbal.pitchDeg, speed: s.speedMps, sent: 0 }); this.routes++; this.emit();
   }
   releaseControl(id: string) {
@@ -167,6 +201,7 @@ export class DroneStore {
   missionPath(id: string): [number, number][] | null {
     const d = this.meta.get(id); const t = d?.task; if (!t || this.manual.has(id)) return null; const p = t.params;
     if (t.kind === 'survey' && p.bbox) return lanes(p.bbox, p.lane_m);
+    if (t.kind === 'search' && typeof p.lon === 'number' && typeof p.lat === 'number') return expandingSquare(p.lon, p.lat, Number(p.lane_m ?? 120), Number(p.size_m ?? 1200));
     if (t.kind === 'perimeter' && p.bbox) { const [w, s, e, n] = p.bbox; const k = p.inset ?? 0.08; const dx = (e - w) * k, dy = (n - s) * k; return [[w + dx, s + dy], [e - dx, s + dy], [e - dx, n - dy], [w + dx, n - dy]]; }
     if (typeof p.lon === 'number' && typeof p.lat === 'number') {
       if (t.kind === 'return') { const st = d.state; return typeof st.lon === 'number' && typeof st.lat === 'number' ? [[st.lon, st.lat], [p.lon, p.lat]] : null; }
@@ -174,7 +209,7 @@ export class DroneStore {
     }
     return null;
   }
-  closedPath(id: string) { const k = this.meta.get(id)?.task?.kind; return k !== 'return' && k !== 'survey'; }
+  closedPath(id: string) { const k = this.meta.get(id)?.task?.kind; return k !== 'return' && k !== 'survey' && k !== 'search'; }
 
   state(id: string): DroneState | null {
     const d = this.meta.get(id); if (!d) return null;
@@ -226,7 +261,7 @@ export class DroneStore {
         box: p.bbox, aglM: Number(p.agl_m ?? height), speedMps: Number(p.speed_mps ?? speed) }
       : { kind: 'idle', label: landed ? 'On the ground' : 'No task', status: landed ? 'Landed' : 'Idle', task: landed ? 'Waiting at the launch site' : 'Waiting for a task', aglM: height, speedMps: speed };
     return {
-      id, callsign: d.id.toUpperCase().slice(0, 10), name: d.name !== d.id ? d.name : '', source: d.origin, aircraft, color: d.origin === 'real' ? '#9fe07a' : '#f4f1e8',
+      id, callsign: d.id.toUpperCase().slice(0, 10), name: d.name !== d.id ? d.name : '', source: d.origin, aircraft, color: d.origin === 'real' ? '#9fe07a' : d.origin === 'sitl' ? '#8fc8ff' : '#f4f1e8',
       mission, lon, lat, aglM: height, groundM: ground, amslM: agl === null && !m ? alt : (ground ?? 0) + height, headingDeg: heading, speedMps: speed,
       pitchDeg: aircraft === 'quad' ? -Math.min(14, speed * 0.7) : 2, rollDeg: roll, gimbal: { headingDeg: gh, pitchDeg: gp },
       batteryPct: battery, minutesLeft: Number.isFinite(battery) ? (battery - 15) / (100 / Number(caps.endurance_min ?? 30)) : NaN,
