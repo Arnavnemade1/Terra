@@ -261,8 +261,9 @@ def test_agents_write_field_notes_and_relieve_the_aircraft_they_replace(client, 
     monkeypatch.setattr("terra.fleet.observe.area_data", lambda bbox, investigation: data)
     monkeypatch.setattr(activities, "_elevation", lambda lon, lat: 1480.0)
     db = FleetDB(tmp_path / "terra.db")
+    # A person's orbit (no auction job behind it) must not trip the agent's bookkeeping.
     task = db.create_task("d0", "orbit", "Orbit change patch 1", {"lon": 15.06, "lat": 37.75, "radius_m": 200, "agl_m": 120, "relieves": "d9"},
-                          "coordinator", "test", 0.9, "orbit:patch-1", None)
+                          "operator", "test", 0.9, None, None)
     assert client.post(f"/api/fleet/tasks/{task['id']}/ack", json={"id": "d0", "status": "active"}, headers=AUTH).status_code == 200
     assert activities.run_drone_agent_round({"drone_id": "d0", "round": 0})["note"] == "warm"
     activities.run_drone_agent_round({"drone_id": "d0", "round": 1})  # within two minutes: no second note

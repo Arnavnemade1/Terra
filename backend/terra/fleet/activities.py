@@ -42,7 +42,8 @@ def write_field_note(db, drone: dict, task: dict, now: float) -> dict | None:
     text = note_text(drone["name"], task["label"], o, reason) + extra
     db.add_note(drone["id"], task["id"], kind, lon, lat, text, o)
     if kind in ("warm", "change"):
-        db.message(f"agent:{drone['id']}", "all", "observation", {"text": f"{drone['name']}: {extra.strip()} ({o.get('surface_c', '—')} °C at {lat:.4f}, {lon:.4f})", "lon": lon, "lat": lat})
+        reading = f"{o['surface_c']:.0f} °C surface, " if o.get("surface_c") is not None else ""
+        db.message(f"agent:{drone['id']}", "all", "observation", {"text": f"{drone['name']}: {extra.strip()} ({reading}{lat:.4f}, {lon:.4f})", "lon": lon, "lat": lat, "note_kind": kind})
     relieves = task["params"].get("relieves")
     if last is None and relieves:
         db.message(f"agent:{drone['id']}", f"agent:{relieves}", "relieved", {"text": f"{drone['name']} is on station for “{task['label']}”. {relieves}, you are relieved; head home."})
@@ -114,7 +115,7 @@ def run_drone_agent_round(payload: dict) -> dict:
     db.put_bids(drone_id, bids)
     findings = assess(drone, task, operation, drones, launch)
     # Mark a target observed while its orbit is flown on station.
-    if task and task["kind"] == "orbit" and task["status"] == "active" and "lon" in s and task.get("job_key", "").startswith("orbit:"):
+    if task and task["kind"] == "orbit" and task["status"] == "active" and "lon" in s and (task.get("job_key") or "").startswith("orbit:"):
         p = task["params"]
         if distance(s["lon"], s["lat"], p["lon"], p["lat"]) < p.get("radius_m", 200) * 1.4:
             db.mark_observed(task["job_key"].split(":", 1)[1], time.time())
