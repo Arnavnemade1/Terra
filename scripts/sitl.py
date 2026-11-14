@@ -3,6 +3,7 @@
 
   python scripts/sitl.py setup              # once: fetch and build ArduCopter + ArduPlane (gentle on the machine)
   python scripts/sitl.py fleet --count 5    # run a fleet at the monitoring area's launch site, one bridge each
+  python scripts/sitl.py add --id D-06 --name Merlin --sensors eo,ir   # one more aircraft (the workspace's Add a drone)
   python scripts/sitl.py status
 
 Each vehicle is a separate ArduPilot process (its own EEPROM, parameters and MAVLink port 5760 + 10 × instance);
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -55,8 +57,8 @@ RTL_SPEED 1200
 AUTO_OPTIONS 3
 ARMING_CHECK 0
 FENCE_ENABLE 0
-BATT_CAPACITY 5000
-SIM_BATT_CAP_AH 5
+BATT_CAPACITY 12000
+SIM_BATT_CAP_AH 12
 """
 PLANE_PARAMS = """# Terra overrides for the simulated fixed-wing
 AIRSPEED_CRUISE 22
@@ -167,48 +169,116 @@ def launch_site(token: str, wait: bool) -> tuple[float, float, float]:
         print("Waiting for a monitoring area to be set in the workspace…", flush=True); time.sleep(5)
 
 
-def fleet(args) -> None:
+def _prepare(args) -> tuple[str, tuple[float, float, float]]:
     sys.path.insert(0, str(ROOT / "scripts"))
     from drone_bridge import token_from_env
     token = args.token or token_from_env()
     if not token:
-        sys.exit("Set TERRA_DRONE_TOKEN (the same value as on the Terra server).")
+        sys.exit("Set TERRA_DRONE_TOKEN (the server's token, or an aircraft token from the workspace's Add a drone).")
     missing = [b for b in ("arducopter", "arduplane") if not (BIN / b).exists()]
     if missing:
         sys.exit(f"Not built yet: {', '.join(missing)}. Run: python scripts/sitl.py setup")
-    lon, lat, alt = (args.lon, args.lat, args.alt) if args.lat is not None else launch_site(token, wait=True)
     RUN.mkdir(parents=True, exist_ok=True)
-    procs: list[subprocess.Popen] = []
+    return token, ((args.lon, args.lat, args.alt) if args.lat is not None else launch_site(token, wait=True))
 
+
+def _port_free(port: int) -> bool:
+    import socket
+    with socket.socket() as probe:
+        return probe.connect_ex(("127.0.0.1", port)) != 0
+
+
+def launch(spec: dict, instance: int, slot: int, site: tuple[float, float, float], token: str, procs: list[subprocess.Popen]) -> None:
+    """One ArduPilot process on its own MAVLink port, and the bridge that connects it to Terra."""
+    lon, lat, alt = site; plane = spec["aircraft"] == "fixed-wing"
+    workdir = RUN / spec["id"]; workdir.mkdir(exist_ok=True)
+    (workdir / "terra.parm").write_text(PLANE_PARAMS if plane else COPTER_PARAMS)
+    # The airframe's stock parameters (their location differs between ArduPilot versions; ArduPlane also carries its
+    # model parameters built in), then Terra's.
+    stock = [SRC / "Tools/autotest/default_params" / ("plane.parm" if plane else "copter.parm"), SRC / "Tools/autotest/models" / ("plane.parm" if plane else "copter.parm")]
+    defaults = ",".join([str(p) for p in stock if p.exists()][:1] + [str(workdir / "terra.parm")])
+    # Spread the vehicles 15 m apart on the pad, facing north.
+    hlon = lon + slot * 15 / (111_320 * max(0.2, math.cos(math.radians(lat))))
+    sim = [str(BIN / ("arduplane" if plane else "arducopter")), "--model", "plane" if plane else "quad", "--home", f"{lat:.7f},{hlon:.7f},{alt:.1f},0",
+           "--instance", str(instance), "--defaults", defaults, "-w", "--speedup", "1"]
+    procs.append(subprocess.Popen(sim, cwd=workdir, stdout=open(workdir / "sitl.log", "w"), stderr=subprocess.STDOUT))
+    time.sleep(1.5)
+    bridge = [sys.executable, str(ROOT / "scripts" / "drone_bridge.py"), "--mavlink", f"tcp:127.0.0.1:{5760 + 10 * instance}", "--id", spec["id"], "--name", spec["name"],
+              "--aircraft", spec["aircraft"], "--origin", "sitl", "--sensors", spec["sensors"], "--cruise", str(spec["cruise"]), "--endurance", str(spec["endurance"]),
+              "--allow-commands", "--allow-arming", "--allow-manual"] + (["--relay"] if spec["relay"] else [])
+    procs.append(subprocess.Popen(bridge, cwd=ROOT, env={**os.environ, "TERRA_DRONE_TOKEN": token}))
+
+
+def _km(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    return math.hypot((a[0] - b[0]) * 111.32 * math.cos(math.radians(a[1])), (a[1] - b[1]) * 110.574)
+
+
+def _halt(procs: list[subprocess.Popen]) -> None:
+    for p in procs:
+        if p.poll() is None:
+            p.terminate()
+    for p in procs:
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+def supervise(procs: list[subprocess.Popen], token: str, site: tuple[float, float, float], start, follow: bool) -> None:
+    """Keep the vehicles and bridges running. With `follow`, when the workspace moves the monitoring area more than
+    40 km (beyond where the coordinator tasks aircraft), the vehicles are relaunched at the new launch site, as a
+    ground crew would drive the fleet there."""
     def stop(*_):
-        for p in procs:
-            if p.poll() is None:
-                p.terminate()
-        sys.exit(0)
+        _halt(procs); sys.exit(0)
     signal.signal(signal.SIGINT, stop); signal.signal(signal.SIGTERM, stop)
-    print(f"Launching {args.count} ArduPilot SITL vehicles at {lat:.5f}, {lon:.5f}, {alt:.0f} m", flush=True)
-    for i, spec in enumerate(FLEET[:args.count]):
-        plane = spec["aircraft"] == "fixed-wing"
-        workdir = RUN / spec["id"]; workdir.mkdir(exist_ok=True)
-        (workdir / "terra.parm").write_text(PLANE_PARAMS if plane else COPTER_PARAMS)
-        defaults = f"{SRC / 'Tools/autotest/default_params' / ('plane.parm' if plane else 'copter.parm')},{workdir / 'terra.parm'}"
-        # Spread the vehicles 15 m apart on the pad, facing north.
-        hlat, hlon = lat, lon + (i - 2) * 15 / (111_320 * max(0.2, __import__('math').cos(__import__('math').radians(lat))))
-        sim = [str(BIN / ("arduplane" if plane else "arducopter")), "--model", "plane" if plane else "quad", "--home", f"{hlat:.7f},{hlon:.7f},{alt:.1f},0",
-               "--instance", str(i), "--defaults", defaults, "-w", "--speedup", "1"]
-        procs.append(subprocess.Popen(sim, cwd=workdir, stdout=open(workdir / "sitl.log", "w"), stderr=subprocess.STDOUT))
-        time.sleep(1.5)
-        bridge = [sys.executable, str(ROOT / "scripts" / "drone_bridge.py"), "--mavlink", f"tcp:127.0.0.1:{5760 + 10 * i}", "--id", spec["id"], "--name", spec["name"],
-                  "--aircraft", spec["aircraft"], "--origin", "sitl", "--sensors", spec["sensors"], "--cruise", str(spec["cruise"]), "--endurance", str(spec["endurance"]),
-                  "--allow-commands", "--allow-arming", "--allow-manual"] + (["--relay"] if spec["relay"] else [])
-        procs.append(subprocess.Popen(bridge, cwd=ROOT, env={**os.environ, "TERRA_DRONE_TOKEN": token}))
-    print("Fleet running. Ctrl-C stops every vehicle and bridge.", flush=True)
+    print("Running. Ctrl-C stops every vehicle and bridge started here.", flush=True)
+    checked = time.monotonic()
     while True:
         time.sleep(2)
+        if follow and time.monotonic() - checked > 10:
+            checked = time.monotonic()
+            try:
+                area = terra("/api/fleet/area", token).get("area")
+            except Exception:
+                area = None
+            if area and _km(site, tuple(area["launch"])) > 40:
+                print(f"The monitoring area moved to {area['name']} ({_km(site, tuple(area['launch'])):.0f} km away); relaunching the vehicles there.", flush=True)
+                _halt(procs); procs.clear()
+                site = launch_site(token, wait=True); start(site)
+                continue
         for p in procs:
             if p.poll() is not None:
-                print(f"A process exited ({' '.join(p.args[:2])} code {p.returncode}); stopping the fleet.", flush=True)
+                print(f"A process exited ({' '.join(p.args[:2])} code {p.returncode}); stopping.", flush=True)
                 stop()
+
+
+def fleet(args) -> None:
+    token, site = _prepare(args)
+    procs: list[subprocess.Popen] = []
+
+    def start(at: tuple[float, float, float]) -> None:
+        print(f"Launching {args.count} ArduPilot SITL vehicles at {at[1]:.5f}, {at[0]:.5f}, {at[2]:.0f} m", flush=True)
+        for i, spec in enumerate(FLEET[:args.count]):
+            launch(spec, i, i - 2, at, token, procs)
+    start(site)
+    supervise(procs, token, site, start, follow=args.lat is None)
+
+
+def add(args) -> None:
+    """One more SITL aircraft, on the first free instance from 10 upwards (the fleet uses 0–4)."""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", args.id):
+        sys.exit("Use an id of letters, digits, - and _ (up to 32).")
+    token, site = _prepare(args)
+    instance = next(i for i in range(10, 60) if _port_free(5760 + 10 * i))
+    spec = {"id": args.id, "name": args.name or args.id, "aircraft": args.aircraft, "sensors": args.sensors, "relay": args.relay,
+            "cruise": 22 if args.aircraft == "fixed-wing" else 10, "endurance": 90 if args.aircraft == "fixed-wing" else 30}
+    procs: list[subprocess.Popen] = []
+
+    def start(at: tuple[float, float, float]) -> None:
+        print(f"Launching {spec['id']} ({spec['aircraft']}, ArduPilot SITL instance {instance}) at {at[1]:.5f}, {at[0]:.5f}", flush=True)
+        launch(spec, instance, 3 + instance % 6, at, token, procs)
+    start(site)
+    supervise(procs, token, site, start, follow=args.lat is None)
 
 
 def status(_args) -> None:
@@ -222,9 +292,12 @@ def main() -> None:
     s = sub.add_parser("setup"); s.add_argument("--targets", nargs="+", default=["copter", "plane"])
     f = sub.add_parser("fleet"); f.add_argument("--count", type=int, default=5); f.add_argument("--token")
     f.add_argument("--lat", type=float); f.add_argument("--lon", type=float); f.add_argument("--alt", type=float, default=0.0)
+    a = sub.add_parser("add"); a.add_argument("--id", required=True); a.add_argument("--name"); a.add_argument("--token")
+    a.add_argument("--aircraft", default="quad", choices=["quad", "fixed-wing"]); a.add_argument("--sensors", default="eo,ir"); a.add_argument("--relay", action="store_true")
+    a.add_argument("--lat", type=float); a.add_argument("--lon", type=float); a.add_argument("--alt", type=float, default=0.0)
     sub.add_parser("status")
     args = parser.parse_args()
-    {"setup": setup, "fleet": fleet, "status": status}[args.cmd](args)
+    {"setup": setup, "fleet": fleet, "add": add, "status": status}[args.cmd](args)
 
 
 if __name__ == "__main__":
