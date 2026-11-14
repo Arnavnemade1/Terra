@@ -12,6 +12,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -119,3 +120,26 @@ async def thermal(bbox: list[float]) -> dict:
         except OSError:
             pass
         return value
+
+
+def hot_spots(value: dict, count: int = 4, separation_m: float = 500) -> list[dict]:
+    """The warmest places in a thermal scene, at least `separation_m` apart (for thermal-watch missions)."""
+    if not value.get("available"):
+        return []
+    la = np.array(Image.open(BytesIO(base64.b64decode(value["png"]))).convert("LA"))
+    celsius = value["minC"] + la[..., 0].astype(np.float32) / 255 * (value["maxC"] - value["minC"])
+    celsius[la[..., 1] == 0] = np.nan
+    w, s, e, n = value["bounds"]; h, wd = celsius.shape
+    order = np.argsort(np.nan_to_num(celsius, nan=-1e9), axis=None)[::-1]
+    picked: list[dict] = []
+    for index in order[:20000]:
+        row, col = divmod(int(index), wd)
+        temp = float(celsius[row, col])
+        if not np.isfinite(temp):
+            break
+        lon, lat = w + (col + 0.5) / wd * (e - w), n - (row + 0.5) / h * (n - s)
+        if all(math.hypot((lon - q["lon"]) * 111_320 * math.cos(math.radians(lat)), (lat - q["lat"]) * 110_574) > separation_m for q in picked):
+            picked.append({"lon": round(lon, 6), "lat": round(lat, 6), "surface_c": round(temp, 1)})
+            if len(picked) >= count:
+                break
+    return picked
