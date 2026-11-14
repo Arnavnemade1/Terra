@@ -25,6 +25,7 @@ from .activities import available_inputs, safe_job_directory
 from .workflows import InvestigationWorkflow
 from . import connector
 from .gateway import router as connector_router
+from .google_tiles import api_key as google_tiles_key, router as google_tiles_router
 
 
 def validate_bbox(values: list[float], bounded: bool = False) -> list[float]:
@@ -85,6 +86,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TERRA Investigation API", version="0.1.0", lifespan=lifespan,
               docs_url="/api/docs", openapi_url="/api/openapi.json", redoc_url=None)
+app.include_router(google_tiles_router)
 app.include_router(connector_router)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", *filter(None, os.getenv("TERRA_ALLOWED_HOSTS", "").split(","))])
 allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]
@@ -181,7 +183,8 @@ async def health():
             "capabilities": {"catalog": True, "analysis": connected, "language_agent": __import__("terra.agent", fromlist=["available"]).available(),
                              "language_model": __import__("terra.agent", fromlist=["model_name"]).model_name(),
                              "original_products": bool(__import__("terra.acquire", fromlist=["earthdata_token"]).earthdata_token()),
-                             "isolated_execution": settings.compute_mode == "docker", "compute_mode": settings.compute_mode},
+                             "isolated_execution": settings.compute_mode == "docker", "compute_mode": settings.compute_mode,
+                             "photorealistic_3d": bool(google_tiles_key())},
             "inputs_count": len(available_inputs()), "connector": connector.diagnostics()}
 
 

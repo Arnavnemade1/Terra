@@ -39,12 +39,14 @@ PROVIDERS: dict[str, tuple[str, ...]] = {
     "openmeteo": ("api.open-meteo.com", "archive-api.open-meteo.com"),
     "worldcover": ("esa-worldcover.s3.eu-central-1.amazonaws.com",),
     "wikidata": ("query.wikidata.org",),
+    "google": ("tile.googleapis.com",),
 }
 LABELS = {"openai": "Language model", "asf": "NASA/ASF catalog", "earthdata": "NASA Earthdata",
           "celestrak": "CelesTrak", "tle": "TLE mirror", "usgs": "USGS", "eonet": "NASA EONET", "firms": "NASA FIRMS",
           "gdacs": "GDACS alerts", "geocode": "Place search", "stac": "Optical catalog", "sentinel": "Sentinel imagery",
           "imagery": "World imagery", "terrain": "Terrain", "gibs": "NASA imagery", "openmeteo": "Weather and elevation models",
-          "worldcover": "ESA WorldCover land cover", "wikidata": "Wikidata named places"}
+          "worldcover": "ESA WorldCover land cover", "wikidata": "Wikidata named places",
+          "google": "Google Map Tiles"}
 _pools: WeakKeyDictionary = WeakKeyDictionary()
 _sync_pool: httpx.Client | None = None
 _sync_lock = threading.Lock()
@@ -136,6 +138,8 @@ def _headers(provider: str, values: dict | None) -> dict:
         raise ConnectorError(provider, "request headers are not permitted.")
     if any(key.lower() == "authorization" for key in headers) and provider not in {"openai", "earthdata"}:
         raise ConnectorError(provider, "credentials are not permitted for this service.")
+    if any(key.lower() == "x-goog-api-key" for key in headers) and provider != "google":
+        raise ConnectorError(provider, "credentials are not permitted for this service.")
     return headers
 
 
@@ -143,7 +147,7 @@ def _redirect(provider: str, current: str, response: httpx.Response, headers: di
     destination = urljoin(current, response.headers.get("location", ""))
     validate_url(provider, destination)
     if urlsplit(destination).netloc != urlsplit(current).netloc:
-        headers = {key: value for key, value in headers.items() if key.lower() not in {"authorization", "cookie", "x-api-key"}}
+        headers = {key: value for key, value in headers.items() if key.lower() not in {"authorization", "cookie", "x-api-key", "x-goog-api-key"}}
     return destination, headers
 
 
@@ -159,7 +163,7 @@ async def request(provider: str, method: str, url: str, *, params=None, json=Non
                 async with _async_client().stream(method, url, params=params, json=json, headers=request_headers,
                                                   timeout=httpx.Timeout(timeout, connect=min(5, timeout), pool=5)) as response:
                     status = response.status_code
-                    if response.is_redirect:
+                    if response.is_redirect and status != 304:  # 304 Not Modified is a cache answer, not a redirect
                         if not follow_redirects or hop == 3:
                             raise ConnectorError(provider, "unexpected redirect.", status)
                         url, request_headers = _redirect(provider, str(response.url), response, request_headers)
@@ -198,7 +202,7 @@ def request_sync(provider: str, method: str, url: str, *, headers: dict | None =
         for hop in range(4):
             with _sync_client().stream(method, url, headers=request_headers, timeout=timeout) as response:
                 status = response.status_code
-                if response.is_redirect:
+                if response.is_redirect and status != 304:  # 304 Not Modified is a cache answer, not a redirect
                     if not follow_redirects or hop == 3:
                         raise ConnectorError(provider, "unexpected redirect.", status)
                     url, request_headers = _redirect(provider, str(response.url), response, request_headers)
