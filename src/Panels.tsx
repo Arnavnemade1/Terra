@@ -3,7 +3,7 @@ import { ArrowUpRight, CloudRain, Droplets, Gauge, Satellite, Thermometer, Waves
 import type { Hazard } from './Search';
 import { EVENT_STYLE, ALERT_COLOR } from './liveLayers';
 import { periodMinutes, subPoint } from './geo';
-import type { Pass, Sat } from './fleet';
+import { SWATH, type Pass, type Sat } from './fleet';
 import { prettyDate, safeUrl } from './types';
 
 export type Conditions = { source: string; source_url?: string; note: string; unavailable: string[]; acquisitions: { date: string; rain_72h_mm: number | null; soil_moisture_m3m3: number | null; soil_layer: string; temperature_c: number | null; wind_kmh: number | null; relative_humidity_pct: number | null; model?: string }[] };
@@ -125,7 +125,7 @@ export function SatellitesPanel({ sats, passes, now, selected, onSelect, onFly, 
   return <div className="mode-panel">
     <header className="mode-head"><b>Satellites</b><span>· {sats.filter(s => s.key).length} key missions · {sats.length} tracked</span><span className="live">● LIVE</span></header>
     <div className="kpis">
-      <div><b>{nisarNext ? until(nisarNext.at) : '—'}</b><small>until NISAR passes your area</small></div>
+      <div><b>{nisarNext ? until(nisarNext.at) : '—'}</b><small>until NISAR’s radar next images your area</small></div>
       <div><b>{passes.length}</b><small>passes over area, 48 h</small></div>
       <div><b>{sats.filter(s => s.group === 'Radar').length}</b><small>radar satellites</small></div>
       <div><b>{sats.filter(s => s.group === 'Optical land imaging').length}</b><small>optical imagers</small></div>
@@ -146,7 +146,8 @@ export function SatellitesPanel({ sats, passes, now, selected, onSelect, onFly, 
       <KeyValues rows={[['Next pass over area', next ? `${new Date(next.at).toISOString().slice(0, 16).replace('T', ' ')} UTC · ${next.km} km · in ${until(next.at)}` : selected.norad === 65053 ? 'None in the next 13 days' : 'None within 48 h'],
         ['Inclination', `${(selected.orbit.rec.inclo * 180 / Math.PI).toFixed(2)}°`], ['Sub-point', `${pos.lat.toFixed(2)}°, ${pos.lon.toFixed(2)}°`], ['NORAD', String(selected.norad)],
         ['Elements', selected.epoch ? `epoch ${prettyDate(selected.epoch)}` : 'CelesTrak GP']]} />
-      <p className="card-note">A pass means the ground track comes within about {selected.reachKm} km, a rough reach for this kind of sensor. It is not a confirmed acquisition.</p>
+      <p className="card-note">{SWATH[selected.norad] ? `A pass means the radar swath covers the area: ${SWATH[selected.norad].nearKm}–${SWATH[selected.norad].farKm} km ${SWATH[selected.norad].side} of the ground track (${SWATH[selected.norad].label}). The distance shown is from the ground track. It is not a confirmed acquisition.`
+        : `A pass means the ground track comes within about ${selected.reachKm} km, a rough reach for this kind of sensor. It is not a confirmed acquisition.`}</p>
       <div className="detail-actions"><button className="primary" onClick={() => onSensor(selected)}>Sensor view at next pass</button><button className="secondary" onClick={() => onFly(selected)}>Fly to satellite</button></div>
     </section>}
     <p className="mode-foot">{source}</p>
