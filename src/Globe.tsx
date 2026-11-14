@@ -5,12 +5,18 @@ import { DisplayModes, type DisplayMode } from './displayModes';
 import { ACCENT, LiveLayers, type FeedState, type LayerKey, type Selection } from './liveLayers';
 import { createStarSky } from './sky';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature, type TerrainReading } from './relief';
+import { DroneLayer } from './droneLayer';
+import { droneStore } from './drones';
 
 export type GlobeHandle = {
   home: () => void; flyTo: (b: Bounds) => void; flyToPoint: (lon: number, lat: number, heightM?: number) => void;
   zoom: (direction: number) => void; north: () => void; tilt: () => void; screenshot: () => void;
   /** Frame the area of interest, magnified `factor` times relative to a full view of it. */
   frame: (factor: number) => void;
+  /** Bring a drone into view from behind and above. */
+  followDrone: (id: string) => void;
+  /** The exact ground point under an open drone camera's crosshair (for its line of sight on the map). */
+  droneSight: (p: { id: string; lon: number; lat: number } | null) => void;
 };
 export type Telemetry = {
   lat: number; lon: number; alt: number; heading: number; pitch: number; centerLat: number | null; centerLon: number | null;
@@ -28,6 +34,7 @@ type Props = {
   /** The stylised relief map (3D only) and the land cover and named features that dress it. */
   relief: boolean; reliefOptions: ReliefOptions; terrainContext: { grid: Grid | null; features: TerrainFeature[] } | null;
   onHover?: (h: Hover | null) => void;
+  drones: boolean; selectedDrone: string | null; onSelectDrone: (id: string) => void;
   onPick: (bbox: Bounds) => void; onQuickPick: (lon: number, lat: number) => void; onSelect: (s: Selection | null) => void; onProbe: (lon: number, lat: number) => void;
   onTelemetry: (t: Telemetry) => void; onFeeds: (s: Record<string, FeedState>) => void; onReady: () => void;
   /** Google Photorealistic 3D Tiles could not be loaded (key missing, API disabled, quota). */
@@ -79,6 +86,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const tiles = useRef<C.Cesium3DTileset | null>(null);
   const tilesLoading = useRef(false);
   const relief = useRef<Relief | null>(null);
+  const drones = useRef<DroneLayer | null>(null);
   const metresPerPixel = useRef(30);
 
   const homeDestination = () => { const b = latest.current.region.bbox; return C.Cartesian3.fromDegrees((b[0] + b[2]) / 2, (b[1] + b[3]) / 2 * 0.5, HOME_HEIGHT); };
@@ -105,6 +113,20 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       const straight = v.camera.pitch < -1.35;
       v.camera.flyToBoundingSphere(new C.BoundingSphere(target, 1), { offset: new C.HeadingPitchRange(v.camera.heading, straight ? C.Math.toRadians(-38) : -C.Math.PI_OVER_TWO, range), duration: 1.1 });
     },
+    followDrone: (id) => {
+      const v = viewer.current; const st = droneStore.state(id); if (!v || !st) return;
+      const ex = v.scene.verticalExaggeration || 1; const carto = C.Cartographic.fromDegrees(st.lon, st.lat);
+      const go = (ground: number) => {
+        const target = C.Cartesian3.fromDegrees(st.lon, st.lat, ground + st.aglM);
+        v.camera.flyToBoundingSphere(new C.BoundingSphere(target, 1), { offset: new C.HeadingPitchRange((st.headingDeg + 30) * Math.PI / 180, C.Math.toRadians(-26), Math.max(900, st.aglM * 4.5)), duration: reducedMotion() ? 0 : 1.6 });
+      };
+      // Never aim from a coarse ground height (distant terrain tiles can be hundreds of metres off on a volcano):
+      // sample the most detailed terrain first, so the camera cannot end up inside a mountain.
+      const provider = terrainProvider.current;
+      if (provider) void C.sampleTerrainMostDetailed(provider, [carto]).then(([c]) => go(Math.max((c.height ?? 0) * ex, v.scene.globe.getHeight(carto) ?? -Infinity))).catch(() => go(v.scene.globe.getHeight(carto) ?? 0));
+      else go(v.scene.globe.getHeight(carto) ?? 0);
+    },
+    droneSight: (p) => { if (drones.current) drones.current.sightOverride = p; },
     screenshot: () => { const v = viewer.current; if (!v) return; v.render(); const a = document.createElement('a'); a.download = `terra-${Date.now()}.png`; a.href = v.canvas.toDataURL('image/png'); a.click(); },
   }));
 
@@ -213,6 +235,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         }
         first = undefined;
         const picked = vv.scene.pick(ev.position);
+        const pickedId = (picked as { id?: { kind?: string; droneId?: string } } | undefined)?.id;
+        if (pickedId?.kind === 'drone' && pickedId.droneId) { latest.current.onSelectDrone(pickedId.droneId); return; }
         const selection = picked ? live.current?.describe((picked as { id?: unknown }).id) ?? null : null;
         if (selection) { latest.current.onSelect(selection); return; }
         // With a science layer shown, a plain click reads the computed value under the cursor.
@@ -283,6 +307,9 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         const base = viewerRef.imageryLayers.addImageryProvider(provider);
         base.nightAlpha = .18; imagery = 'Esri World Imagery'; baseLayer.current = base; base.alpha = latest.current.imageryAlpha;
         relief.current = new Relief(viewerRef, base, [fallback]);
+        drones.current = new DroneLayer(viewerRef, droneStore);
+        // True terrain height (the drawn terrain is exaggerated) for aircraft flying at a height above ground.
+        droneStore.groundAt = (lon, lat) => { const h = globe.getHeight(C.Cartographic.fromDegrees(lon, lat)); return h === undefined ? undefined : h / (scene.verticalExaggeration || 1); };
         if (import.meta.env.DEV) Object.assign(window, { __terraRelief: relief.current });
         // The 2D map is cartographic rather than photographic: dark shaded relief, a dark land/water base and dark labels.
         const flatSource = (name: string, credit: string, level = 16) => viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({
@@ -309,7 +336,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     } catch (err) { setError(err instanceof Error ? err.message : 'WebGL could not initialize.'); }
     return () => {
       disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy();
-      live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); live.current = null; modes.current = null; relief.current = null;
+      live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); drones.current?.destroy(); live.current = null; modes.current = null; relief.current = null; drones.current = null;
+      droneStore.groundAt = null;
       if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tilesLoading.current = false;
     };
   }, []);
@@ -342,6 +370,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     relief.current?.set(props.relief && !props.flat, props.reliefOptions, props.lighting); v.scene.requestRender();
   }, [ready, props.relief, props.flat, props.reliefOptions, props.lighting]);
   useEffect(() => { if (ready) relief.current?.setContext(props.terrainContext?.grid ?? null, props.terrainContext?.features ?? []); }, [ready, props.terrainContext]);
+  useEffect(() => { if (ready) drones.current?.setVisible(props.drones && !props.flat); }, [ready, props.drones, props.flat]);
+  useEffect(() => { if (ready) drones.current?.setSelected(props.selectedDrone); }, [ready, props.selectedDrone]);
   useEffect(() => { const v = viewer.current; if (!v || !ready) return; v.scene.verticalExaggeration = props.exaggeration; v.scene.requestRender(); }, [ready, props.exaggeration]);
   useEffect(()=>{const v=viewer.current;if(!v||!ready)return;v.entities.values.filter(e=>e.id.startsWith('profile-')).forEach(e=>v.entities.remove(e));
     props.profileVertices.forEach((p,i)=>v.entities.add({id:`profile-point-${i}`,position:C.Cartesian3.fromDegrees(...p),point:{pixelSize:9,color:css('#b8603e'),outlineColor:C.Color.WHITE,outlineWidth:2,disableDepthTestDistance:Number.POSITIVE_INFINITY}}));
