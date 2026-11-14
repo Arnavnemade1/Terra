@@ -26,8 +26,11 @@ from .connector import request
 STAC = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 TOKEN = "https://planetarycomputer.microsoft.com/api/sas/v1/token/landsat-c2-l2"
 SCALE, OFFSET = 0.00341802, 149.0  # band 10 digital number to kelvin
-CLOUDY = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4)  # fill, dilated cloud, cloud, cloud shadow
+CLOUDY = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)  # fill, dilated cloud, cirrus, cloud, cloud shadow
 CACHE_SECONDS = 12 * 3600
+GRID = 0.01                 # areas are snapped outwards to a 0.01° grid, so nearby requests share one read
+MEMORY_KEEP = 24            # scenes kept in memory
+DISK_KEEP = 200             # scenes kept on disk
 _token: dict = {"value": None, "expires": 0.0}
 _memory: dict[str, tuple[float, dict]] = {}
 _locks: dict[str, asyncio.Lock] = {}
@@ -60,9 +63,13 @@ def _render(scene: dict, token: str, bbox: list[float]) -> dict | None:
     height, width = max(8, round(full_h * k)), max(8, round(full_w * k))
     transform = from_bounds(*bbox, width, height)
     href = lambda name: f"{scene['assets'][name]['href']}?{token}"  # noqa: E731 - signed for this read only
-    band = _read_cog(href("lwir11"), [1], bbox, transform, np.uint16, Resampling.bilinear, provider="landsat", shape=(height, width))[0]
+    # Nearest-neighbour, never bilinear: blending a fill pixel (0) into its neighbours would make them read as very cold.
+    band = _read_cog(href("lwir11"), [1], bbox, transform, np.uint16, Resampling.nearest, provider="landsat", shape=(height, width))[0]
     qa = _read_cog(href("qa_pixel"), [1], bbox, transform, np.uint16, Resampling.nearest, provider="landsat", shape=(height, width))[0]
-    valid = (band > 0) & (qa > 0) & ((qa & CLOUDY) == 0)
+    fill = (band == 0) | (qa == 0) | ((qa & 1) != 0)
+    # One more cell around the scene's edge and any fill: those cells mix edge and fill in the source grid.
+    edge = fill.copy(); edge[1:] |= fill[:-1]; edge[:-1] |= fill[1:]; edge[:, 1:] |= fill[:, :-1]; edge[:, :-1] |= fill[:, 1:]
+    valid = ~edge & ((qa & CLOUDY) == 0)
     share = float(valid.mean()) if valid.size else 0.0
     if share < 0.5:
         return None
@@ -90,9 +97,30 @@ def _disk(key: str) -> Path:
     return get_settings().data_dir / "cache" / f"thermal-{key}.json"
 
 
+def snap(bbox: list[float]) -> list[float]:
+    """The area grown outwards to the 0.01° grid (about 1 km), within the globe."""
+    w, s, e, n = bbox
+    return [round(max(-180.0, math.floor(w / GRID) * GRID), 2), round(max(-90.0, math.floor(s / GRID) * GRID), 2),
+            round(min(180.0, math.ceil(e / GRID) * GRID), 2), round(min(90.0, math.ceil(n / GRID) * GRID), 2)]
+
+
+def _remember(key: str, value: dict) -> None:
+    _memory[key] = (time.time(), value)
+    while len(_memory) > MEMORY_KEEP:
+        oldest = min(_memory, key=lambda k: _memory[k][0]); _memory.pop(oldest, None); _locks.pop(oldest, None)
+    try:
+        path = _disk(key); path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp"); temporary.write_text(json.dumps({"saved_at": time.time(), "value": value})); temporary.replace(path)
+        saved = sorted(path.parent.glob("thermal-*.json"), key=lambda f: f.stat().st_mtime)
+        for old in saved[:-DISK_KEEP]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 async def thermal(bbox: list[float]) -> dict:
     """The most recent mostly cloud-free surface-temperature scene over the area (searching back 120 days)."""
-    bbox = [round(v, 4) for v in bbox]
+    bbox = snap(bbox)
     key = hashlib.sha256(json.dumps(bbox).encode()).hexdigest()[:20]
     hit = _memory.get(key)
     if not hit:
@@ -113,12 +141,7 @@ async def thermal(bbox: list[float]) -> dict:
             if result:
                 value = {"available": True, **result}
                 break
-        _memory[key] = (time.time(), value)
-        try:
-            path = _disk(key); path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(".tmp"); temporary.write_text(json.dumps({"saved_at": time.time(), "value": value})); temporary.replace(path)
-        except OSError:
-            pass
+        _remember(key, value)
         return value
 
 
