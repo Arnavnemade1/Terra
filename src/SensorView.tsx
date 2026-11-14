@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as C from 'cesium';
 import { Crosshair, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
-import type { Sat } from './fleet';
+import { SWATH, type Sat } from './fleet';
 import { dmsPretty, subPoint } from './geo';
 import type { Bounds } from './types';
 
@@ -170,10 +170,13 @@ export default function SensorView({ sat, at, target, bbox, eo, sar, change, exp
 
   if (!geo) return null;
   const heading = (geo.look + aim.az + 360) % 360;
+  const swath = SWATH[sat.norad];
+  const inSwath = swath ? geo.nadirKm >= swath.nearKm && geo.nadirKm <= swath.farKm && (geo.side < 0) === (swath.side === 'left') : null;
   const gimbal = -(90 - geo.offNadir) + aim.el;
   const when = new Date(at);
   const rel = at - Date.now();
-  const relText = Math.abs(rel) < 60_000 ? 'NOW' : `${rel > 0 ? 'IN' : ''} ${Math.floor(Math.abs(rel) / 3_600_000)} H ${Math.floor(Math.abs(rel) % 3_600_000 / 60_000)} MIN${rel < 0 ? ' AGO' : ''}`.trim();
+  const span = Math.abs(rel), days = Math.floor(span / 86_400_000), hours = Math.floor(span % 86_400_000 / 3_600_000), mins = Math.floor(span % 3_600_000 / 60_000);
+  const relText = span < 60_000 ? 'NOW' : `${rel > 0 ? 'IN ' : ''}${days ? `${days} D ${hours} H` : `${hours} H ${mins} MIN`}${rel < 0 ? ' AGO' : ''}`;
   const sensor = mode === 'eo' ? `EO · ${eo ? 'SENTINEL-2' : 'BASEMAP'}` : mode === 'sar' ? `SAR · ${palette === 'ironbow' ? 'IRONBOW' : 'GREY'}` : 'Δ · CHANGE';
   const fmtClock = `${Math.floor(clock / 60)}:${String(clock % 60).padStart(2, '0')}`;
   const ticks: number[] = []; for (let a = Math.floor((heading - 40) / 5) * 5; a <= heading + 40; a += 5) ticks.push(a);
@@ -196,7 +199,8 @@ export default function SensorView({ sat, at, target, bbox, eo, sar, change, exp
         <div className="hud-bl"><span>ALT {Math.round(geo.h)} KM</span><span>GS {geo.ground.toFixed(1)} KM/S</span><span>HDG {Math.round(geo.track)}°</span></div>
         <div className="hud-bc"><span>SPI {dmsPretty(spi?.lat ?? target.lat, spi?.lon ?? target.lon).toUpperCase()}</span>
           <span className="dim">RNG {Math.round(geo.range)} KM · ELEV {spi?.h == null ? '—' : `${Math.round(spi.h).toLocaleString('en')} M`} · INC {geo.incidence.toFixed(0)}°</span></div>
-        <div className="hud-br"><span>OFF-NADIR {geo.offNadir.toFixed(1)}°</span><span>LOOK {geo.side < 0 ? 'L' : 'R'} · {Math.round(geo.nadirKm)} KM</span><span>ZOOM {zoom.toFixed(1)}× · {fovNow < 1 ? fovNow.toFixed(2) : fovNow.toFixed(1)}° FOV</span></div>
+        <div className="hud-br"><span>OFF-NADIR {geo.offNadir.toFixed(1)}°</span><span>LOOK {geo.side < 0 ? 'L' : 'R'} · {Math.round(geo.nadirKm)} KM</span><span>ZOOM {zoom.toFixed(1)}× · {fovNow < 1 ? fovNow.toFixed(2) : fovNow.toFixed(1)}° FOV</span>
+          {inSwath !== null && <span className={inSwath ? 'ok' : 'warn'} title={swath?.label}>{inSwath ? 'IN SWATH' : 'OUTSIDE SWATH'}</span>}</div>
       </div>
     </div>
     <div className="sensor-bar">
