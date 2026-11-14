@@ -138,12 +138,18 @@ def main() -> None:
                   "--reload", "--reload-dir", str(ROOT / "backend")], env)
     wait_for(api_port, "API")
     start("web", ["npx", "vite", "--host", "127.0.0.1"], env)
-    # Terra's virtual fleet connects through the same protocol and database as real drones (TERRA_VIRTUAL_FLEET=0 turns it off).
-    fleet = env.get("TERRA_VIRTUAL_FLEET", "5")
-    if env.get("TERRA_DRONE_TOKEN") and fleet not in ("", "0"):
-        start("fleet", [PYTHON, str(ROOT / "scripts" / "drone_bridge.py"), "--virtual", fleet], env)
-    elif not env.get("TERRA_DRONE_TOKEN"):
-        print("[dev] TERRA_DRONE_TOKEN is not set: drone connections and the virtual fleet are off.")
+    # The development fleet connects through the same protocol and database as real drones. ArduPilot SITL (the real
+    # flight firmware on simulated airframes) when it is built (python scripts/sitl.py setup); otherwise the lightweight
+    # virtual fleet. TERRA_FLEET=sitl|virtual|off chooses; TERRA_VIRTUAL_FLEET sets how many aircraft (default 5).
+    count = env.get("TERRA_VIRTUAL_FLEET", "5")
+    sitl_bin = Path(env.get("TERRA_SITL_HOME", str(Path.home() / ".terra" / "sitl"))) / "ardupilot" / "build" / "sitl" / "bin"
+    kind = env.get("TERRA_FLEET") or ("sitl" if (sitl_bin / "arducopter").exists() and (sitl_bin / "arduplane").exists() else "virtual")
+    if not env.get("TERRA_DRONE_TOKEN"):
+        print("[dev] TERRA_DRONE_TOKEN is not set: drone connections and the development fleet are off.")
+    elif kind == "sitl" and count not in ("", "0"):
+        start("fleet", [PYTHON, str(ROOT / "scripts" / "sitl.py"), "fleet", "--count", count], env)
+    elif kind == "virtual" and count not in ("", "0"):
+        start("fleet", [PYTHON, str(ROOT / "scripts" / "drone_bridge.py"), "--virtual", count], env)
     print(f"\n[dev] TERRA → http://127.0.0.1:5173   API docs → http://127.0.0.1:{api_port}/api/docs   Temporal UI → http://127.0.0.1:8233\n")
 
     # Supervise: restart a process that dies unexpectedly; give up only if it keeps crashing.
