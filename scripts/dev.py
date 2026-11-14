@@ -23,7 +23,7 @@ PYTHON = str(VENV_PY if VENV_PY.exists() else Path(sys.executable))
 TEMPORAL_PORT = int(os.getenv("TERRA_TEMPORAL_PORT", "7233"))
 API_PORT_PREFERRED = int(os.getenv("TERRA_API_PORT", "8000"))
 
-COLORS = {"temporal": "35", "worker": "33", "api": "36", "web": "32"}
+COLORS = {"temporal": "35", "worker": "33", "api": "36", "web": "32", "fleet": "34"}
 procs: list[tuple[str, subprocess.Popen]] = []
 commands: dict[str, list[str]] = {}
 restarts: dict[str, list[float]] = {}
@@ -138,6 +138,12 @@ def main() -> None:
                   "--reload", "--reload-dir", str(ROOT / "backend")], env)
     wait_for(api_port, "API")
     start("web", ["npx", "vite", "--host", "127.0.0.1"], env)
+    # Terra's virtual fleet connects through the same protocol and database as real drones (TERRA_VIRTUAL_FLEET=0 turns it off).
+    fleet = env.get("TERRA_VIRTUAL_FLEET", "5")
+    if env.get("TERRA_DRONE_TOKEN") and fleet not in ("", "0"):
+        start("fleet", [PYTHON, str(ROOT / "scripts" / "drone_bridge.py"), "--virtual", fleet], env)
+    elif not env.get("TERRA_DRONE_TOKEN"):
+        print("[dev] TERRA_DRONE_TOKEN is not set: drone connections and the virtual fleet are off.")
     print(f"\n[dev] TERRA → http://127.0.0.1:5173   API docs → http://127.0.0.1:{api_port}/api/docs   Temporal UI → http://127.0.0.1:8233\n")
 
     # Supervise: restart a process that dies unexpectedly; give up only if it keeps crashing.
