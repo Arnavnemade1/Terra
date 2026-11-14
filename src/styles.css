@@ -564,6 +564,7 @@ details.more[open] summary { margin-bottom: 8px; }
 .hud { position: absolute; inset: 0; pointer-events: none; font: 500 11.5px/1.45 var(--mono); color: #f4f1e8; letter-spacing: 0.04em; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.5); }
 .sensor.expanded .hud { font-size: 13px; }
 .hud .dim { color: rgba(244, 241, 232, 0.66); }
+.hud .ok { color: #9fe07a; } .hud .warn { color: #ffb15c; }
 .hud span { display: block; white-space: nowrap; }
 .hud .br { position: absolute; width: 22px; height: 22px; border: 0 solid rgba(244, 241, 232, 0.85); }
 .hud .br.tl { top: 10px; left: 10px; border-width: 1.5px 0 0 1.5px; } .hud .br.tr { top: 10px; right: 10px; border-width: 1.5px 1.5px 0 0; }
@@ -575,13 +576,13 @@ details.more[open] summary { margin-bottom: 8px; }
 .sensor:not(.expanded) .hud { font-size: 10.5px; letter-spacing: 0.02em; }
 .hud .rec { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #ff4d2e; vertical-align: 1px; animation: blink 1.2s steps(2, start) infinite; }
 @keyframes blink { to { visibility: hidden; } }
-.hud-tape { position: absolute; top: 12px; left: 32%; right: 32%; height: 46px; overflow: hidden; }
-.tape-ticks { position: absolute; inset: 0 0 auto; height: 22px; border-bottom: 1px solid rgba(244, 241, 232, 0.35); }
+.hud-tape { position: absolute; top: 8px; left: 32%; right: 32%; height: 56px; overflow: hidden; }
+.tape-ticks { position: absolute; top: 4px; left: 0; right: 0; height: 26px; border-bottom: 1px solid rgba(244, 241, 232, 0.35); }
 .tape-ticks span { position: absolute; bottom: 0; width: 1px; height: 5px; background: rgba(244, 241, 232, 0.6); }
 .tape-ticks span.mid { height: 8px; } .tape-ticks span.major { height: 11px; background: #f4f1e8; }
 .tape-ticks em { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); font-style: normal; font-size: 10.5px; }
-.tape-mark { position: absolute; top: 22px; left: 50%; transform: translateX(-50%); font-size: 9px; line-height: 1; }
-.tape-value { position: absolute; top: 31px; left: 50%; transform: translateX(-50%); font-weight: 600; }
+.tape-mark { position: absolute; top: 31px; left: 50%; transform: translateX(-50%); font-size: 9px; line-height: 1; }
+.tape-value { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); font-weight: 600; }
 .hud-pitch { position: absolute; right: 22px; top: 26%; bottom: 30%; width: 50px; }
 .pitch-label { position: absolute; top: -18px; right: 0; color: rgba(244, 241, 232, 0.66); }
 .pitch-scale { position: absolute; right: 0; top: 0; bottom: 0; width: 10px; border-right: 1.5px solid rgba(244, 241, 232, 0.8);
