@@ -139,13 +139,14 @@ class Area(BaseModel):
 
 class OperatorTask(BaseModel):
     drone_id: str = Field(pattern=ID)
-    kind: Literal["orbit", "survey", "perimeter", "relay", "hold", "return"]
+    kind: Literal["orbit", "survey", "perimeter", "search", "relay", "hold", "return"]
     label: str = Field(default="", max_length=60)
     lon: float | None = Field(default=None, ge=-180, le=180)
     lat: float | None = Field(default=None, ge=-90, le=90)
     radius_m: float = Field(default=250, ge=20, le=5000)
     agl_m: float = Field(default=150, ge=20, le=1000)
     bbox: list[float] | None = Field(default=None, min_length=4, max_length=4)
+    size_m: float = Field(default=1200, ge=200, le=4000)  # search: the side of the square searched
 
 
 class Setpoint(BaseModel):
@@ -333,9 +334,13 @@ async def operator_task(body: OperatorTask):
         if not (w < e and s < n and e - w <= 1 and n - s <= 1):
             raise HTTPException(422, "Use an area up to 1 degree across.")
         params.update(bbox=box, lane_m=150, inset=0.08)
+    elif body.kind == "search":
+        if body.lon is None or body.lat is None:
+            raise HTTPException(422, "A search needs a starting point (datum).")
+        params.update(lon=body.lon, lat=body.lat, size_m=body.size_m, lane_m=120, agl_m=min(body.agl_m, 120), speed_mps=min(params["speed_mps"], 8))
     else:
         params.update(lon=launch[0], lat=launch[1], agl_m=min(body.agl_m, 120))
-    label = body.label or {"orbit": "Orbit", "survey": "Survey", "perimeter": "Map the perimeter", "relay": "Radio relay", "hold": "Hold", "return": "Return to launch"}[body.kind]
+    label = body.label or {"orbit": "Orbit", "survey": "Survey", "perimeter": "Map the perimeter", "search": "Search", "relay": "Radio relay", "hold": "Hold", "return": "Return to launch"}[body.kind]
     task = await _db(db.create_task, body.drone_id, body.kind, label, params, "operator", "Assigned in the workspace", 1.0, None, time.time() + 15 * 60)
     await _db(db.message, "operator", body.drone_id, "operator-task", {"text": f"{drone['name']}: {label} (assigned by a person; held for 15 min).", "task_id": task["id"]})
     asyncio.create_task(ensure_coordinator("operator task"))
@@ -424,7 +429,8 @@ async def enroll(body: Enroll, request: Request):
     if body.relay:
         flags.append("--relay")
     if body.kind == "sitl":
-        command = "python3 scripts/sitl.py fleet   # starts ArduPilot SITL aircraft and their bridges (uses the server token)"
+        command = (f"TERRA_DRONE_TOKEN={token} python3 scripts/sitl.py add --id {shlex.quote(body.id)} --name {shlex.quote(body.name)} "
+                   f"--aircraft {'fixed-wing' if body.aircraft == 'fixed-wing' else 'quad'} --sensors {','.join(body.sensors)}" + (" --relay" if body.relay else ""))
     else:
         command = (f"TERRA_DRONE_TOKEN={token} python3 scripts/drone_bridge.py --mavlink {shlex.quote(body.connection)} " + " ".join(flags)
                    + "   # advisory: add --allow-commands to let Terra upload missions")
