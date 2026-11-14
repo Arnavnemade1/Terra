@@ -86,6 +86,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const retune = useRef<() => void>(() => {});
   const tiles = useRef<C.Cesium3DTileset | null>(null);
   const tilesLoading = useRef(false);
+  const tilesHaveView = useRef(false);
+  const [googleLoading,setGoogleLoading]=useState(false);
   const relief = useRef<Relief | null>(null);
   const drones = useRef<DroneLayer | null>(null);
   const metresPerPixel = useRef(30);
@@ -191,7 +193,12 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         if (t) {
           // Google tiles are drawn on their own: while they show, the globe (and with it every non-Google basemap) is hidden.
           const p = latest.current; const on = p.photoreal && !p.flat && !p.relief && !overlaid && scene.mode === C.SceneMode.SCENE3D && h < PHOTOREAL_BELOW;
-          if (t.show !== on) { t.show = on; globe.show = !on; scene.requestRender(); }
+          // Prepare only the view the user selected. The two basemaps never draw together.
+          t.preloadWhenHidden=on&&!tilesHaveView.current;
+          const showGoogle=on&&tilesHaveView.current;
+          if(t.show!==showGoogle){t.show=showGoogle;scene.requestRender();}
+          const showTerrain=!showGoogle;
+          if(globe.show!==showTerrain){globe.show=showTerrain;scene.requestRender();}
         }
         // Labels step back while a science layer is shown so the measurements stay legible.
         if (layer) layer.alpha = C.Math.clamp((9_000_000 - h) / 5_000_000, 0, 0.9) * (overlaid ? 0.5 : 1) * latest.current.labelAlpha;
@@ -343,7 +350,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy();
       live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); drones.current?.destroy(); live.current = null; modes.current = null; relief.current = null; drones.current = null;
       droneStore.groundAt = null;
-      if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tilesLoading.current = false;
+      if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tilesLoading.current = false; tilesHaveView.current=false;
     };
   }, []);
 
@@ -418,7 +425,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   // Google Photorealistic 3D Tiles, loaded the first time the style is chosen (each load starts a billed tileset session).
   useEffect(() => {
     const v = viewer.current; if (!v || !ready || !props.photoreal || tiles.current || tilesLoading.current) return;
-    tilesLoading.current = true; let failures = 0;
+    tilesLoading.current = true;setGoogleLoading(true);tilesHaveView.current=false;let failures=0;
     // Resource accepts `credits` at runtime (Cesium's own Google loader uses it); the published typings omit it.
     const resource = new C.Resource({ url: GOOGLE_TILESET, credits: [googleCredit()] } as unknown as C.Resource.ConstructorOptions);
     C.Cesium3DTileset.fromUrl(resource, { showCreditsOnScreen: true, enableCollision: true, maximumScreenSpaceError: tileError(latest.current.quality),
@@ -427,12 +434,14 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         tilesLoading.current = false;
         if (v.isDestroyed() || viewer.current !== v) { t.destroy(); return; }
         t.show = false; v.scene.primitives.add(t); tiles.current = t;
+        t.initialTilesLoaded.addEventListener(()=>{if(v.isDestroyed()||viewer.current!==v)return;tilesHaveView.current=true;setGoogleLoading(false);retune.current();v.scene.requestRender();});
+        t.tileLoad.addEventListener(()=>{failures=0;v.scene.requestRender();});
         t.tileFailed.addEventListener(() => {
-          if (++failures === 12) { const m = 'Google 3D tiles stopped loading. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); }
+          if (++failures === 12) { setGoogleLoading(false); const m = 'Google 3D tiles stopped loading. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); }
         });
         retune.current(); v.scene.requestRender();
       })
-      .catch(() => { tilesLoading.current = false; const m = 'Photorealistic 3D is unavailable right now. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); });
+      .catch(() => { tilesLoading.current = false;if(v.isDestroyed()||viewer.current!==v)return;setGoogleLoading(false);const m = 'Photorealistic 3D is unavailable right now. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); });
   }, [ready, props.photoreal]);
   useEffect(() => { const t = tiles.current; if (t) { t.maximumScreenSpaceError = tileError(props.quality); viewer.current?.scene.requestRender(); } }, [props.quality]);
   useEffect(() => { retune.current(); viewer.current?.scene.requestRender(); }, [ready, props.photoreal, props.relief, props.flat]);
@@ -493,6 +502,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     <div ref={mount} className={`globe-canvas ${props.picking ? 'is-picking' : ''}`} aria-label="Interactive Earth globe" />
     {!ready && !error && <div className="boot"><span className="boot-word">Terra</span><span className="boot-line" /></div>}
     {error && <div className="globe-error"><strong>The 3D view stopped</strong><p>{error}</p><p>Turn on hardware acceleration in your browser, then reload.</p></div>}
+    {googleLoading && props.photoreal && <div className="google-loading" role="status">Loading Google 3D · terrain preview</div>}
     {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss notice">×</button></div>}
     <div className="map-credits" ref={credits} />
   </>;

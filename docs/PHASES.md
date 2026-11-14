@@ -284,6 +284,13 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
   legible, with the scene's temperature scale and bracketed markers on the warmest measured ground; the crosshair reads
   the temperature or says there is none. EO has a sensor-style grade.
 
+## Phase 4i — Map Tiles handoff and drone workspace (2026-11-14)
+- Google 3D keeps the terrain preview visible until the first view is ready, then switches basemaps together. Restricted keys use the configured public referrer; keys remain behind the connector.
+- Camera header, expand/return controls, simpler HUD, mission-target and downward views, zoom, help, telemetry warnings, and video loading/error states. The toolbar stays above the timeline and fits a 360 px viewport.
+- Fleet reporting/task/attention summaries, aircraft filters, and direct camera access. Connected autopilot altitude is preserved instead of being replaced by coarse map terrain during loading.
+- IR palettes apply only to measured Landsat pixels and preserve nodata transparency. Dated source context stays visible; changing investigations replaces the camera's radar overlay.
+- Validation: production build, 194 backend tests, browser checks at desktop and 360 px, and no configured credentials found in the production bundle. The connected fleet used for UI verification was ArduPilot SITL.
+
 ## Phase 5 — Advanced science (§18–21)
 - Physics‑aware checks: speckle filtering, incidence angle and terrain normalization, statistical significance
 - Multisensor fusion (Sentinel‑1, Sentinel‑2, precipitation via GIBS/CMR)

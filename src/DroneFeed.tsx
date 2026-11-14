@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import * as C from 'cesium';
-import { Crosshair, Gamepad2, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
+import { Crosshair, Eye, EyeOff, HelpCircle, Gamepad2, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
 import { ft, kt, type DroneState, type DroneStore } from './drones';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature } from './relief';
 import { imagery, terrainUrl } from './tiles';
+import { colorizeThermal, type ThermalPalette as Palette } from './thermalPalette';
 import type { Bounds } from './types';
 
 export type Thermal = { png: string; bounds: Bounds; minC: number; maxC: number; date: string; source: string };
 type Mode = 'eo' | 'ir' | 'change';
-type Palette = 'ironbow' | 'white' | 'black';
 
 const MAPS = '/api/connector/maps';
 const DEG = Math.PI / 180;
@@ -49,21 +49,6 @@ function hottest(px: { data: Uint8ClampedArray; w: number; h: number }, t: Therm
   return out;
 }
 
-const IR_SHADER = `
-uniform sampler2D colorTexture;
-uniform float palette;
-in vec2 v_textureCoordinates;
-vec3 ironbow(float t) {
-  vec3 c0 = vec3(0.01, 0.0, 0.04), c1 = vec3(0.13, 0.02, 0.38), c2 = vec3(0.47, 0.05, 0.6), c3 = vec3(0.82, 0.22, 0.32), c4 = vec3(0.97, 0.52, 0.06), c5 = vec3(1.0, 0.86, 0.36), c6 = vec3(1.0, 1.0, 0.92);
-  t = clamp(t, 0.0, 1.0) * 6.0;
-  if (t < 1.0) return mix(c0, c1, t); if (t < 2.0) return mix(c1, c2, t - 1.0); if (t < 3.0) return mix(c2, c3, t - 2.0);
-  if (t < 4.0) return mix(c3, c4, t - 3.0); if (t < 5.0) return mix(c4, c5, t - 4.0); return mix(c5, c6, t - 5.0);
-}
-void main() {
-  float l = texture(colorTexture, v_textureCoordinates).r;
-  out_FragColor = vec4(palette < 0.5 ? ironbow(l) : palette < 1.5 ? vec3(l) : vec3(1.0 - l), 1.0);
-}`;
-
 /** 34°17.36′N 117°55.90′W: degrees and decimal minutes, as aircraft displays show positions. */
 export function dm(lat: number, lon: number) {
   const f = (v: number, p: string, n: string, w: number) => { const a = Math.abs(v); let d = Math.floor(a); let m = (a - d) * 60; if (m >= 59.995) { d += 1; m = 0; } return `${String(d).padStart(w, '0')}°${m.toFixed(2).padStart(5, '0')}′${v >= 0 ? p : n}`; };
@@ -85,8 +70,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const credits = useRef<HTMLDivElement>(null);
   const viewer = useRef<C.Viewer | null>(null);
   const world = useRef<Relief | null>(null);
-  const layers = useRef<{ base?: C.ImageryLayer; change?: C.ImageryLayer; thermal?: C.ImageryLayer; thermalKey?: string }>({});
-  const stage = useRef<C.PostProcessStage | null>(null);
+  const layers = useRef<{ base?: C.ImageryLayer; change?: C.ImageryLayer; thermal?: C.ImageryLayer; thermalKey?: string; changeKey?: string }>({});
   const eoStage = useRef<C.PostProcessStage | null>(null);
   const hot = useRef<Hot[]>([]);
   const [marks, setMarks] = useState<{ x: number; y: number; c: number; key: string }[]>([]);
@@ -100,8 +84,16 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const [spi, setSpi] = useState<{ lon: number; lat: number; h: number | null; range: number; temp: number | null; delta?: number | null } | null>(null);
   const [rec, setRec] = useState(0);
   const [video, setVideo] = useState(false);
+  const [videoState,setVideoState]=useState<'loading'|'ready'|'error'>('loading');
+  const [hudDetail,setHudDetail]=useState(true);
+  const [help,setHelp]=useState(false);
+  const [nadir,setNadir]=useState(false);
+  const [tileQueue,setTileQueue]=useState(0);
+  const [cameraError,setCameraError]=useState('');
+  const [thermalRevision,setThermalRevision]=useState(0);
+  const modeRef=useRef(mode);modeRef.current=mode;
   const keys = useRef(new Set<string>());
-  const live = useRef({ zoom, aim, flying }); live.current = { zoom, aim, flying };
+  const live = useRef({ zoom, aim, flying, nadir }); live.current = { zoom, aim, flying, nadir };
   const idRef = useRef(id); idRef.current = id;
 
   // One globe for the camera, kept for the life of the workspace. A WebGL context compiles its shaders and caches
@@ -116,7 +108,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     });
     viewer.current = v; const scene = v.scene;
     if (import.meta.env.DEV) Object.assign(window, { __terraFeed: v });
-    scene.backgroundColor = C.Color.BLACK; scene.highDynamicRange = false; scene.globe.maximumScreenSpaceError = 1.4; scene.globe.baseColor = C.Color.fromCssColorString('#2a2620');
+    scene.backgroundColor = C.Color.fromCssColorString('#8fa2aa'); scene.highDynamicRange = false; scene.globe.maximumScreenSpaceError = 1.4; scene.globe.baseColor = C.Color.fromCssColorString('#2a2620');
     scene.screenSpaceCameraController.enableInputs = false; scene.fog.enabled = true; scene.fog.density = 1.6e-4; scene.fog.minimumBrightness = 0.45;
     // The visible-light camera renders the world in daylight whatever the local time: atmosphere lighting follows the
     // scene's fixed light, not the real sun (which would turn a night-time view black), and the space-view ground haze is off.
@@ -128,7 +120,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     const base = v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...imagery('maps/imagery/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
     layers.current.base = base;
     world.current = new Relief(v, base, [base]);
-    const ir = new C.PostProcessStage({ fragmentShader: IR_SHADER, uniforms: { palette: 0 } }); ir.enabled = false; scene.postProcessStages.add(ir); stage.current = ir;
+    const stopQueue=scene.globe.tileLoadProgressEvent.addEventListener((n:number)=>setTileQueue(n));
+    const stopError=scene.renderError.addEventListener(()=>setCameraError('The rendered camera could not continue. Close and reopen the drone workspace.'));
     const eo = new C.PostProcessStage({ fragmentShader: EO_SHADER }); scene.postProcessStages.add(eo); eoStage.current = eo;
     void C.ArcGISTiledElevationTerrainProvider.fromUrl(terrainUrl()).then(t => { if (!disposed && !v.isDestroyed()) v.terrainProvider = t; }).catch(() => {});
     // Manual flight reads the ground from this view, which has the finest terrain around the aircraft.
@@ -147,13 +140,13 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       const height = Math.max(st.amslM, (ground ?? -1e9) + 8);
       const { aim: a, zoom: z } = live.current;
       v.camera.setView({ destination: C.Cartesian3.fromDegrees(st.lon, st.lat, height),
-        orientation: { heading: (st.gimbal.headingDeg + a.az) * DEG, pitch: C.Math.clamp(st.gimbal.pitchDeg + a.el, -90, 20) * DEG, roll: 0 } });
+        orientation: { heading: (st.gimbal.headingDeg + a.az) * DEG, pitch: (live.current.nadir ? -90 : C.Math.clamp(st.gimbal.pitchDeg + a.el, -90, 20)) * DEG, roll: 0 } });
       (v.camera.frustum as C.PerspectiveFrustum).fov = (FOV / z) * DEG;
       if (now - replant > 2500) { replant = now; world.current?.replant(); }
     });
     // Warm-ground markers: where the hottest measured places fall in the picture (in front of the camera only).
     const project = () => {
-      if (!stage.current?.enabled || !hot.current.length) { setMarks(m => m.length ? [] : m); return; }
+      if (modeRef.current!=='ir' || !hot.current.length) { setMarks(m => m.length ? [] : m); return; }
       const dir = v.camera.directionWC; const eye = v.camera.positionWC; const out: { x: number; y: number; c: number; key: string }[] = [];
       for (const h of hot.current) {
         const ground = scene.globe.getHeight(C.Cartographic.fromDegrees(h.lon, h.lat)); if (ground === undefined) continue;
@@ -165,7 +158,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       setMarks(out);
     };
     const ui = setInterval(() => { setS(store.state(idRef.current)); project(); }, 120);
-    return () => { disposed = true; tick(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; stage.current = null; eoStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
+    return () => { disposed = true; tick(); stopQueue(); stopError(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; eoStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
   }, [store]);
 
   // Shown: full frame rate. Parked: two frames a second at the detail the small view will show, so the tiles it
@@ -182,7 +175,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   }, [visible, expanded]);
 
   // Another aircraft: re-point the same camera.
-  useEffect(() => { setAim({ az: 0, el: 0 }); setZoom(1); setFlying(false); setMarks([]); setS(store.state(id)); }, [id, store]);
+  useEffect(() => { setAim({ az: 0, el: 0 }); setZoom(1); setFlying(false); setMarks([]); setS(store.state(id));setNadir(false);setVideo(false);setVideoState('loading');setSpi(null); }, [id, store]);
 
   // The world as styled on the main map (relief or photographic), its land cover and named places.
   useEffect(() => { world.current?.setContext(terrain?.grid ?? null, terrain?.features ?? []); }, [terrain]);
@@ -201,38 +194,51 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       base.show = mode === 'ir' || (eo && !relief);
       base.saturation = mode === 'ir' ? 0 : 1; base.brightness = mode === 'ir' ? 0.55 : 1; base.contrast = mode === 'ir' ? 0.75 : 1;
     }
-    if (layers.current.thermal) layers.current.thermal.alpha = 0.72;
+    if (layers.current.thermal) layers.current.thermal.alpha = 1;
     if (layers.current.change) layers.current.change.show = mode === 'change';
     if (layers.current.thermal) layers.current.thermal.show = mode === 'ir';
     v.scene.globe.baseColor = mode === 'ir' ? C.Color.fromCssColorString('#262626') : relief ? C.Color.fromCssColorString('#c9b48b') : C.Color.fromCssColorString('#2a2620');
     if (v.scene.skyAtmosphere) v.scene.skyAtmosphere.show = mode !== 'ir';
     v.scene.fog.enabled = mode !== 'ir';
-    if (stage.current) { stage.current.enabled = mode === 'ir'; stage.current.uniforms.palette = palette === 'ironbow' ? 0 : palette === 'white' ? 1 : 2; }
     if (eoStage.current) eoStage.current.enabled = mode === 'eo';
   }, [mode, palette, relief, reliefOptions]);
 
-  // Draped layers: the investigation's change layer and the thermal scene (as greyscale temperature).
-  useEffect(() => {
-    const v = viewer.current; if (!v) return; let cancelled = false;
-    if (change && !layers.current.change) void C.SingleTileImageryProvider.fromUrl(change.url, { rectangle: C.Rectangle.fromDegrees(...change.bounds), credit: new C.Credit('NISAR backscatter change (NASA-ISRO) · Terra') }).then(p => {
-      if (cancelled || v.isDestroyed()) return; const l = v.imageryLayers.addImageryProvider(p); l.alpha = 0.9; l.show = mode === 'change'; layers.current.change = l;
-    }).catch(() => {});
-    const key = thermal ? `${thermal.date}:${thermal.bounds.join(',')}` : '';
-    if (thermal && layers.current.thermalKey !== key) {
-      if (layers.current.thermal) { v.imageryLayers.remove(layers.current.thermal, true); layers.current.thermal = undefined; }
-      layers.current.thermalKey = key; const url = `data:image/png;base64,${thermal.png}`;
-      void C.SingleTileImageryProvider.fromUrl(url, { rectangle: C.Rectangle.fromDegrees(...thermal.bounds), credit: new C.Credit(`${thermal.source}, ${thermal.date} · USGS/NASA via Microsoft Planetary Computer`) }).then(p => {
-        if (cancelled || v.isDestroyed()) return; const l = v.imageryLayers.addImageryProvider(p); l.show = mode === 'ir'; l.alpha = 0.72; layers.current.thermal = l;
-      }).catch(() => {});
-      const img = new Image(); img.src = url; void img.decode().then(() => {
-        const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height; const x = cv.getContext('2d', { willReadFrequently: true })!; x.drawImage(img, 0, 0);
-        thermalPixels.current = { data: x.getImageData(0, 0, img.width, img.height).data, w: img.width, h: img.height };
-        hot.current = hottest(thermalPixels.current, thermal);
-      }).catch(() => {});
-    }
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [change?.url, thermal]);
+  // Replace radar layers when investigations change; never retain a previous area's overlay.
+  useEffect(()=>{
+    const v=viewer.current;if(!v)return;let cancelled=false;
+    if(layers.current.change){v.imageryLayers.remove(layers.current.change,true);layers.current.change=undefined;}
+    if(change)void C.SingleTileImageryProvider.fromUrl(change.url,{rectangle:C.Rectangle.fromDegrees(...change.bounds),credit:new C.Credit('NISAR backscatter change (NASA-ISRO) · Terra')}).then(p=>{
+      if(cancelled||v.isDestroyed())return;const l=v.imageryLayers.addImageryProvider(p);l.alpha=.9;l.show=modeRef.current==='change';layers.current.change=l;v.scene.requestRender();
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[change?.url]);
+
+  useEffect(()=>{
+    let cancelled=false;thermalPixels.current=null;hot.current=[];setMarks([]);
+    const v=viewer.current;
+    if(v&&layers.current.thermal){v.imageryLayers.remove(layers.current.thermal,true);layers.current.thermal=undefined;}
+    if(!thermal){setThermalRevision(n=>n+1);return;}
+    const img=new Image();img.src=`data:image/png;base64,${thermal.png}`;
+    void img.decode().then(()=>{if(cancelled)return;const cv=document.createElement('canvas');cv.width=img.width;cv.height=img.height;
+      const ctx=cv.getContext('2d',{willReadFrequently:true});if(!ctx)return;ctx.drawImage(img,0,0);
+      thermalPixels.current={data:ctx.getImageData(0,0,img.width,img.height).data,w:img.width,h:img.height};
+      hot.current=hottest(thermalPixels.current,thermal);setThermalRevision(n=>n+1);
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[thermal]);
+
+  useEffect(()=>{
+    const v=viewer.current,px=thermalPixels.current;if(!v||!px||!thermal)return;let cancelled=false;
+    const cv=document.createElement('canvas');cv.width=px.w;cv.height=px.h;const ctx=cv.getContext('2d');if(!ctx)return;
+    const coloured=ctx.createImageData(px.w,px.h);coloured.data.set(colorizeThermal(px.data,palette));ctx.putImageData(coloured,0,0);
+    if(layers.current.thermal){v.imageryLayers.remove(layers.current.thermal,true);layers.current.thermal=undefined;}
+    void C.SingleTileImageryProvider.fromUrl(cv.toDataURL(),{rectangle:C.Rectangle.fromDegrees(...thermal.bounds),credit:new C.Credit(`${thermal.source}, ${thermal.date} · USGS/NASA`)}).then(p=>{
+      if(cancelled||v.isDestroyed())return;const l=v.imageryLayers.addImageryProvider(p);l.show=modeRef.current==='ir';l.alpha=1;layers.current.thermal=l;v.scene.requestRender();
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[thermalRevision,palette,thermal]);
+
+  useEffect(()=>{if((mode==='ir'&&!thermal)||(mode==='change'&&!change))setMode('eo');},[thermal,change,mode]);
 
   // The ground under the crosshair, its temperature and measured change; and a recording clock.
   useEffect(() => {
@@ -251,7 +257,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       setSpi(prev => ({ lon, lat, h: v.scene.globe.getHeight(c) ?? null, range: C.Cartesian3.distance(v.camera.position, hit), temp, delta: prev?.delta }));
       onSight({ id, lon, lat });
       const key = `${lon.toFixed(4)},${lat.toFixed(4)}`;
-      if (mode === 'change' && onSample && key !== lastKey) { lastKey = key; const d = await onSample(lon, lat).catch(() => null); if (alive) setSpi(prev => prev ? { ...prev, delta: d } : prev); }
+      if (mode === 'change' && onSample && key !== lastKey) { lastKey = key; const d = await onSample(lon, lat).catch(() => null); if (alive) setSpi(prev => prev&&Math.abs(prev.lon-lon)<0.00001&&Math.abs(prev.lat-lat)<0.00001 ? { ...prev, delta: d } : prev); }
     };
     const a = setInterval(() => { void read(); }, 400); const b = setInterval(() => setRec(r => r + 1), 1000);
     return () => { alive = false; clearInterval(a); clearInterval(b); onSight(null); };
@@ -261,6 +267,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   useEffect(() => {
     if (!flying) return;
     const down = (e: KeyboardEvent) => {
+      if(e.target instanceof HTMLInputElement||e.target instanceof HTMLSelectElement||e.target instanceof HTMLTextAreaElement)return;
       const k = e.key.toLowerCase(); if (k === 'escape') { setFlying(false); return; }
       if (['w', 'a', 's', 'd', 'q', 'e', 'r', 'f', 'arrowup', 'arrowdown', 'shift', ' '].includes(k)) { e.preventDefault(); e.stopPropagation(); keys.current.add(k === ' ' ? 'r' : k); }
     };
@@ -273,31 +280,37 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
 
   // Drag slews the gimbal; the wheel zooms.
   const drag = useRef<{ x: number; y: number; az: number; el: number } | null>(null);
-  const onDown = (e: React.PointerEvent) => { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, az: aim.az, el: aim.el }; };
+  const onDown = (e: React.PointerEvent) => { if(video)return;setNadir(false); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, az: aim.az, el: aim.el }; };
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current; const el = mount.current; if (!d || !el) return; const k = FOV / zoom / el.clientWidth;
     setAim({ az: C.Math.clamp(d.az - (e.clientX - d.x) * k, -170, 170), el: C.Math.clamp(d.el + (e.clientY - d.y) * k, -60, 60) });
   };
-  const onWheel = (e: React.WheelEvent) => setZoom(z => C.Math.clamp(z * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 1, 16));
+  const onWheel = (e: React.WheelEvent) => !video && setZoom(z => C.Math.clamp(z * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 1, 16));
 
   if (!s) return <div className="sensor drone-feed parked" aria-hidden="true"><div className="sensor-screen"><div ref={mount} className="sensor-canvas" /></div><div ref={credits} className="sensor-credits" /></div>;
   const gimbalHeading = ((s.gimbal.headingDeg + aim.az) % 360 + 360) % 360;
-  const gimbalPitch = C.Math.clamp(s.gimbal.pitchDeg + aim.el, -90, 20);
+  const gimbalPitch = nadir ? -90 : C.Math.clamp(s.gimbal.pitchDeg + aim.el, -90, 20);
   const ticks: number[] = []; for (let a = Math.floor((gimbalHeading - 40) / 5) * 5; a <= gimbalHeading + 40; a += 5) ticks.push(a);
   const now = new Date();
+  const stale=s.status==='stale'||s.status==='lost';
+  const isLiveVideo=Boolean(s.videoUrl)&&s.source==='real'&&video;
   const hasVideo = Boolean(s.videoUrl) && s.source === 'real';
   const fmt = (n: number, d = 0) => Number.isFinite(n) ? n.toLocaleString('en', { maximumFractionDigits: d, minimumFractionDigits: d }) : '—';
   const sensor = mode === 'eo' ? (relief ? 'EO · DAY · RELIEF' : 'EO · DAY') : mode === 'ir' ? `IR · ${PALETTES[palette].toUpperCase()}` : 'Δ · CHANGE';
   const note = store.info.notes.find(n => n.drone_id === id);
   const recText = `${Math.floor(rec / 3600)}:${String(Math.floor(rec / 60) % 60).padStart(2, '0')}:${String(rec % 60).padStart(2, '0')}`;
 
-  return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible}>
-    <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onWheel={onWheel}>
+  return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'} ${hudDetail?'':'minimal-hud'} ${isLiveVideo?'video-mode':''}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible} inert={!visible}>
+    <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onPointerCancel={()=>{drag.current=null;}} onWheel={onWheel}>
       <div ref={mount} className="sensor-canvas" />
-      {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" />}
+      <div className="camera-head"><div><strong>{s.callsign}</strong><span>{s.name||'Observation camera'}</span><em className={s.source}>{s.source==='real'?'Connected aircraft':s.source==='sitl'?'SITL simulation':'Virtual simulation'}</em></div><div><button onClick={()=>setHudDetail(v=>!v)} aria-label={hudDetail?'Simplify camera HUD':'Show full camera HUD'} aria-pressed={!hudDetail}>{hudDetail?<Eye size={14}/>:<EyeOff size={14}/>}</button><button onClick={onExpand} aria-label={expanded?'Return to map':'Expand camera'}>{expanded?<Minimize2 size={14}/>:<Maximize2 size={14}/>}</button><button onClick={onClose} aria-label="Close camera"><X size={15}/></button></div></div>
+      {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" onLoad={()=>setVideoState('ready')} onError={()=>setVideoState('error')} />}
+      {cameraError&&<div className="camera-state error" role="alert">{cameraError}</div>}
+      {isLiveVideo&&videoState!=='ready'&&<div className="camera-state" role="status">{videoState==='error'?'The aircraft video stream is unavailable.':'Connecting to aircraft video…'}{videoState==='error'&&<button onClick={()=>setVideo(false)}>Use rendered view</button>}</div>}
+      {stale&&<div className="camera-telemetry-warning" role="status">{s.status==='lost'?'Telemetry lost':'Telemetry delayed'} · last report {s.ageS!==undefined?`${Math.round(s.ageS)} s ago`:'unavailable'}</div>}
       <div className="hud" aria-hidden="true">
         <i className="br tl" /><i className="br tr" /><i className="br bl" /><i className="br bottom-r" />
-        <div className="hud-tl"><span><b className="rec" />REC {recText}<em className={`src ${s.source}`}>{s.source === 'real' ? (hasVideo && video ? 'LIVE VIDEO' : 'LIVE · RENDERED') : s.source === 'sitl' ? 'SITL · ARDUPILOT' : 'SIM'}</em></span>
+        <div className="hud-tl"><span><b className="rec" />VIEW {recText}<em className={`src ${s.source}`}>{s.source === 'real' ? (hasVideo && video ? 'LIVE VIDEO' : 'LIVE · RENDERED') : s.source === 'sitl' ? 'SITL · ARDUPILOT' : 'SIM'}</em></span>
           <span>{s.callsign}{s.name ? ` ${s.name.toUpperCase()}` : ''}</span><span className="dim">{hasVideo && video ? 'EO · LIVE STREAM' : sensor}</span></div>
         <div className="hud-tr"><span>{now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'UTC' }).toUpperCase()}, {now.toISOString().slice(11, 16)} UTC</span><span className="dim">{s.mission.status.toUpperCase()}</span></div>
         <div className="hud-tape">
@@ -322,23 +335,25 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     </div>
     <div ref={credits} className="sensor-credits" aria-label="Imagery and data credits" />
     <div className="sensor-bar">
-      <b>{s.callsign}</b><span className="dim">{s.name || (s.source === 'real' ? 'connected aircraft' : s.source === 'sitl' ? 'ArduPilot SITL aircraft' : 'virtual aircraft')}</span>
+
       <div className="sensor-modes" role="group" aria-label="Camera mode">
-        <button className={mode === 'eo' ? 'on' : ''} onClick={() => setMode('eo')} title="Visible light: the 3D world as styled on the map">EO</button>
-        <button className={mode === 'ir' ? 'on sar' : ''} disabled={!thermal} onClick={() => setMode('ir')} title={thermal ? `Land-surface temperature, ${thermal.source}, ${thermal.date}` : 'No cloud-free thermal scene for this area yet'}>IR</button>
-        <button className={mode === 'change' ? 'on' : ''} disabled={!change} onClick={() => setMode('change')} title={change ? 'Radar backscatter change from this investigation' : 'Appears after a two-date investigation'}>Δ</button>
+        <button className={mode === 'eo' ? 'on' : ''} onClick={() => {setMode('eo');setVideo(false);}} title="Visible light: the 3D world as styled on the map">EO</button>
+        <button className={mode === 'ir' ? 'on sar' : ''} disabled={!thermal} onClick={() => {setMode('ir');setVideo(false);}} title={thermal ? `Land-surface temperature, ${thermal.source}, ${thermal.date}` : 'No cloud-free thermal scene for this area yet'}>IR</button>
+        <button className={mode === 'change' ? 'on' : ''} disabled={!change} onClick={() => {setMode('change');setVideo(false);}} title={change ? 'Radar backscatter change from this investigation' : 'Appears after a two-date investigation'}>Δ</button>
       </div>
       {mode === 'ir' && <button className="sensor-palette" onClick={() => setPalette(p => p === 'ironbow' ? 'white' : p === 'white' ? 'black' : 'ironbow')}>{PALETTES[palette]}</button>}
-      {hasVideo && <button className={`sensor-palette ${video ? 'on' : ''}`} onClick={() => setVideo(v => !v)}>{video ? 'Rendered view' : 'Live video'}</button>}
+      {hasVideo && <button className={`sensor-palette ${video ? 'on' : ''}`} onClick={() => {setVideoState('loading');setVideo(v => !v);setMode('eo');setFlying(false);}}>{video ? 'Rendered view' : 'Live video'}</button>}
       {s.source !== 'real' && <button className={`sensor-palette fly ${flying ? 'on' : ''}`} onClick={() => setFlying(f => !f)}
         title={s.source === 'sitl' ? 'Fly this ArduPilot SITL aircraft with the keyboard (GUIDED mode setpoints; real aircraft are never flown from the browser)' : 'Fly this virtual aircraft with the keyboard (real aircraft are never flown from the browser)'}><Gamepad2 size={14} />{flying ? 'Flying' : 'Fly'}</button>}
+      {!isLiveVideo&&<div className="gimbal-presets" role="group" aria-label="Camera direction"><button className={!nadir?'on':''} onClick={()=>{setNadir(false);setAim({az:0,el:0});}}>Mission target</button><button className={nadir?'on':''} onClick={()=>setNadir(true)}>Look down</button></div>}
       <span className="grow" />
-      <button className="icon-btn" onClick={() => setZoom(z => Math.max(1, z / 1.5))} aria-label="Zoom out"><Minus size={14} /></button>
+      <button className="icon-btn" disabled={isLiveVideo} onClick={() => setZoom(z => Math.max(1, z / 1.5))} aria-label="Zoom out"><Minus size={14} /></button>
       <span className="num zoom-read">{zoom.toFixed(1)}×</span>
-      <button className="icon-btn" onClick={() => setZoom(z => Math.min(16, z * 1.5))} aria-label="Zoom in"><Plus size={14} /></button>
-      <button className="icon-btn" onClick={() => { setAim({ az: 0, el: 0 }); setZoom(1); }} aria-label="Point the camera back at the mission target" title="Re-centre"><Crosshair size={14} /></button>
-      <button className="icon-btn" onClick={onExpand} aria-label={expanded ? 'Shrink' : 'Full camera view'}>{expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
-      <button className="icon-btn" onClick={onClose} aria-label="Close camera"><X size={14} /></button>
+      <button className="icon-btn" disabled={isLiveVideo} onClick={() => setZoom(z => Math.min(16, z * 1.5))} aria-label="Zoom in"><Plus size={14} /></button>
+      <button className="icon-btn" onClick={() => { setNadir(false);setAim({ az: 0, el: 0 }); setZoom(1); }} aria-label="Point the camera back at the mission target" title="Re-centre"><Crosshair size={14} /></button>
+<button className="icon-btn" onClick={()=>setHelp(h=>!h)} aria-label="Camera controls help" aria-expanded={help}><HelpCircle size={14}/></button>
     </div>
+    <div className="camera-context"><span><i className={stale?'warn':'ok'}/>{isLiveVideo?'Aircraft video':mode==='ir'?`Landsat surface temperature · ${thermal?.date} · ~100 m source`:mode==='change'?'NISAR change overlay · measured acquisition pair':`${relief?'Relief':'Imagery'} · rendered from aircraft telemetry`}</span><span>{isLiveVideo?'':tileQueue>0?'Refining terrain…':'Drag to aim · scroll to zoom'}</span></div>
+    {help&&<div className="camera-help"><strong>Camera controls</strong><p>Drag the image to slew the gimbal. Scroll or use +/− to zoom. Mission target restores tracking; Look down gives a vertical view. The eye button simplifies telemetry.</p><p>IR shows a dated Landsat temperature layer; Δ shows the investigation’s radar change. Areas without a measurement show the base map.</p>{s.source!=='real'&&<p>Fly controls simulation: W/S forward, A/D sideways, Q/E yaw, R/F climb, arrows for gimbal, Shift for speed, Escape to hand back.</p>}</div>}
   </div>;
 }

@@ -106,11 +106,14 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
 }) {
   const [, tick] = useReducer((x: number) => x + 1, 0);
   const [sent, setSent] = useState('');
+  const [fleetFilter,setFleetFilter]=useState<'all'|'airborne'|'attention'>('all');
   useEffect(() => { const id = setInterval(tick, 500); const off = store.subscribe(tick); return () => { clearInterval(id); off(); }; }, [store]);
   const states = store.states(); const info = store.info;
   const s = states.find(d => d.id === selected) || null;
   const area = store.area(); const centre: [number, number] | null = area ? [(area[0] + area[2]) / 2, (area[1] + area[3]) / 2] : null;
   const airborne = states.filter(d => d.status === 'airborne').length;
+  const attention=(d:DroneState)=>d.status==='lost'||d.status==='stale'||(Number.isFinite(d.batteryPct)&&d.batteryPct<25);
+  const visibleStates=states.filter(d=>fleetFilter==='all'||(fleetFilter==='airborne'?d.status==='airborne':attention(d)));
   const real = states.filter(d => d.source === 'real'); const sitl = states.filter(d => d.source === 'sitl');
   const profile: Profile = info.area?.profile ?? 'change';
   const callsign = (id: string) => states.find(d => d.id === id)?.callsign ?? id.toUpperCase();
@@ -152,12 +155,15 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
     <div className={`coord-chip ${info.coordinator.running ? 'on' : ''}`} title="The durable coordinator agent (a Temporal workflow) and one agent per aircraft">
       <i />{info.coordinator.running ? <>Coordinator · round {info.coordinator.summary.round ?? '—'} · {info.coordinator.summary.text}</> : info.area ? 'Coordinator starting or offline: the investigation service may be down.' : 'Waiting for a monitoring area.'}</div>
     {!states.length && info.connections && <p className="card-note fleet-empty">No aircraft connected yet. The dev stack starts an ArduPilot SITL fleet when it is built (python3 scripts/sitl.py setup), otherwise a virtual fleet; add more below.</p>}
-    <ul className="fleet-list">{states.map(d => <li key={d.id}><button className={d.id === selected ? 'on' : ''} onClick={() => onSelect(d.id)}>
+    <div className="fleet-overview"><div><strong>{states.filter(d=>d.status!=='lost'&&d.status!=='stale').length}<small>/{states.length}</small></strong><span>Reporting</span></div><div><strong>{states.filter(d=>d.task?.status==='active').length}</strong><span>Tasks active</span></div><div className={states.some(attention)?'attention':''}><strong>{states.filter(attention).length}</strong><span>Need attention</span></div></div>
+    <div className="fleet-filters" role="group" aria-label="Filter aircraft">{(['all','airborne','attention'] as const).map(f=><button key={f} className={fleetFilter===f?'on':''} aria-pressed={fleetFilter===f} onClick={()=>setFleetFilter(f)}>{f==='all'?'All aircraft':f==='airborne'?'Airborne':'Needs attention'}</button>)}</div>
+    <ul className="fleet-list">{visibleStates.map(d => <li key={d.id}><button className={d.id === selected ? 'on' : ''} onClick={() => onSelect(d.id)}>
       <span className="fleet-icon"><AircraftIcon aircraft={d.aircraft} /></span>
       <span className="fleet-name"><b>{d.callsign}</b> {d.name}<em className={`src-tag ${d.source}`}>{SOURCE[d.source].tag}</em><small>{d.mission.task}</small></span>
       <span className="fleet-status"><em className={d.status === 'stale' || d.status === 'lost' ? 'warn' : d.status === 'landed' ? 'quiet' : ''}>{d.status === 'lost' ? 'No signal' : d.status === 'stale' ? 'Delayed' : d.mission.status}</em><small className="num">{d.status === 'landed' ? 'on ground' : `${fmt(Math.round(ft(d.aglM) / 10) * 10)} ft`}</small></span>
       <span className="fleet-battery"><i><b style={{ width: `${Number.isFinite(d.batteryPct) ? d.batteryPct : 0}%`, background: d.batteryPct < 30 ? 'var(--warn)' : 'var(--ok)' }} /></i><small className="num">{Number.isFinite(d.batteryPct) ? `${Math.round(d.batteryPct)}%` : '—'}</small></span>
-    </button></li>)}</ul>
+    </button><button className="fleet-quick-camera" onClick={()=>onCamera(d.id)} aria-label={`Open camera on ${d.callsign}`} title={`Camera · ${d.callsign}`}><Video size={14}/></button></li>)}</ul>
+    {!visibleStates.length&&<p className="card-note fleet-filter-empty">{fleetFilter==='attention'?'No connected aircraft currently meet the low-battery or delayed-telemetry filter.':fleetFilter==='airborne'?'No aircraft are airborne.':'No aircraft connected.'}</p>}
     {s && <section className="fleet-detail">
       <header><b>{s.callsign}</b> <span>{s.name}</span><span className="grow" /><span className="status-chip">{s.mission.status}</span></header>
       <div className="fleet-stats">

@@ -262,7 +262,8 @@ export class DroneStore {
       : { kind: 'idle', label: landed ? 'On the ground' : 'No task', status: landed ? 'Landed' : 'Idle', task: landed ? 'Waiting at the launch site' : 'Waiting for a task', aglM: height, speedMps: speed };
     return {
       id, callsign: d.id.toUpperCase().slice(0, 10), name: d.name !== d.id ? d.name : '', source: d.origin, aircraft, color: d.origin === 'real' ? '#9fe07a' : d.origin === 'sitl' ? '#8fc8ff' : '#f4f1e8',
-      mission, lon, lat, aglM: height, groundM: ground, amslM: agl === null && !m ? alt : (ground ?? 0) + height, headingDeg: heading, speedMps: speed,
+      // Connected autopilots already report AMSL. A coarse or unloaded map tile must not replace it.
+      mission, lon, lat, aglM: height, groundM: ground, amslM: !m && (d.origin !== 'virtual' || agl === null) ? alt : (ground ?? 0) + height, headingDeg: heading, speedMps: speed,
       pitchDeg: aircraft === 'quad' ? -Math.min(14, speed * 0.7) : 2, rollDeg: roll, gimbal: { headingDeg: gh, pitchDeg: gp },
       batteryPct: battery, minutesLeft: Number.isFinite(battery) ? (battery - 15) / (100 / Number(caps.endurance_min ?? 30)) : NaN,
       linkDbm: typeof st.link_dbm === 'number' ? st.link_dbm : NaN, flightS: Math.max(0, Date.now() / 1000 - d.registered_at),
