@@ -20,7 +20,8 @@ EARTH = 6_371_000.0
 RESERVE_PCT = 15.0          # battery kept in hand after returning
 LOW_MARGIN_PCT = 8.0        # start home this far above the bare minimum
 STATION_S = 300.0           # planning horizon on a job (re-planned continuously), seconds
-STICKY_S = 150.0            # a better bid must beat the current holder by this much to take a job over
+STICKY_S = 300.0            # a better bid must beat the current holder by this much (five minutes of flying) to take a job
+                            # over: a swap costs both aircraft a transit and leaves a gap in coverage
 QUAD_LAYERS = [110, 150, 190, 230, 270, 310]       # metres above ground
 WING_LAYERS = [430, 500, 570]
 SEPARATION_M = 40.0         # vertical separation between overlapping volumes
@@ -92,6 +93,12 @@ def build_jobs(area: dict, targets: list[dict], drones: list[dict]) -> list[dict
     bbox, launch = area["bbox"], area["launch"]
     width, height = _bbox_m(bbox)
     jobs: list[dict] = []
+    # Search sectors (search-and-rescue profile): an expanding-square search from each sector's datum.
+    for t in [x for x in targets if x.get("kind") == "search"][:5]:
+        jobs.append({"key": f"search:{t['id']}", "kind": "search", "label": f"Search {t['label']}", "priority": round(0.6 + 0.4 * t["priority"], 3),
+                     "needs": t.get("needs", []), "target_id": t["id"],
+                     "params": {"lon": t["lon"], "lat": t["lat"], "size_m": round(min(4000.0, t["radius_m"] * 2)), "lane_m": 120, "agl_m": 90, "speed_mps": 8}})
+    targets = [x for x in targets if x.get("kind") != "search"]
     for t in sorted(targets, key=lambda x: -x["priority"])[:4]:
         agl = min(300.0, max(120.0, t["radius_m"] * 0.45))
         radius = max(120.0, agl / math.tan(math.radians(40)))  # camera looks down at about 40 degrees
@@ -120,6 +127,20 @@ def build_jobs(area: dict, targets: list[dict], drones: list[dict]) -> list[dict
         jobs.append({"key": "overwatch", "kind": "relay", "label": "Overwatch the centre", "priority": 0.35, "needs": [],
                      "params": {"lon": (bbox[0] + bbox[2]) / 2, "lat": (bbox[1] + bbox[3]) / 2, "agl_m": 290, "radius_m": 250, "speed_mps": 7}})
     return jobs
+
+
+def search_points(params: dict) -> list[tuple[float, float]]:
+    """An expanding-square search from a datum (the standard pattern for a small search area): legs of one, one,
+    two, two, three, three … lane spacings, turning right each time, until the square reaches the search size."""
+    lon, lat = params["lon"], params["lat"]; lane = float(params.get("lane_m", 120)); size = float(params.get("size_m", 1200))
+    pts = [(lon, lat)]; x = y = 0.0; heading = 0; leg = 1
+    while max(abs(x), abs(y)) * 2 < size and len(pts) < 80:
+        for _ in range(2):
+            dx, dy = [(0, 1), (1, 0), (0, -1), (-1, 0)][heading % 4]
+            x += dx * leg * lane; y += dy * leg * lane; heading += 1
+            pts.append(offset(lon, lat, x, y))
+        leg += 1
+    return pts
 
 
 def job_entry(job: dict) -> tuple[float, float]:
@@ -202,7 +223,9 @@ def award(jobs: list[dict], bids: list[dict], available: list[str], holders: dic
 
 # ---------------------------------------------------------------- airspace
 def volume_for(kind: str, params: dict, agl: float) -> dict:
-    if kind in ("orbit", "relay", "hold", "standby"):
+    if kind == "search":
+        geometry = {"type": "circle", "lon": params["lon"], "lat": params["lat"], "radius_m": float(params.get("size_m", 1200)) * 0.75 + 60}
+    elif kind in ("orbit", "relay", "hold", "standby"):
         geometry = {"type": "circle", "lon": params["lon"], "lat": params["lat"], "radius_m": float(params.get("radius_m", 60)) + 60}
     elif kind == "return":
         geometry = {"type": "circle", "lon": params["lon"], "lat": params["lat"], "radius_m": 150.0}
@@ -274,7 +297,7 @@ def assess(drone: dict, task: dict | None, operation: dict | None, others: list[
 
 # ---------------------------------------------------------------- one coordination round
 def plan_round(area: dict, targets: list[dict], drones: list[dict], tasks: list[dict], bids: list[dict], controlled: set[str], now: float,
-               refused: set[tuple[str, str]] = frozenset()) -> dict:
+               refused: set[tuple[str, str]] = frozenset(), benched: set[str] = frozenset()) -> dict:
     """Decide jobs, awards, tasks and airspace for this round. Returns plain decisions to apply."""
     launch = area["launch"]
     # Aircraft far from this operation (another area, another country) are left alone: not tasked, not sent home.
@@ -312,13 +335,16 @@ def plan_round(area: dict, targets: list[dict], drones: list[dict], tasks: list[
         if d and d.get("link_state") == "lost":
             decisions["released"].append(t["id"])
         # A real aircraft that never acknowledged its task is not counted on, and is not re-tasked this round.
-        elif d and d["origin"] == "real" and t["status"] == "assigned" and t["created_by"] != "operator" and now - t["created_at"] > 30:
+        elif d and d["origin"] in ("real", "sitl") and t["status"] == "assigned" and t["created_by"] != "operator" and now - t["created_at"] > 30:
             decisions["released"].append(t["id"]); unresponsive.add(d["id"])
             decisions["messages"].append({"kind": "unacknowledged", "text": f"{d['name']} did not acknowledge “{t['label']}” within 30 s; the job is reopened."})
 
     # Auction among aircraft free to take work. Agents' bids are used when fresh; for any silent agent the
     # coordinator bids on its behalf from the database so the fleet never stalls.
-    available = [d["id"] for d in online if d["id"] not in pinned and d["id"] not in returning and d["id"] not in unresponsive and not (d.get("state", {}).get("landed") and (d.get("state", {}).get("battery_pct") or 100) < 60)]
+    for drone_id in sorted(benched):
+        if any(d["id"] == drone_id for d in online):
+            decisions["messages"].append({"kind": "benched", "text": f"{drone_id} rejected its recent tasks; not tasked for two minutes, then tried again."})
+    available = [d["id"] for d in online if d["id"] not in pinned and d["id"] not in returning and d["id"] not in unresponsive and d["id"] not in benched and not (d.get("state", {}).get("landed") and (d.get("state", {}).get("battery_pct") or 100) < 60)]
     fresh = {(b["drone_id"], b["job_key"]) for b in bids}
     # A job an aircraft refused recently is not offered to it again for a while.
     all_bids = [b for b in bids if b["job_key"] in job_by_key and (b["drone_id"], b["job_key"]) not in refused]
@@ -353,6 +379,9 @@ def plan_round(area: dict, targets: list[dict], drones: list[dict], tasks: list[
                 decisions["retarget"].append({"task_id": held["id"], "params": params})
         else:
             j = job_by_key[p["job_key"]]
+            previous = holders.get(j["key"])
+            if previous and previous != p["drone_id"]:
+                params["relieves"] = previous  # the newcomer tells the drone it relieves when it is on station
             decisions["tasks"].append({"drone_id": p["drone_id"], "kind": j["kind"], "label": j["label"], "job_key": j["key"], "priority": j["priority"], "params": params,
                                        "reason": "Awarded at auction" + (f"; moved to {p['agl_m']:.0f} m to stay clear of other aircraft" if p["moved"] else "")})
         if p["moved"]:

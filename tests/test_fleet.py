@@ -24,7 +24,8 @@ def client(monkeypatch, tmp_path):
     async def no_temporal(reason):
         return False
     monkeypatch.setattr("terra.fleet.api.ensure_coordinator", no_temporal)
-    with TestClient(api.app, base_url="http://localhost") as instance:
+    # The workspace: a same-origin browser request from this machine.
+    with TestClient(api.app, base_url="http://localhost", headers={"sec-fetch-site": "same-origin"}) as instance:
         yield instance
 
 
@@ -215,3 +216,151 @@ def test_aircraft_far_from_the_operation_are_left_alone():
     d = planner.plan_round(AREA_STATE, TARGETS, [elsewhere], [], [], set(), time.time())
     assert not [t for t in d["tasks"] if t["drone_id"] == "elsewhere"]
     assert d["away"] == ["elsewhere"] and any(m["kind"] == "out-of-area" for m in d["messages"])
+
+
+# ---------------------------------------------------------------- mission profiles, search, notes, hand-offs, enrollment
+def test_search_profile_plans_expanding_square_searches(client, tmp_path):
+    assert client.post("/api/fleet/area", json={**AREA, "profile": "search"}).json()["targets"] == 4
+    targets = FleetDB(tmp_path / "terra.db").targets()
+    assert {t["kind"] for t in targets} == {"search"} and len(targets) == 4
+    jobs = planner.build_jobs(AREA_STATE, targets, [])
+    search = [j for j in jobs if j["kind"] == "search"]
+    assert len(search) == 4 and all(j["params"]["size_m"] >= 400 for j in search)
+    route = planner.search_points(search[0]["params"])
+    start = route[0]
+    assert start == (search[0]["params"]["lon"], search[0]["params"]["lat"]) and len(route) > 8
+    # Each leg is a whole number of lanes and the square grows outwards.
+    reach = [planner.distance(*start, *p) for p in route]
+    assert reach[-1] > reach[2] > 0
+
+
+def test_thermal_profile_sends_ir_aircraft_to_the_warmest_ground(client, monkeypatch, tmp_path):
+    import base64
+    from io import BytesIO
+    import numpy as np
+    from PIL import Image
+    pixels = np.full((40, 40, 2), (60, 255), dtype=np.uint8); pixels[5, 30] = (255, 255); pixels[34, 4] = (220, 255)
+    buffer = BytesIO(); Image.fromarray(pixels, "LA").save(buffer, "PNG")
+    scene = {"available": True, "png": base64.b64encode(buffer.getvalue()).decode(), "minC": 10.0, "maxC": 60.0, "bounds": AREA["bbox"], "date": "2026-10-30"}
+
+    async def fake_thermal(bbox):
+        return scene
+    monkeypatch.setattr("terra.thermal.thermal", fake_thermal)
+    client.post("/api/fleet/area", json={**AREA, "profile": "thermal"})
+    hot = [t for t in FleetDB(tmp_path / "terra.db").targets() if t["kind"] == "hotspot"]
+    assert len(hot) >= 2 and all(t["needs"] == ["ir"] for t in hot)
+    warmest = max(hot, key=lambda t: t["priority"])
+    assert "≥60 °C" in warmest["label"] and warmest["lon"] > 15.0 and warmest["lat"] > 37.8  # at the top of the scale
+    assert any(t["label"].endswith(" 53 °C") for t in hot)  # below the top: the reading itself
+
+
+def test_agents_write_field_notes_and_relieve_the_aircraft_they_replace(client, monkeypatch, tmp_path):
+    import numpy as np
+    client.post("/api/fleet/area", json=AREA)
+    _register(client, "d0"); _fly(client, "d0", 1, lon=15.05, lat=37.74, agl=120, gimbal={"heading_deg": 90, "pitch_deg": -60})
+    data = {"thermal": {"c": np.full((20, 20), 48.0), "bounds": AREA["bbox"], "date": "2026-10-30", "platform": "Landsat 9", "p95": 41.0},
+            "weather": {"temperature_2m": 21.0, "wind_speed_10m": 14.0, "wind_direction_10m": 250}}
+    monkeypatch.setattr("terra.fleet.observe.area_data", lambda bbox, investigation: data)
+    monkeypatch.setattr(activities, "_elevation", lambda lon, lat: 1480.0)
+    db = FleetDB(tmp_path / "terra.db")
+    # A person's orbit (no auction job behind it) must not trip the agent's bookkeeping.
+    task = db.create_task("d0", "orbit", "Orbit change patch 1", {"lon": 15.06, "lat": 37.75, "radius_m": 200, "agl_m": 120, "relieves": "d9"},
+                          "operator", "test", 0.9, None, None)
+    assert client.post(f"/api/fleet/tasks/{task['id']}/ack", json={"id": "d0", "status": "active"}, headers=AUTH).status_code == 200
+    assert activities.run_drone_agent_round({"drone_id": "d0", "round": 0})["note"] == "warm"
+    activities.run_drone_agent_round({"drone_id": "d0", "round": 1})  # within two minutes: no second note
+    state = client.get("/api/fleet").json()
+    [note] = state["notes"]
+    assert note["drone_id"] == "d0" and note["data"]["surface_c"] == 48.0 and note["data"]["elevation_m"] == 1480
+    assert "Landsat 9 surface temperature, 2026-10-30" in note["text"] and "wind 14 km/h from the W" in note["text"]
+    assert note["lon"] > 15.05  # the camera looks east, so the noted ground is east of the aircraft
+    kinds = {m["kind"]: m for m in state["messages"]}
+    assert kinds["relieved"]["recipient"] == "agent:d9" and "relieved" in kinds["relieved"]["body"]["text"]
+    assert "observation" in kinds
+
+
+def test_enrolled_aircraft_use_their_own_revocable_token(client, tmp_path):
+    reply = client.post("/api/fleet/enroll", json={"id": "uav-7", "name": "Ridge Seven", "sensors": ["eo", "ir"], "connection": "udpin:0.0.0.0:14550"})
+    assert reply.status_code == 201
+    token = reply.json()["token"]
+    assert token.startswith("terra_") and token in reply.json()["command"] and "--mavlink udpin:0.0.0.0:14550" in reply.json()["command"]
+    own = {"authorization": f"Bearer {token}"}
+    assert client.post("/api/fleet/register", json={"id": "uav-7", "name": "Ridge Seven"}, headers=own).status_code == 201
+    assert client.post("/api/fleet/register", json={"id": "uav-8", "name": "Someone else"}, headers=own).status_code == 403
+    listed = client.get("/api/fleet/enrollments").json()["enrollments"]
+    assert listed[0]["drone_id"] == "uav-7" and token not in str(listed)
+    assert token not in (tmp_path / "terra.db").read_bytes().decode("latin-1")  # only its hash is kept
+    assert client.post("/api/fleet/enrollments/uav-7/revoke").json()["revoked"] == 1
+    assert client.post("/api/fleet/register", json={"id": "uav-7", "name": "Ridge Seven"}, headers=own).status_code == 401
+    assert client.post("/api/fleet/enroll", json={"id": "x", "name": "x", "connection": "udp:1; rm -rf /"}).status_code == 422
+
+
+def test_bridge_flies_every_task_kind_as_an_ardupilot_mission():
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("drone_bridge", Path(__file__).parents[1] / "scripts" / "drone_bridge.py")
+    bridge = importlib.util.module_from_spec(spec); spec.loader.exec_module(bridge)
+    home = (15.0, 37.725, 1200.0)
+    for kind, params in [("orbit", {"lon": 15.06, "lat": 37.75, "radius_m": 900, "agl_m": 150}), ("hold", {"lon": 15.0, "lat": 37.73, "agl_m": 100}),
+                         ("survey", {"bbox": [15.0, 37.7, 15.02, 37.72], "agl_m": 120}), ("search", {"lon": 15.02, "lat": 37.71, "size_m": 800, "agl_m": 90})]:
+        items = bridge.mission_items({"kind": kind, "params": params}, home, airborne=False, aircraft="quad")
+        assert items[0]["frame"] == bridge.FRAME_GLOBAL and items[1]["command"] == bridge.CMD_TAKEOFF
+        if kind == "orbit":
+            assert items[3]["p3"] == 250  # a quad's orbit radius is capped
+        if kind in ("orbit", "survey", "search"):
+            assert items[-1]["command"] == bridge.CMD_DO_JUMP and items[-1]["p2"] == -1
+    airborne = bridge.mission_items({"kind": "orbit", "params": {"lon": 15.06, "lat": 37.75, "agl_m": 150}}, home, airborne=True, aircraft="fixed-wing")
+    assert bridge.CMD_TAKEOFF not in [i["command"] for i in airborne] and airborne[2]["p3"] >= 80
+    with pytest.raises(ValueError):
+        bridge.mission_items({"kind": "dance", "params": {}}, home, False, "quad")
+
+
+# ---------------------------------------------------------------- operator routes: the workspace or the token, never a guess
+OPERATOR_ROUTES = [("GET", "/api/fleet", None), ("GET", "/api/fleet/operations", None), ("POST", "/api/fleet/area", AREA),
+                   ("POST", "/api/fleet/tasks", {"drone_id": "d1", "kind": "hold", "lon": 15.0, "lat": 37.7}),
+                   ("POST", "/api/fleet/drones/d1/control", {"lon": 15.0, "lat": 37.7, "agl_m": 100, "heading_deg": 0}),
+                   ("POST", "/api/fleet/drones/d1/release", None), ("GET", "/api/fleet/enrollments", None),
+                   ("POST", "/api/fleet/enroll", {"id": "x1", "name": "x1"}), ("POST", "/api/fleet/enrollments/x1/revoke", None)]
+
+
+def test_operator_routes_need_the_workspace_or_the_token(client):
+    _register(client, "d1"); _fly(client, "d1", 1)
+    aircraft_token = client.post("/api/fleet/enroll", json={"id": "d1", "name": "d1"}).json()["token"]
+    bare = TestClient(api.app, base_url="http://localhost")  # curl, a script, or anything that is not the workspace
+    for method, path, body in OPERATOR_ROUTES:
+        call = lambda c, **kw: c.request(method, path, json=body, **kw)  # noqa: E731
+        assert call(bare).status_code == 403, path
+        assert call(bare, headers={"authorization": "Bearer wrong"}).status_code == 401, path
+        assert call(bare, headers={"authorization": f"Bearer {aircraft_token}"}).status_code == 401, path  # an aircraft's token is not an operator's
+        assert call(bare, headers={"sec-fetch-site": "same-origin", "origin": "https://evil.example"}).status_code == 403, path
+        assert call(bare, headers=AUTH).status_code < 400, path
+        assert call(client).status_code < 400, path
+
+
+def test_other_machines_need_the_token_even_with_browser_headers(client, monkeypatch):
+    monkeypatch.setattr("terra.fleet.api.LOCAL", {"127.0.0.1"})  # the test transport now counts as another machine
+    assert client.get("/api/fleet").status_code == 403
+    assert client.get("/api/fleet", headers=AUTH).status_code == 200
+
+
+def test_operator_tasks_are_checked(client):
+    _register(client, "d1"); _fly(client, "d1", 1)
+    task = lambda **kw: client.post("/api/fleet/tasks", json={"drone_id": "d1", **kw})  # noqa: E731
+    assert task(kind="survey", bbox=[1e9, 0, 1e9 + 0.5, 0.5]).status_code == 422
+    assert task(kind="survey", bbox=[15.0, 37.7, 15.1, 37.8]).status_code == 201
+    assert task(kind="search", lon=15.0, lat=37.7, size_m=900).json()["task"]["params"]["size_m"] == 900
+    assert client.post("/api/fleet/drones/nobody/release").status_code == 404
+    _register(client, "blank")  # registered, never reported a position, and no monitoring area yet
+    assert client.post("/api/fleet/tasks", json={"drone_id": "blank", "kind": "return"}).status_code == 422
+
+
+def test_old_telemetry_is_pruned_whatever_the_sequence_numbers(client, tmp_path, monkeypatch):
+    from terra.fleet import db as fleet_db_module
+    _register(client, "d1")
+    clock = {"t": 1_000_000.0}
+    monkeypatch.setattr(fleet_db_module, "now", lambda: clock["t"])
+    monkeypatch.setitem(fleet_db_module._pruned, "at", 0.0)
+    for seq in (3, 7):  # odd sequence numbers never hit a "every 200th message" rule
+        _fly(client, "d1", seq); clock["t"] += fleet_db_module.TELEMETRY_KEEP_S + 120
+    _fly(client, "d1", 11)
+    assert len(FleetDB(tmp_path / "terra.db").track("d1", 10**9)) == 1

@@ -14,6 +14,39 @@ const DEG = Math.PI / 180;
 const FOV = 52;
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const PALETTES: Record<Palette, string> = { ironbow: 'Ironbow', white: 'White hot', black: 'Black hot' };
+const SCALE: Record<Palette, string> = {
+  ironbow: 'linear-gradient(to top, #0a0010, #210561, #780d99, #d13852, #f7850f, #ffdb5c, #fffff0)',
+  white: 'linear-gradient(to top, #000, #fff)', black: 'linear-gradient(to top, #fff, #000)',
+};
+type Hot = { lon: number; lat: number; c: number };
+const NOTE_LABEL: Record<string, string> = { warm: 'WARM GROUND', change: 'CHANGED GROUND', station: 'ON STATION', observation: 'OBSERVATION' };
+
+/** A daylight sensor look for the visible-light camera: slightly desaturated, a touch more contrast, a soft vignette. */
+const EO_SHADER = `
+uniform sampler2D colorTexture;
+in vec2 v_textureCoordinates;
+void main() {
+  vec3 c = texture(colorTexture, v_textureCoordinates).rgb;
+  float l = dot(c, vec3(0.299, 0.587, 0.114));
+  c = mix(vec3(l), c, 0.86);
+  c = clamp((c - 0.5) * 1.07 + 0.5, 0.0, 1.0);
+  vec2 d = v_textureCoordinates - 0.5;
+  out_FragColor = vec4(c * (1.0 - dot(d, d) * 0.6), 1.0);
+}`;
+
+/** The warmest places in a thermal scene, at least `sepM` apart (read from the decoded temperature image). */
+function hottest(px: { data: Uint8ClampedArray; w: number; h: number }, t: Thermal, count = 6, sepM = 400): Hot[] {
+  const idx: number[] = []; for (let i = 0; i < px.w * px.h; i++) if (px.data[i * 4 + 3] > 0) idx.push(i);
+  idx.sort((a, b) => px.data[b * 4] - px.data[a * 4]);
+  const [w, s, e, n] = t.bounds; const out: Hot[] = [];
+  for (const i of idx.slice(0, 20000)) {
+    const x = i % px.w, y = Math.floor(i / px.w); const lon = w + (x + 0.5) / px.w * (e - w), lat = n - (y + 0.5) / px.h * (n - s);
+    if (out.every(q => Math.hypot((lon - q.lon) * 111_320 * Math.cos(lat * DEG), (lat - q.lat) * 110_574) > sepM)) {
+      out.push({ lon, lat, c: t.minC + px.data[i * 4] / 255 * (t.maxC - t.minC) }); if (out.length >= count) break;
+    }
+  }
+  return out;
+}
 
 const IR_SHADER = `
 uniform sampler2D colorTexture;
@@ -53,6 +86,9 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const world = useRef<Relief | null>(null);
   const layers = useRef<{ base?: C.ImageryLayer; change?: C.ImageryLayer; thermal?: C.ImageryLayer; thermalKey?: string }>({});
   const stage = useRef<C.PostProcessStage | null>(null);
+  const eoStage = useRef<C.PostProcessStage | null>(null);
+  const hot = useRef<Hot[]>([]);
+  const [marks, setMarks] = useState<{ x: number; y: number; c: number; key: string }[]>([]);
   const thermalPixels = useRef<{ data: Uint8ClampedArray; w: number; h: number } | null>(null);
   const [mode, setMode] = useState<Mode>('eo');
   const [palette, setPalette] = useState<Palette>('ironbow');
@@ -83,11 +119,13 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     scene.globe.showGroundAtmosphere = false; scene.globe.dynamicAtmosphereLighting = false; scene.globe.enableLighting = false;
     scene.atmosphere.dynamicLighting = C.DynamicAtmosphereLightingType.NONE;
     if (scene.skyAtmosphere) { scene.skyAtmosphere.show = true; scene.skyAtmosphere.saturationShift = -0.25; scene.skyAtmosphere.brightnessShift = 0.05; }
-    v.resolutionScale = Math.min(window.devicePixelRatio, 1.5);
+    // Sharper rendering without overloading the GPU: up to 1.5× pixels, finer terrain detail, FXAA on top of MSAA.
+    v.resolutionScale = Math.min(window.devicePixelRatio, 1.5); scene.globe.maximumScreenSpaceError = 1.25; scene.postProcessStages.fxaa.enabled = true;
     const base = v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ url: `${MAPS}/imagery/{z}/{y}/{x}`, tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
     layers.current.base = base;
     world.current = new Relief(v, base, [base]);
     const ir = new C.PostProcessStage({ fragmentShader: IR_SHADER, uniforms: { palette: 0 } }); ir.enabled = false; scene.postProcessStages.add(ir); stage.current = ir;
+    const eo = new C.PostProcessStage({ fragmentShader: EO_SHADER }); scene.postProcessStages.add(eo); eoStage.current = eo;
     void C.ArcGISTiledElevationTerrainProvider.fromUrl('/api/connector/terrain').then(t => { if (!disposed && !v.isDestroyed()) v.terrainProvider = t; }).catch(() => {});
     // Manual flight reads the ground from this view, which has the finest terrain around the aircraft.
     store.feedGroundAt = (lon, lat) => { if (v.isDestroyed()) return undefined; return scene.globe.getHeight(C.Cartographic.fromDegrees(lon, lat)); };
@@ -109,8 +147,21 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       (v.camera.frustum as C.PerspectiveFrustum).fov = (FOV / z) * DEG;
       if (now - replant > 2500) { replant = now; world.current?.replant(); }
     });
-    const ui = setInterval(() => { setS(store.state(id)); }, 120);
-    return () => { disposed = true; tick(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; stage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
+    // Warm-ground markers: where the hottest measured places fall in the picture (in front of the camera only).
+    const project = () => {
+      if (!stage.current?.enabled || !hot.current.length) { setMarks(m => m.length ? [] : m); return; }
+      const dir = v.camera.directionWC; const eye = v.camera.positionWC; const out: { x: number; y: number; c: number; key: string }[] = [];
+      for (const h of hot.current) {
+        const ground = scene.globe.getHeight(C.Cartographic.fromDegrees(h.lon, h.lat)); if (ground === undefined) continue;
+        const p = C.Cartesian3.fromDegrees(h.lon, h.lat, ground);
+        if (C.Cartesian3.dot(C.Cartesian3.subtract(p, eye, new C.Cartesian3()), dir) <= 0) continue;
+        const w = C.SceneTransforms.worldToWindowCoordinates(scene, p);
+        if (w && w.x > 0 && w.y > 0 && w.x < v.canvas.clientWidth && w.y < v.canvas.clientHeight) out.push({ x: w.x, y: w.y, c: h.c, key: `${h.lon},${h.lat}` });
+      }
+      setMarks(out);
+    };
+    const ui = setInterval(() => { setS(store.state(id)); project(); }, 120);
+    return () => { disposed = true; tick(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; stage.current = null; eoStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
   }, [id, store]);
 
   // The world as styled on the main map (relief or photographic), its land cover and named places.
@@ -123,13 +174,21 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     // With globe lighting on, Cesium supplies the eye-space positions the relief shading needs (without it they can
     // arrive undefined in a second globe). The relief's fixed north-west light keeps this daylight at any hour.
     v.scene.globe.enableLighting = eo && relief;
-    if (layers.current.base) layers.current.base.show = eo && !relief;
+    // IR: the measured temperature (72 %) over a dim, greyscale view of the ground (28 %), so terrain and fields stay
+    // legible at 30 m thermal pixels; where Landsat has no value (cloud, edge) only that dim ground shows.
+    const base = layers.current.base;
+    if (base) {
+      base.show = mode === 'ir' || (eo && !relief);
+      base.saturation = mode === 'ir' ? 0 : 1; base.brightness = mode === 'ir' ? 0.55 : 1; base.contrast = mode === 'ir' ? 0.75 : 1;
+    }
+    if (layers.current.thermal) layers.current.thermal.alpha = 0.72;
     if (layers.current.change) layers.current.change.show = mode === 'change';
     if (layers.current.thermal) layers.current.thermal.show = mode === 'ir';
     v.scene.globe.baseColor = mode === 'ir' ? C.Color.fromCssColorString('#262626') : relief ? C.Color.fromCssColorString('#c9b48b') : C.Color.fromCssColorString('#2a2620');
     if (v.scene.skyAtmosphere) v.scene.skyAtmosphere.show = mode !== 'ir';
     v.scene.fog.enabled = mode !== 'ir';
     if (stage.current) { stage.current.enabled = mode === 'ir'; stage.current.uniforms.palette = palette === 'ironbow' ? 0 : palette === 'white' ? 1 : 2; }
+    if (eoStage.current) eoStage.current.enabled = mode === 'eo';
   }, [mode, palette, relief, reliefOptions]);
 
   // Draped layers: the investigation's change layer and the thermal scene (as greyscale temperature).
@@ -143,11 +202,12 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       if (layers.current.thermal) { v.imageryLayers.remove(layers.current.thermal, true); layers.current.thermal = undefined; }
       layers.current.thermalKey = key; const url = `data:image/png;base64,${thermal.png}`;
       void C.SingleTileImageryProvider.fromUrl(url, { rectangle: C.Rectangle.fromDegrees(...thermal.bounds), credit: new C.Credit(`${thermal.source}, ${thermal.date} · USGS/NASA via Microsoft Planetary Computer`) }).then(p => {
-        if (cancelled || v.isDestroyed()) return; const l = v.imageryLayers.addImageryProvider(p); l.show = mode === 'ir'; layers.current.thermal = l;
+        if (cancelled || v.isDestroyed()) return; const l = v.imageryLayers.addImageryProvider(p); l.show = mode === 'ir'; l.alpha = 0.72; layers.current.thermal = l;
       }).catch(() => {});
       const img = new Image(); img.src = url; void img.decode().then(() => {
         const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height; const x = cv.getContext('2d', { willReadFrequently: true })!; x.drawImage(img, 0, 0);
         thermalPixels.current = { data: x.getImageData(0, 0, img.width, img.height).data, w: img.width, h: img.height };
+        hot.current = hottest(thermalPixels.current, thermal);
       }).catch(() => {});
     }
     return () => { cancelled = true; };
@@ -207,6 +267,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const hasVideo = Boolean(s.videoUrl) && s.source === 'real';
   const fmt = (n: number, d = 0) => Number.isFinite(n) ? n.toLocaleString('en', { maximumFractionDigits: d, minimumFractionDigits: d }) : '—';
   const sensor = mode === 'eo' ? (relief ? 'EO · DAY · RELIEF' : 'EO · DAY') : mode === 'ir' ? `IR · ${PALETTES[palette].toUpperCase()}` : 'Δ · CHANGE';
+  const note = store.info.notes.find(n => n.drone_id === id);
   const recText = `${Math.floor(rec / 3600)}:${String(Math.floor(rec / 60) % 60).padStart(2, '0')}:${String(rec % 60).padStart(2, '0')}`;
 
   return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`}>
@@ -215,7 +276,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" />}
       <div className="hud" aria-hidden="true">
         <i className="br tl" /><i className="br tr" /><i className="br bl" /><i className="br bottom-r" />
-        <div className="hud-tl"><span><b className="rec" />REC {recText}<em className={`src ${s.source}`}>{s.source === 'real' ? (hasVideo && video ? 'LIVE VIDEO' : 'LIVE · RENDERED') : 'SIM'}</em></span>
+        <div className="hud-tl"><span><b className="rec" />REC {recText}<em className={`src ${s.source}`}>{s.source === 'real' ? (hasVideo && video ? 'LIVE VIDEO' : 'LIVE · RENDERED') : s.source === 'sitl' ? 'SITL · ARDUPILOT' : 'SIM'}</em></span>
           <span>{s.callsign}{s.name ? ` ${s.name.toUpperCase()}` : ''}</span><span className="dim">{hasVideo && video ? 'EO · LIVE STREAM' : sensor}</span></div>
         <div className="hud-tr"><span>{now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', timeZone: 'UTC' }).toUpperCase()}, {now.toISOString().slice(11, 16)} UTC</span><span className="dim">{s.mission.status.toUpperCase()}</span></div>
         <div className="hud-tape">
@@ -225,18 +286,22 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
         </div>
         <div className="hud-pitch"><span className="pitch-label">GMB</span><div className="pitch-scale"><i style={{ top: `${C.Math.clamp(-gimbalPitch / 90, 0, 1) * 100}%` }}><em>{Math.round(gimbalPitch)}°</em></i></div></div>
         <div className="hud-cross"><i /><i /></div>
+        {mode === 'ir' && marks.map(m => <div key={m.key} className="hot-mark" style={{ left: m.x, top: m.y }}><i /><span>HOT {thermal && m.c >= thermal.maxC - 0.2 ? '≥' : ''}{m.c.toFixed(0)}°C</span></div>)}
+        {mode === 'ir' && thermal && <div className="ir-scale"><b>{thermal.maxC.toFixed(0)}°C</b><i style={{ background: SCALE[palette] }} /><b>{thermal.minC.toFixed(0)}°C</b>
+          <small>LANDSAT LST {thermal.date}</small></div>}
+        {note && <div className={`hud-note ${note.kind}`}><b>NOTE · {NOTE_LABEL[note.kind] ?? note.kind.toUpperCase()}</b><span>{note.text}</span></div>}
         <div className="hud-bl"><span>ALT {fmt(Math.round(ft(s.aglM) / 10) * 10)} FT AGL</span><span>GS {String(Math.round(kt(s.speedMps))).padStart(3, ' ')} KT</span><span>HDG {String(Math.round(s.headingDeg) % 360).padStart(3, '0')}°</span></div>
         <div className="hud-bc">
           {flying && <span className="fly-hint">W/S FWD · A/D SIDE · Q/E YAW · R/F CLIMB · ↑/↓ GIMBAL · SHIFT FAST · ESC</span>}
           <span>SPI {spi ? dm(spi.lat, spi.lon) : '—'}</span>
-          <span className="dim">RNG {spi ? `${fmt(spi.range)} M` : '—'} · ELEV {spi?.h != null ? `${fmt(spi.h)} M` : '—'}{mode === 'ir' && spi?.temp != null ? ` · ${spi.temp.toFixed(0)} °C` : ''}{mode === 'change' && spi?.delta != null ? ` · Δ ${spi.delta >= 0 ? '+' : '−'}${Math.abs(spi.delta).toFixed(1)} DB` : ''}</span></div>
+          <span className="dim">RNG {spi ? `${fmt(spi.range)} M` : '—'} · ELEV {spi?.h != null ? `${fmt(spi.h)} M` : '—'}{mode === 'ir' ? (spi?.temp != null ? ` · ${spi.temp.toFixed(0)} °C` : ' · NO LST HERE') : ''}{mode === 'change' && spi?.delta != null ? ` · Δ ${spi.delta >= 0 ? '+' : '−'}${Math.abs(spi.delta).toFixed(1)} DB` : ''}</span></div>
         <div className="hud-br"><span>BAT {Number.isFinite(s.batteryPct) ? `${Math.round(s.batteryPct)}%` : '—'}</span><span>LNK {Number.isFinite(s.linkDbm) ? `${Math.round(s.linkDbm)}`.replace('-', '−') : '—'} DBM</span>
           <span>ZOOM {zoom.toFixed(1)}× · {Math.round(FOV / zoom)}° FOV</span></div>
       </div>
     </div>
     <div ref={credits} className="sensor-credits" aria-label="Imagery and data credits" />
     <div className="sensor-bar">
-      <b>{s.callsign}</b><span className="dim">{s.name || (s.source === 'real' ? 'connected aircraft' : 'virtual aircraft')}</span>
+      <b>{s.callsign}</b><span className="dim">{s.name || (s.source === 'real' ? 'connected aircraft' : s.source === 'sitl' ? 'ArduPilot SITL aircraft' : 'virtual aircraft')}</span>
       <div className="sensor-modes" role="group" aria-label="Camera mode">
         <button className={mode === 'eo' ? 'on' : ''} onClick={() => setMode('eo')} title="Visible light: the 3D world as styled on the map">EO</button>
         <button className={mode === 'ir' ? 'on sar' : ''} disabled={!thermal} onClick={() => setMode('ir')} title={thermal ? `Land-surface temperature, ${thermal.source}, ${thermal.date}` : 'No cloud-free thermal scene for this area yet'}>IR</button>
@@ -244,7 +309,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       </div>
       {mode === 'ir' && <button className="sensor-palette" onClick={() => setPalette(p => p === 'ironbow' ? 'white' : p === 'white' ? 'black' : 'ironbow')}>{PALETTES[palette]}</button>}
       {hasVideo && <button className={`sensor-palette ${video ? 'on' : ''}`} onClick={() => setVideo(v => !v)}>{video ? 'Rendered view' : 'Live video'}</button>}
-      {s.source === 'virtual' && <button className={`sensor-palette fly ${flying ? 'on' : ''}`} onClick={() => setFlying(f => !f)} title="Fly this virtual aircraft with the keyboard (real aircraft are never flown from the browser)"><Gamepad2 size={14} />{flying ? 'Flying' : 'Fly'}</button>}
+      {s.source !== 'real' && <button className={`sensor-palette fly ${flying ? 'on' : ''}`} onClick={() => setFlying(f => !f)}
+        title={s.source === 'sitl' ? 'Fly this ArduPilot SITL aircraft with the keyboard (GUIDED mode setpoints; real aircraft are never flown from the browser)' : 'Fly this virtual aircraft with the keyboard (real aircraft are never flown from the browser)'}><Gamepad2 size={14} />{flying ? 'Flying' : 'Fly'}</button>}
       <span className="grow" />
       <button className="icon-btn" onClick={() => setZoom(z => Math.max(1, z / 1.5))} aria-label="Zoom out"><Minus size={14} /></button>
       <span className="num zoom-read">{zoom.toFixed(1)}×</span>

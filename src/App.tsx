@@ -17,7 +17,7 @@ import { crossTrack, predictPasses, swathPass, SWATH, trackSeries, useFleet, typ
 import SensorView from './SensorView';
 import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
-import { droneStore, type Patch, type Place } from './drones';
+import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
 
 type Mode = 'investigation' | 'hazards' | 'satellites' | 'drones';
@@ -89,7 +89,8 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [flat, setFlat] = useState(false);
-  const [style, setStyle] = useState<MapStyle>(() => { const v = readJSON<MapStyle>('terra.style', 'photo'); return v === 'relief' || v === 'photoreal' ? v : 'photo'; });
+  // The shaded relief map is the default look (terrain, contours, land cover, summits); a saved choice wins.
+  const [style, setStyle] = useState<MapStyle>(() => { const v = readJSON<MapStyle>('terra.style', 'relief'); return v === 'photo' || v === 'photoreal' ? v : 'relief'; });
   // Google Photorealistic 3D Tiles: offered only when the server has a working Map Tiles API key.
   const [photorealState, setPhotorealState] = useState<{ available: boolean; reason: string | null } | null>(null);
   const [terrain, setTerrain] = useState<{ ctx: TerrainContext; grid: Grid | null } | null>(null);
@@ -313,7 +314,7 @@ export default function App() {
   const optical = useMemo(() => [...(result?.optical_evidence || [])].sort((a, b) => a.date.localeCompare(b.date)), [result]);
   const m = result?.measurements as { observations?: Stats[]; change?: Stats } | undefined;
   const change = m?.change; const obs = m?.observations || [];
-  const hotspots = change?.hotspots || [];
+  const hotspots = change?.hotspots ?? NO_HOTSPOTS;  // a stable empty list, so effects that depend on it do not re-run every render
   const pairTimes = radar.map(l => Date.parse(String(l.date)));
   const url = (l: Layer) => l.url || artifactUrl(job!, l.path.split('/').pop() || '');
   // The timeline chooses which dated image is shown: the latest radar and true-colour view at or before the cursor.
@@ -358,15 +359,23 @@ export default function App() {
   // workspace shows the fleet's own area, new results (patches, summits) refresh its targets automatically.
   const [fleetReady, setFleetReady] = useState(false);
   useEffect(() => droneStore.subscribe(() => setFleetReady(droneStore.ready)), []);
+  // The finished investigation for this area: the agents read its measured change for their field notes.
+  const fleetInvestigation = job?.result ? job.id : null;
   const sameBox = (a: Bounds | null | undefined, b: Bounds) => Boolean(a) && a!.every((v, i) => Math.abs(v - b[i]) < 1e-6);
   useEffect(() => {
-    if (!fleetReady) return; const current = droneStore.info.area?.bbox;
+    if (!fleetReady || !droneStore.ready) return; const current = droneStore.info.area?.bbox;
     if (current && !sameBox(current, region.bbox)) return;
-    const id = setTimeout(() => { void droneStore.publishArea(region.name, region.bbox, patches, places); }, 900);
+    const id = setTimeout(() => { void droneStore.publishArea(region.name, region.bbox, patches, places, undefined, fleetInvestigation); }, 900);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fleetReady, region.bbox.join(','), patches, places]);
-  const monitorHere = useCallback(() => { void droneStore.publishArea(region.name, region.bbox, patches, places); }, [region, patches, places]);
+  const monitorHere = useCallback(() => { void droneStore.publishArea(region.name, region.bbox, patches, places, undefined, fleetInvestigation); }, [region, patches, places, fleetInvestigation]);
+  const onFleetProfile = useCallback((p: FleetProfile) => {
+    const a = droneStore.info.area; if (!a) return;
+    void droneStore.publishArea(a.name, a.bbox, sameBox(a.bbox, region.bbox) ? patches : [], sameBox(a.bbox, region.bbox) ? places : [], p, sameBox(a.bbox, region.bbox) ? fleetInvestigation : a.investigation_id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [region, patches, places, fleetInvestigation]);
+  const onFleetFocus = useCallback((lon: number, lat: number) => globe.current?.flyToPoint(lon, lat, 3500), []);
   const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
   useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
   const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); }, []);
@@ -379,11 +388,15 @@ export default function App() {
   // Measured surface temperature for the drone cameras' IR mode, fetched when drones are in use.
   const [thermal, setThermal] = useState<Thermal | null>(null);
   const wantThermal = mode === 'drones' || Boolean(feed);
+  // The scene covers the fleet's monitoring area (where the cameras are), or the browsed area before one is set.
+  const [fleetBox, setFleetBox] = useState<string>('');
+  useEffect(() => droneStore.subscribe(() => setFleetBox(droneStore.info.area?.bbox.join(',') ?? '')), []);
+  const thermalBox = fleetBox || region.bbox.join(',');
   useEffect(() => {
-    setThermal(null); const b = region.bbox; if (!wantThermal || b[2] - b[0] > 1 || b[3] - b[1] > 1) return; const c = new AbortController();
-    void api<Thermal & { available: boolean }>(`/thermal?bbox=${b.join(',')}`, { signal: c.signal }).then(v => { if (!c.signal.aborted && v.available) setThermal(v); }).catch(() => {});
+    setThermal(null); const b = thermalBox.split(',').map(Number); if (!wantThermal || b.length !== 4 || b[2] - b[0] > 1 || b[3] - b[1] > 1) return; const c = new AbortController();
+    void api<Thermal & { available: boolean }>(`/thermal?bbox=${thermalBox}`, { signal: c.signal }).then(v => { if (!c.signal.aborted && v.available) setThermal(v); }).catch(() => {});
     return () => c.abort();
-  }, [region, wantThermal]);
+  }, [thermalBox, wantThermal]);
 
   // ---------------------------------------------------------------- satellites
   const aoiCentre = { lat: (region.bbox[1] + region.bbox[3]) / 2, lon: (region.bbox[0] + region.bbox[2]) / 2 };
@@ -757,6 +770,7 @@ export default function App() {
       {mode === 'satellites' && <SatellitesPanel sats={fleet.sats} passes={passes} now={satTime ?? Date.now()} selected={sat} onSelect={s => setSelectedSat(s.norad)} source={fleet.source} nisarNext={nisarNext} error={fleet.error}
         onFly={flyToSat} onSensor={openSensor} />}
       {mode === 'drones' && <DronesPanel store={droneStore} selected={selectedDrone} patches={patches} places={places} regionName={region.name} regionBox={region.bbox} onMonitorHere={monitorHere}
+        onProfile={onFleetProfile} onFocus={onFleetFocus}
         onSelect={id => { setSelectedDrone(id); globe.current?.followDrone(id); }}
         onCamera={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: false }); }}
         onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }} />}
@@ -810,6 +824,7 @@ function MenuButton({ id, label, icon, menu, setMenu, children, className = '' }
 
 /** Compass, zoom presets, 2D/3D, scale bar, coordinate readout and 2D graticule tags. Telemetry-driven, so it re-renders on its own. */
 type MapStyle = 'photo' | 'relief' | 'photoreal';
+const NO_HOTSPOTS: never[] = [];
 
 function MapChrome({ flat, setFlat, style, setStyle, photoreal, globe, bbox }: { flat: boolean; setFlat: (v: boolean) => void; style: MapStyle; setStyle: (v: MapStyle) => void; photoreal: boolean; globe: React.RefObject<GlobeHandle | null>; bbox: Bounds }) {
   const tel = useSyncExternalStore(telemetryStore.subscribe, telemetryStore.get);

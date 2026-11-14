@@ -10,6 +10,44 @@ from .db import fleet_db
 from .planner import assess, bid, distance, plan_round
 
 AGENT_STALE_S = 20
+NOTE_EVERY_S = 120          # a field note on arrival, then every two minutes on station
+
+
+def _elevation(lon: float, lat: float) -> float | None:
+    from ..conditions import elevations
+    try:
+        return asyncio.run(elevations([(lon, lat)]))[0]
+    except Exception:
+        return None
+
+
+def write_field_note(db, drone: dict, task: dict, now: float) -> dict | None:
+    """Look where the camera points, read the real data there, and keep a geotagged note of it."""
+    from .observe import area_data, ground_point, note_text, observe
+    s = drone.get("state", {}); area = db.area()
+    if not area or "lon" not in s:
+        return None
+    last = db.last_note(drone["id"], task["id"])
+    if last and now - last["t"] < NOTE_EVERY_S:
+        return None
+    g = s.get("gimbal") or {}
+    lon, lat = ground_point(s["lon"], s["lat"], float(s.get("agl_m") or 100), float(g.get("heading_deg", s.get("heading_deg", 0))), float(g.get("pitch_deg", -45)))
+    o = observe(area_data(area["bbox"], area.get("investigation_id")), lon, lat, _elevation(lon, lat))
+    reason = "On station" if last is None else "Observation"
+    kind, extra = ("station" if last is None else "observation"), ""
+    if o.get("surface_c") is not None and o.get("surface_p95_c") is not None and o["surface_c"] >= o["surface_p95_c"]:
+        kind, extra = "warm", f" Warmer than 95% of the area ({o['surface_p95_c']:.0f} °C), worth a closer look."
+    elif o.get("change_db") is not None and abs(o["change_db"]) >= 3:
+        kind, extra = "change", " The radar measured a strong change here."
+    text = note_text(drone["name"], task["label"], o, reason) + extra
+    db.add_note(drone["id"], task["id"], kind, lon, lat, text, o)
+    if kind in ("warm", "change"):
+        reading = f"{o['surface_c']:.0f} °C surface, " if o.get("surface_c") is not None else ""
+        db.message(f"agent:{drone['id']}", "all", "observation", {"text": f"{drone['name']}: {extra.strip()} ({reading}{lat:.4f}, {lon:.4f})", "lon": lon, "lat": lat, "note_kind": kind})
+    relieves = task["params"].get("relieves")
+    if last is None and relieves:
+        db.message(f"agent:{drone['id']}", f"agent:{relieves}", "relieved", {"text": f"{drone['name']} is on station for “{task['label']}”. {relieves}, you are relieved; head home."})
+    return {"kind": kind, "text": text}
 
 
 def _note_once(db, sender: str, recipient: str, notes: list[dict], previous: list[str]) -> list[str]:
@@ -28,7 +66,7 @@ def run_coordination_round(payload: dict) -> dict:
         db.heartbeat("coordinator", "coordinator", payload.get("workflow_id"), "idle", {"round": payload.get("round"), "text": "Waiting for a monitoring area."})
         return {"summary": {"status": "idle"}, "need_agents": []}
     drones = db.drones(); tasks = db.tasks(); controlled = set(db.control())
-    decisions = plan_round(area, db.targets(), drones, tasks, db.bids(), controlled, t, db.refusals())
+    decisions = plan_round(area, db.targets(), drones, tasks, db.bids(), controlled, t, db.refusals(), db.benched())
 
     for task_id in sorted(set(decisions["released"])):
         task = next((x for x in tasks if x["id"] == task_id), None)
@@ -77,7 +115,7 @@ def run_drone_agent_round(payload: dict) -> dict:
     db.put_bids(drone_id, bids)
     findings = assess(drone, task, operation, drones, launch)
     # Mark a target observed while its orbit is flown on station.
-    if task and task["kind"] == "orbit" and task["status"] == "active" and "lon" in s and task.get("job_key", "").startswith("orbit:"):
+    if task and task["kind"] == "orbit" and task["status"] == "active" and "lon" in s and (task.get("job_key") or "").startswith("orbit:"):
         p = task["params"]
         if distance(s["lon"], s["lat"], p["lon"], p["lat"]) < p.get("radius_m", 200) * 1.4:
             db.mark_observed(task["job_key"].split(":", 1)[1], time.time())
@@ -87,6 +125,13 @@ def run_drone_agent_round(payload: dict) -> dict:
             db.set_operation_state(drone_id, "nonconforming")
         elif not nonconforming and operation["state"] == "nonconforming":
             db.set_operation_state(drone_id, "activated")
+    # Field notes while working a task on station (never while landed or out of contact).
+    note = None
+    if task and task["status"] == "active" and drone["link_state"] == "online" and not s.get("landed") and task["kind"] not in ("return", "standby"):
+        try:
+            note = write_field_note(db, drone, task, time.time())
+        except Exception:  # observations are best effort; the agent's other duties continue
+            note = None
     feasible = sum(1 for b in bids if b["feasible"])
     summary = {"round": payload.get("round"), "findings": [f["kind"] for f in findings], "feasible_bids": feasible, "bids": len(bids),
                "task": (task or {}).get("label"), "text": f"{drone['name']}: {(task or {}).get('label', 'no task')}; can take {feasible} of {len(bids)} jobs."}
@@ -96,7 +141,7 @@ def run_drone_agent_round(payload: dict) -> dict:
         db.message(f"agent:{drone_id}", "coordinator", f["kind"], {"text": f["text"]})
     urgent = [f for f in new if f.get("urgent")]
     retire = drone["link_state"] == "lost" and (drone.get("age_s") or 0) > 600
-    return {"urgent": bool(urgent), "reason": urgent[0]["kind"] if urgent else "", "retire": retire, "summary": summary}
+    return {"urgent": bool(urgent), "reason": urgent[0]["kind"] if urgent else "", "retire": retire, "summary": summary, "note": (note or {}).get("kind")}
 
 
 @activity.defn

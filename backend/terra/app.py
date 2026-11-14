@@ -3,6 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -27,6 +28,8 @@ from . import connector
 from .gateway import router as connector_router
 from .google_tiles import api_key as google_tiles_key, router as google_tiles_router
 from .fleet.api import router as fleet_router
+
+log = logging.getLogger(__name__)
 
 
 def validate_bbox(values: list[float], bounded: bool = False) -> list[float]:
@@ -344,10 +347,14 @@ async def surface_temperature(bbox: str = Query(...)):
         raise HTTPException(422, str(exc)) from None
     if region[2] - region[0] > 1 or region[3] - region[1] > 1:
         raise HTTPException(422, "Thermal scenes are read for areas up to 1 degree across.")
+    from rasterio.errors import RasterioError
     try:
         return await thermal(region)
     except (ConnectorError, TimeoutError) as exc:
         return {"available": False, "reason": f"Thermal imagery is unavailable right now ({exc}).", "bounds": region}
+    except (RasterioError, KeyError, ValueError) as exc:  # an unreadable or unexpected scene is "no scene", not a server error
+        log.warning("thermal scene unreadable: %s", exc.__class__.__name__)
+        return {"available": False, "reason": "The latest Landsat scene for this area could not be read.", "bounds": region}
 
 
 @app.get("/api/conditions")
