@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "axis": {
+      "type": "http",
+      "url": "https://useaxis.dev/api/mcp",
+      "headers": { "X-Axis-Org": "a36b247e-21ee-4006-9e3d-5d6784ee2487" }
+    }
+  }
+}

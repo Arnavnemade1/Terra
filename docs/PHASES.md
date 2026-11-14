@@ -163,6 +163,25 @@ hazards and satellites:
 - Cesium detail worth knowing: a globe material whose source mentions the surface-normal input is silently dropped when the terrain
   has no stored normals (ArcGIS heightmaps), so the relief shader derives its local frame from the world position instead.
 
+## Phase 4e — Google Map Tiles API, attribution and phones (2026-11-14)
+- **Photorealistic 3D Tiles, keyless in the browser.** `backend/terra/google_tiles.py` serves `/api/connector/google3d/*`:
+  the key (`GOOGLE_MAPS_TILES_KEY`, falls back to `VITE_GOOGLE_MAPS_KEY`) goes upstream as `X-Goog-Api-Key`, never in a URL;
+  only `root.json` and `datasets/<id>/files/<name>.json|glb?session=` are forwarded; child URIs are rewritten to the gateway;
+  Google's `private` Cache-Control and ETags pass through and nothing is stored server-side; 401/403/429 become plain messages.
+  `/api/connector/google3d/status` probes availability (cached 10 min); `/api/health` reports `photorealistic_3d`.
+  The connector now treats `304 Not Modified` as a cache answer rather than a redirect. 22 tests in `tests/test_google_tiles.py`.
+- **Map style "Photoreal"** (map controls and View menu, offered only when the status probe succeeds): Google tiles below 300 km,
+  the imagery globe above. While a radar or change layer is shown the tiles step aside so science pixels sit on the terrain globe.
+  Non-Google basemaps are hidden while Google tiles render; the pointer readout is off (nothing is measured from Google content).
+- **Attribution was invisible everywhere.** Cesium's credit list sat in a zero-size container with `overflow: hidden`. It is now a
+  strip along the bottom of the map; the controls sit above it at whatever height it wraps to (ResizeObserver). Google's logo at
+  18 px, full opacity, with every data provider.
+- **Phones and tablets** (checked at 360, 390, 430, 768, 1100, 1280, 1440 in headless Chrome: no horizontal overflow in any mode or
+  panel): View, Analysis, Share, Sources and About were unreachable below 760 px; they are now one More menu (below 1020 px too, where
+  the top bar overflowed). Two-row phone top bar with full-width workspace tabs; 44 px touch targets on phones and coarse pointers;
+  map controls reduced to style and full screen; timeline ticks thinned by pixel spacing; one-column report; sensor view fits.
+- Removed every infinite pulse and blink (running-step dots, the sensor "rec" dot).
+
 ## Phase 5 — Advanced science (§18–21)
 - Physics‑aware checks: speckle filtering, incidence angle and terrain normalization, statistical significance
 - Multisensor fusion (Sentinel‑1, Sentinel‑2, precipitation via GIBS/CMR)
