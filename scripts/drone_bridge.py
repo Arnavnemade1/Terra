@@ -2,21 +2,25 @@
 """Ground-station bridge: connect drones to Terra's fleet coordinator through the central database.
 
 Real aircraft over MAVLink (PX4 or ArduPilot; `pip install pymavlink`):
-  TERRA_DRONE_TOKEN=... python scripts/drone_bridge.py --mavlink udpin:0.0.0.0:14550 --id uav-1 --name "Ridge One"
+  TERRA_DRONE_TOKEN=... python scripts/drone_bridge.py --mavlink udpin:0.0.0.0:14550 --id uav-1 --name "Ridge One" --allow-commands
 
-Terra's virtual fleet (five aircraft that fly assigned tasks with simple, realistic kinematics, so the whole
-system can be exercised without hardware; they speak exactly the protocol real aircraft use):
+ArduPilot SITL (the real flight firmware on a simulated airframe; see scripts/sitl.py, which starts these for you):
+  python scripts/drone_bridge.py --mavlink tcp:127.0.0.1:5760 --id D-02 --origin sitl --allow-commands --allow-arming --allow-manual
+
+Terra's lightweight virtual fleet (kinematic models, no autopilot; for machines without SITL):
   TERRA_DRONE_TOKEN=... python scripts/drone_bridge.py --virtual 5
 
 Protocol (all over HTTPS with the bearer token):
   1. POST /api/fleet/register     identity and capabilities (sensors, relay radio, speed, endurance, autopilot)
   2. POST /api/fleet/telemetry    twice a second, with an increasing sequence number; the reply carries the task
-  3. POST /api/fleet/tasks/{id}/ack   acknowledged when received, active on station, completed / failed / rejected
+  3. POST /api/fleet/tasks/{id}/ack   acknowledged when the autopilot accepts the mission, active on station,
+                                      completed / failed / rejected
 
-Tasks are advisory for real aircraft. With MAVLink, orbit (MAV_CMD_DO_ORBIT), hold and relay
-(MAV_CMD_DO_REPOSITION) and return (MAV_CMD_NAV_RETURN_TO_LAUNCH) are forwarded to the autopilot only with
---allow-commands, and only while the vehicle is in a mode that accepts them; the pilot in command can always
-override. Survey and perimeter tasks are rejected with a note to plan them in the ground-control software.
+With --allow-commands every task becomes a MAVLink mission uploaded with the mission protocol: orbits are
+LOITER_TURNS, holds and relays LOITER_UNLIM, surveys and perimeters waypoint loops, return is RTL. Without it, tasks
+are advisory (acknowledged, shown to the pilot, not sent). --allow-arming lets the bridge arm and take off for a new
+task (SITL, or with a pilot ready to take over); --allow-manual accepts browser setpoints in GUIDED mode and is
+refused for anything but simulated aircraft. The pilot in command can always override.
 """
 from __future__ import annotations
 
@@ -111,6 +115,8 @@ class Virtual:
         self.agl, self.speed, self.landed, self.ground_since, self.task = 0.0, 0.0, True, time.monotonic(), None
 
     def _route(self, kind: str, p: dict) -> list[tuple[float, float]]:
+        if kind == "search":
+            return search_route(p)
         if kind == "survey":
             w, s, e, n = p["bbox"]; lanes = max(3, int(distance(w, s, w, n) / max(60, p.get("lane_m", 150))))
             pts = []
@@ -154,7 +160,7 @@ class Virtual:
             gimbal = {"heading_deg": bearing(self.lon, self.lat, *c), "pitch_deg": -math.degrees(math.atan2(max(10, self.agl), max(1, d)))} if kind == "orbit" else \
                      {"heading_deg": (time.monotonic() * 8) % 360, "pitch_deg": -25.0} if kind == "relay" else {"heading_deg": self.heading, "pitch_deg": -60.0}
             mode = "AUTO"
-        elif kind in ("survey", "perimeter"):
+        elif kind in ("survey", "perimeter", "search"):
             route = self._route(kind, p); want_agl = p.get("agl_m", 150)
             self.waypoint %= len(route); target = route[self.waypoint]
             if distance(self.lon, self.lat, *target) < max(30, self.speed * 2.5):
@@ -162,7 +168,8 @@ class Virtual:
             want_speed = p.get("speed_mps", cruise)
             # On station once at working height and flying the route (not while climbing out or transiting).
             on_station = abs(self.agl - want_agl) < 25 and (self.waypoint > 0 or distance(self.lon, self.lat, *target) < 400)
-            gimbal = {"heading_deg": self.heading, "pitch_deg": -80.0} if kind == "survey" else {"heading_deg": (self.heading - 90) % 360, "pitch_deg": -42.0}
+            gimbal = {"heading_deg": self.heading, "pitch_deg": -80.0} if kind == "survey" else \
+                     {"heading_deg": self.heading, "pitch_deg": -55.0} if kind == "search" else {"heading_deg": (self.heading - 90) % 360, "pitch_deg": -42.0}
             mode = "AUTO"
         elif kind == "return":
             target = tuple(self.launch); d = distance(self.lon, self.lat, *target)
@@ -253,78 +260,306 @@ def run_virtual(terra: Terra, count: int, launch: tuple[float, float] | None, ra
         time.sleep(max(0.0, 1 / rate - (time.monotonic() - now)))
 
 
-# ---------------------------------------------------------------- MAVLink
-def run_mavlink(terra: Terra, connection: str, ident: str, name: str, aircraft: str, allow_commands: bool, video_url: str | None, rate: float) -> None:
-    try:
+# ---------------------------------------------------------------- MAVLink (real aircraft and ArduPilot SITL)
+CMD_WAYPOINT, CMD_LOITER_UNLIM, CMD_LOITER_TURNS, CMD_TAKEOFF, CMD_DO_JUMP, CMD_CHANGE_SPEED = 16, 17, 18, 22, 177, 178
+FRAME_GLOBAL, FRAME_RELATIVE = 0, 6
+
+
+def search_route(p: dict) -> list[tuple[float, float]]:
+    """An expanding-square search from a datum: legs of one, one, two, two, three, three … lane spacings, turning
+    right each time, until the square covers the search size (the same pattern the coordinator plans)."""
+    lon, lat = p["lon"], p["lat"]; lane = float(p.get("lane_m", 120)); size = float(p.get("size_m", 1200))
+    pts = [(lon, lat)]; x = y = 0.0; heading = 0; leg = 1
+    while max(abs(x), abs(y)) * 2 < size and len(pts) < 80:
+        for _ in range(2):
+            dx, dy = [(0, 1), (1, 0), (0, -1), (-1, 0)][heading % 4]
+            x += dx * leg * lane; y += dy * leg * lane; heading += 1
+            pts.append(offset(lon, lat, x, y))
+        leg += 1
+    return pts
+
+
+def route_points(kind: str, p: dict) -> list[tuple[float, float]]:
+    """Waypoints (lon, lat) for route tasks: lawnmower lanes for a survey, an inset rectangle for a perimeter,
+    an expanding square for a search."""
+    if kind == "search":
+        return search_route(p)
+    w, s, e, n = p["bbox"]
+    if kind == "survey":
+        lanes = max(3, int(distance(w, s, w, n) / max(60, p.get("lane_m", 150))))
+        pts = []
+        for i in range(lanes + 1):
+            lat = s + (n - s) * i / lanes
+            pts += [(w, lat), (e, lat)] if i % 2 == 0 else [(e, lat), (w, lat)]
+        return pts
+    k = p.get("inset", 0.08); dx, dy = (e - w) * k, (n - s) * k
+    return [(w + dx, s + dy), (e - dx, s + dy), (e - dx, n - dy), (w + dx, n - dy)]
+
+
+def mission_items(task: dict, home: tuple[float, float, float], airborne: bool, aircraft: str) -> list[dict]:
+    """An ArduPilot mission for a Terra task. Item 0 is the home position (ArduPilot convention); altitudes are
+    relative to home. Routes and orbits end with DO_JUMP back to their start so they repeat until re-tasked."""
+    kind, p = task["kind"], task["params"]; plane = aircraft == "fixed-wing"
+    alt = float(p.get("agl_m", 120)); speed = float(p.get("speed_mps", 22 if plane else 10))
+    item = lambda command, lat=0.0, lon=0.0, z=0.0, p1=0.0, p2=0.0, p3=0.0, p4=0.0, frame=FRAME_RELATIVE: (  # noqa: E731
+        {"command": command, "frame": frame, "lat": lat, "lon": lon, "alt": z, "p1": p1, "p2": p2, "p3": p3, "p4": p4})
+    items = [item(CMD_WAYPOINT, home[1], home[0], home[2], frame=FRAME_GLOBAL)]
+    if not airborne:
+        items.append(item(CMD_TAKEOFF, home[1], home[0], min(alt, 60.0), p1=12.0 if plane else 0.0))
+    items.append(item(CMD_CHANGE_SPEED, p1=0.0 if plane else 1.0, p2=speed, p3=-1.0))
+    if kind == "orbit":
+        radius = float(p.get("radius_m", 200)); radius = max(80.0, radius) if plane else min(250.0, max(20.0, radius))
+        first = len(items)
+        items.append(item(CMD_LOITER_TURNS, p["lat"], p["lon"], alt, p1=254.0, p3=radius))
+        items.append(item(CMD_DO_JUMP, p1=float(first), p2=-1.0))
+    elif kind in ("hold", "relay", "standby"):
+        items.append(item(CMD_LOITER_UNLIM, p["lat"], p["lon"], alt, p3=float(p.get("radius_m", 60)) if plane else 0.0))
+    elif kind in ("survey", "perimeter", "search"):
+        first = len(items)
+        for lon, lat in route_points(kind, p):
+            items.append(item(CMD_WAYPOINT, lat, lon, alt))
+        items.append(item(CMD_DO_JUMP, p1=float(first), p2=-1.0))
+    else:
+        raise ValueError(f"no mission for {kind} tasks")
+    return items
+
+
+def on_station(task: dict, lon: float, lat: float, agl: float | None) -> bool:
+    """Whether the aircraft is doing its task where it was asked to, at roughly the asked height."""
+    p = task["params"]; kind = task["kind"]
+    if agl is not None and "agl_m" in p and abs(agl - float(p["agl_m"])) > 30:
+        return False
+    if "bbox" in p:
+        w, s, e, n = p["bbox"]; return w - 0.002 <= lon <= e + 0.002 and s - 0.002 <= lat <= n + 0.002
+    if kind == "search":
+        return distance(lon, lat, p["lon"], p["lat"]) < float(p.get("size_m", 1200)) * 0.75 + 150
+    if "lon" in p:
+        return distance(lon, lat, p["lon"], p["lat"]) < float(p.get("radius_m", 60)) + 120
+    return True
+
+
+def pointing(task: dict | None, lon: float, lat: float, agl: float, heading: float) -> dict:
+    """Where a camera on this aircraft would point for its task (used when the autopilot reports no gimbal)."""
+    if task and task["kind"] in ("orbit", "hold") and "lon" in task["params"]:
+        p = task["params"]; d = max(1.0, distance(lon, lat, p["lon"], p["lat"]))
+        return {"heading_deg": round(bearing(lon, lat, p["lon"], p["lat"]), 1), "pitch_deg": round(-math.degrees(math.atan2(max(10.0, agl), d)), 1)}
+    if task and task["kind"] == "survey":
+        return {"heading_deg": round(heading, 1), "pitch_deg": -80.0}
+    if task and task["kind"] == "search":
+        return {"heading_deg": round(heading, 1), "pitch_deg": -55.0}
+    if task and task["kind"] == "perimeter":
+        return {"heading_deg": round((heading - 90) % 360, 1), "pitch_deg": -42.0}
+    return {"heading_deg": round(heading, 1), "pitch_deg": -35.0}
+
+
+class Autopilot:
+    """One aircraft over MAVLink (PX4, ArduPilot, or ArduPilot SITL). Missions are uploaded with the MAVLink
+    mission protocol; arming, takeoff and manual setpoints happen only when explicitly allowed."""
+
+    def __init__(self, terra: Terra, connection: str, spec: dict, allow_commands: bool, allow_arming: bool, allow_manual: bool, video_url: str | None, rate: float):
         from pymavlink import mavutil
-    except ImportError:
-        sys.exit("MAVLink needs pymavlink: pip install pymavlink")
-    link = mavutil.mavlink_connection(connection, source_system=254)
-    print(f"Waiting for a heartbeat on {connection}…", flush=True); link.wait_heartbeat(timeout=30)
-    heartbeat = link.messages.get("HEARTBEAT")
-    autopilot = {3: "ArduPilot", 12: "PX4"}.get(getattr(heartbeat, "autopilot", None), "MAVLink")
-    terra.call("POST", "/api/fleet/register", {"id": ident, "name": name, "origin": "real", "aircraft": aircraft,
-                                               "capabilities": {"sensors": ["eo"], "protocol": "mavlink", "autopilot": autopilot, "cruise_mps": 10, "max_mps": 16, "endurance_min": 30,
-                                                                # Forwarded commands cover these; with advisory tasks the pilot can fly any.
-                                                                "tasks": ["orbit", "relay", "hold", "standby", "return"] if allow_commands else
-                                                                         ["orbit", "survey", "perimeter", "relay", "hold", "standby", "return"]}})
-    print(f"Connected to system {link.target_system} ({autopilot}). Forwarding tasks: {'yes' if allow_commands else 'no (advisory only)'}", flush=True)
-    m = mavutil.mavlink
-    state: dict = {"battery": None, "agl": None, "gimbal": None, "armed": False, "landed": None}
-    seq, last_post, current = 0, 0.0, None
-    while True:
-        msg = link.recv_match(blocking=True, timeout=1)
-        if msg is not None:
+        self.mavutil, self.m = mavutil, mavutil.mavlink
+        self.terra, self.spec, self.rate, self.video_url = terra, spec, rate, video_url
+        self.allow_commands, self.allow_arming, self.allow_manual = allow_commands, allow_arming, allow_manual
+        print(f"{spec['id']}: connecting to {connection}…", flush=True)
+        self.link = mavutil.mavlink_connection(connection, source_system=254, autoreconnect=True)
+        self.link.wait_heartbeat(timeout=60)
+        hb = self.link.messages.get("HEARTBEAT")
+        self.autopilot = {3: "ArduPilot", 12: "PX4"}.get(getattr(hb, "autopilot", None), "MAVLink")
+        self.state: dict = {}; self.seq = 0; self.task: dict | None = None; self.acked: dict[str, str] = {}
+        self.home: tuple[float, float, float] | None = None; self.guided = False; self.last_setpoint = 0.0
+        self.link.mav.request_data_stream_send(self.link.target_system, self.link.target_component, self.m.MAV_DATA_STREAM_ALL, 4, 1)
+
+    # -- readiness, registration and telemetry
+    def wait_ready(self, timeout: float = 180) -> None:
+        """Join the fleet only when the autopilot can fly: a 3D GPS fix, a home position and a horizontal position estimate."""
+        ts, tc = self.link.target_system, self.link.target_component
+        deadline = time.monotonic() + timeout; fix = ekf = False; last = 0.0
+        while time.monotonic() < deadline:
+            if time.monotonic() - last > 3:
+                last = time.monotonic()
+                self.link.mav.command_long_send(ts, tc, self.m.MAV_CMD_GET_HOME_POSITION, 0, 0, 0, 0, 0, 0, 0, 0)
+            msg = self.link.recv_match(type=["GPS_RAW_INT", "EKF_STATUS_REPORT", "HOME_POSITION", "GLOBAL_POSITION_INT", "HEARTBEAT", "SYS_STATUS"], blocking=True, timeout=1)
+            if msg is None:
+                continue
             kind = msg.get_type()
+            if kind == "GPS_RAW_INT":
+                fix = msg.fix_type >= 3
+            elif kind == "EKF_STATUS_REPORT":
+                ekf = bool(msg.flags & 0x10)  # EKF_POS_HORIZ_ABS
+            elif kind == "HOME_POSITION":
+                self.home = (msg.longitude / 1e7, msg.latitude / 1e7, msg.altitude / 1000)
+            if fix and (ekf or self.autopilot != "ArduPilot") and self.home:
+                print(f"{self.spec['id']}: ready (GPS 3D fix, position estimate, home set)", flush=True); return
+        print(f"{self.spec['id']}: not fully ready after {timeout:.0f} s (gps {fix}, ekf {ekf}, home {bool(self.home)}); joining anyway", flush=True)
+
+    def register(self) -> None:
+        caps = {"sensors": self.spec["sensors"], "relay": self.spec["relay"], "protocol": "mavlink", "autopilot": self.autopilot,
+                "cruise_mps": self.spec["cruise"], "max_mps": self.spec["cruise"] * 1.6, "endurance_min": self.spec["endurance"],
+                "tasks": ["orbit", "survey", "perimeter", "search", "relay", "hold", "standby", "return"]}
+        self.terra.call("POST", "/api/fleet/register", {"id": self.spec["id"], "name": self.spec["name"], "origin": self.spec["origin"], "aircraft": self.spec["aircraft"], "capabilities": caps})
+        print(f"{self.spec['id']}: registered ({self.autopilot}, {self.spec['origin']}); commands {'on' if self.allow_commands else 'advisory'}", flush=True)
+
+    def read(self, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            msg = self.link.recv_match(blocking=True, timeout=max(0.01, end - time.monotonic()))
+            if msg is None:
+                continue
+            kind = msg.get_type(); st = self.state
             if kind == "GLOBAL_POSITION_INT":
-                state.update(lat=msg.lat / 1e7, lon=msg.lon / 1e7, alt=msg.alt / 1000, rel=msg.relative_alt / 1000,
-                             hdg=(msg.hdg / 100) if msg.hdg != 65535 else None, speed=math.hypot(msg.vx, msg.vy) / 100)
+                st.update(lat=msg.lat / 1e7, lon=msg.lon / 1e7, alt=msg.alt / 1000, rel=msg.relative_alt / 1000,
+                          hdg=(msg.hdg / 100) if msg.hdg != 65535 else st.get("hdg"), speed=math.hypot(msg.vx, msg.vy) / 100)
+            elif kind == "HOME_POSITION":
+                self.home = (msg.longitude / 1e7, msg.latitude / 1e7, msg.altitude / 1000)
             elif kind == "SYS_STATUS" and msg.battery_remaining >= 0:
-                state["battery"] = float(msg.battery_remaining)
-            elif kind == "TERRAIN_REPORT":
-                state["agl"] = float(msg.current_height)
+                st["battery"] = float(msg.battery_remaining)
+            elif kind == "TERRAIN_REPORT" and msg.current_height > 0:
+                st["agl"] = float(msg.current_height)
             elif kind == "EXTENDED_SYS_STATE":
-                state["landed"] = msg.landed_state == m.MAV_LANDED_STATE_ON_GROUND
-            elif kind == "HEARTBEAT":
-                state["armed"] = bool(msg.base_mode & m.MAV_MODE_FLAG_SAFETY_ARMED); state["mode"] = mavutil.mode_string_v10(msg)
+                st["on_ground"] = msg.landed_state == self.m.MAV_LANDED_STATE_ON_GROUND
+            elif kind == "HEARTBEAT" and msg.get_srcComponent() == 1:
+                st["armed"] = bool(msg.base_mode & self.m.MAV_MODE_FLAG_SAFETY_ARMED); st["mode"] = self.mavutil.mode_string_v10(msg)
             elif kind == "GIMBAL_DEVICE_ATTITUDE_STATUS":
                 w, x, y, z = msg.q
-                pitch = math.degrees(math.asin(max(-1, min(1, 2 * (w * y - z * x))))); yaw = math.degrees(math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
-                state["gimbal"] = {"heading_deg": round(((state.get("hdg") or 0) + yaw) % 360, 1), "pitch_deg": round(max(-90, min(30, pitch)), 1)}
-        if "lat" not in state or time.monotonic() - last_post < 1 / rate:
-            continue
-        last_post = time.monotonic(); seq += 1
-        telemetry = {"id": ident, "seq": seq, "lon": state["lon"], "lat": state["lat"], "alt_m": state["alt"], "heading_deg": round((state.get("hdg") or 0) % 360, 1),
-                     "speed_mps": round(state.get("speed") or 0, 2), "mode": state.get("mode", "MAVLink")[:32], "landed": bool(state.get("landed"))}
-        for key, field in (("agl", "agl_m"), ("battery", "battery_pct"), ("gimbal", "gimbal")):
-            if state.get(key) is not None:
-                telemetry[field] = state[key]
-        if video_url:
-            telemetry["video_url"] = video_url
-        reply = terra.call("POST", "/api/fleet/telemetry", telemetry) or {}
-        task = reply.get("task")
-        if not task or task["id"] == current:
-            continue
-        current = task["id"]; print(f"Task {task['id']}: {task['kind']} {task['label']}", flush=True)
-        ack = lambda status, detail=None: terra.call("POST", f"/api/fleet/tasks/{task['id']}/ack", {"id": ident, "status": status, "detail": detail})  # noqa: E731
-        if not allow_commands:
-            ack("acknowledged", "advisory: shown to the pilot, not sent to the autopilot"); continue
-        p = task["params"]; alt = float(p.get("agl_m", 100))
-        if task["kind"] == "orbit":
-            link.mav.command_int_send(link.target_system, link.target_component, m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, m.MAV_CMD_DO_ORBIT, 0, 0,
-                                      float(p.get("radius_m", 250)), float("nan"), 0, 0, int(p["lat"] * 1e7), int(p["lon"] * 1e7), alt)
-        elif task["kind"] in ("hold", "relay", "standby"):
-            link.mav.command_int_send(link.target_system, link.target_component, m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, m.MAV_CMD_DO_REPOSITION, 0, 0,
-                                      -1, 1, 0, float("nan"), int(p["lat"] * 1e7), int(p["lon"] * 1e7), alt)
-        elif task["kind"] == "return":
-            link.mav.command_long_send(link.target_system, link.target_component, m.MAV_CMD_NAV_RETURN_TO_LAUNCH, 0, 0, 0, 0, 0, 0, 0, 0)
+                st["gimbal"] = {"heading_deg": round(((st.get("hdg") or 0) + math.degrees(math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))) % 360, 1),
+                                "pitch_deg": round(max(-90, min(30, math.degrees(math.asin(max(-1, min(1, 2 * (w * y - z * x))))))), 1)}
+
+    def landed(self) -> bool:
+        st = self.state
+        return bool(st.get("on_ground")) if "on_ground" in st else not st.get("armed", False)
+
+    def telemetry(self) -> dict | None:
+        st = self.state
+        if "lat" not in st:
+            return None
+        if self.home is None:
+            self.home = (st["lon"], st["lat"], st["alt"] - st.get("rel", 0))
+        self.seq += 1
+        agl = st.get("agl", max(0.0, st.get("rel", 0.0)))  # terrain report when available, else height above home
+        hdg = (st.get("hdg") or 0) % 360
+        t = {"id": self.spec["id"], "seq": self.seq, "lon": st["lon"], "lat": st["lat"], "alt_m": round(st["alt"], 1), "agl_m": round(agl, 1),
+             "heading_deg": round(hdg, 1), "speed_mps": round(st.get("speed") or 0, 2), "mode": (st.get("mode") or self.autopilot)[:32], "landed": self.landed(),
+             "gimbal": st.get("gimbal") or pointing(self.task, st["lon"], st["lat"], agl, hdg)}
+        if st.get("battery") is not None:
+            t["battery_pct"] = st["battery"]
+        if self.spec["origin"] == "sitl":  # simulated radio: estimated from distance to the pad
+            d = distance(st["lon"], st["lat"], self.home[0], self.home[1]); t["link_dbm"] = round(-48 - 9 * math.log10(max(30.0, d)), 1)
+        if self.video_url:
+            t["video_url"] = self.video_url
+        return t
+
+    # -- commands
+    def command(self, command: int, *params: float) -> bool:
+        p = list(params) + [0.0] * (7 - len(params))
+        self.link.mav.command_long_send(self.link.target_system, self.link.target_component, command, 0, *p)
+        ack = self.link.recv_match(type="COMMAND_ACK", blocking=True, timeout=3)
+        return bool(ack and ack.command == command and ack.result in (self.m.MAV_RESULT_ACCEPTED, self.m.MAV_RESULT_IN_PROGRESS))
+
+    def set_mode(self, name: str) -> bool:
+        mapping = self.link.mode_mapping() or {}
+        if name not in mapping:
+            return False
+        self.link.set_mode(mapping[name])
+        for _ in range(20):
+            self.read(0.15)
+            if (self.state.get("mode") or "").upper() == name:
+                return True
+        return False
+
+    def upload(self, items: list[dict]) -> str | None:
+        """MAVLink mission protocol: count, then answer each request; returns None on success or the reason."""
+        ts, tc = self.link.target_system, self.link.target_component
+        self.link.mav.mission_count_send(ts, tc, len(items), self.m.MAV_MISSION_TYPE_MISSION)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            msg = self.link.recv_match(type=["MISSION_REQUEST_INT", "MISSION_REQUEST", "MISSION_ACK"], blocking=True, timeout=2)
+            if msg is None:
+                continue
+            if msg.get_type() == "MISSION_ACK":
+                return None if msg.type == self.m.MAV_MISSION_ACCEPTED else f"autopilot refused the mission (code {msg.type})"
+            it = items[msg.seq]
+            self.link.mav.mission_item_int_send(ts, tc, msg.seq, it["frame"], it["command"], 0, 1, it["p1"], it["p2"], it["p3"], it["p4"],
+                                                int(it["lat"] * 1e7), int(it["lon"] * 1e7), float(it["alt"]), self.m.MAV_MISSION_TYPE_MISSION)
+        return "mission upload timed out"
+
+    def ack(self, status: str, detail: str | None = None) -> None:
+        if not self.task or self.acked.get(self.task["id"]) == status:
+            return
+        self.terra.call("POST", f"/api/fleet/tasks/{self.task['id']}/ack", {"id": self.spec["id"], "status": status, "detail": detail})
+        self.acked[self.task["id"]] = status
+
+    def execute(self, task: dict) -> None:
+        self.task = task; self.guided = False
+        print(f"{self.spec['id']}: task {task['kind']} — {task['label']}", flush=True)
+        if not self.allow_commands:
+            self.ack("acknowledged", "advisory: shown to the pilot, not sent to the autopilot"); return
+        if task["kind"] == "return":
+            self.ack("acknowledged"); ok = self.set_mode("RTL")
+            self.ack("active" if ok else "rejected", "returning to launch" if ok else "the autopilot did not enter RTL"); return
+        airborne = not self.landed()
+        try:
+            items = mission_items(task, self.home or (self.state["lon"], self.state["lat"], self.state["alt"]), airborne, self.spec["aircraft"])
+        except ValueError as exc:
+            self.ack("rejected", str(exc)); return
+        problem = self.upload(items)
+        if problem:
+            self.ack("rejected", problem); return
+        self.ack("acknowledged", f"mission of {len(items)} items accepted by {self.autopilot}")
+        if airborne:
+            self.set_mode("AUTO"); self.command(224, 1)  # MAV_CMD_DO_SET_MISSION_CURRENT: start from the first item
+        elif self.allow_arming:
+            self.set_mode("AUTO")
+            armed = False
+            for _ in range(5):  # pre-arm checks can take a few seconds to clear
+                if self.command(self.m.MAV_CMD_COMPONENT_ARM_DISARM, 1):
+                    armed = True; break
+                self.read(2)
+            if not armed:
+                self.ack("rejected", "vehicle: the autopilot would not arm"); return
+            if self.spec["aircraft"] != "fixed-wing":
+                self.command(self.m.MAV_CMD_MISSION_START, 0, 0)
         else:
-            ack("rejected", "survey and perimeter routes are planned in the ground-control software"); continue
-        reply_ack = link.recv_match(type="COMMAND_ACK", blocking=True, timeout=3)
-        if reply_ack and reply_ack.result == m.MAV_RESULT_ACCEPTED:
-            ack("active", "accepted by the autopilot")
-        else:
-            ack("rejected", f"autopilot answered {getattr(reply_ack, 'result', 'nothing')}")
+            print(f"{self.spec['id']}: mission loaded; arming is left to the pilot", flush=True)
+
+    def manual(self, sp: dict) -> None:
+        """A browser setpoint for a simulated aircraft: GUIDED mode, then fly to the point (copters also face its heading)."""
+        if not self.allow_manual or time.monotonic() - self.last_setpoint < 0.25:
+            return
+        self.last_setpoint = time.monotonic()
+        if not self.guided:
+            self.guided = self.set_mode("GUIDED")
+            if self.landed() and self.allow_arming and self.spec["aircraft"] != "fixed-wing":
+                self.command(self.m.MAV_CMD_COMPONENT_ARM_DISARM, 1); self.command(self.m.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, max(20.0, sp["agl_m"]))
+        mask = 0b0000_1001_1111_1000  # position only, plus yaw
+        self.link.mav.set_position_target_global_int_send(0, self.link.target_system, self.link.target_component, self.m.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, mask,
+                                                          int(sp["lat"] * 1e7), int(sp["lon"] * 1e7), float(sp["agl_m"]), 0, 0, 0, 0, 0, 0, math.radians(sp["heading_deg"]), 0)
+
+    def run(self) -> None:
+        self.wait_ready()
+        self.register()
+        while True:
+            self.read(1 / self.rate)
+            t = self.telemetry()
+            if not t:
+                continue
+            reply = self.terra.call("POST", "/api/fleet/telemetry", t) or {}
+            if reply.get("register"):
+                self.register(); continue
+            if reply.get("control"):
+                self.manual(reply["control"]); continue
+            task = reply.get("task")
+            if task and (self.task or {}).get("id") != task["id"]:
+                self.execute(task)
+            elif task and self.task and task["params"] != self.task["params"] and self.allow_commands and task["kind"] != "return":
+                self.execute(task)  # adjusted by the coordinator (for example a new altitude layer)
+            elif not task:
+                self.task = None
+            if self.task and self.acked.get(self.task["id"]) == "acknowledged" and self.allow_commands and self.task["kind"] != "return" \
+                    and on_station(self.task, t["lon"], t["lat"], t.get("agl_m")):
+                self.ack("active", "on station")
+            if self.task and self.task["kind"] == "return" and self.landed() and self.acked.get(self.task["id"]) == "active":
+                self.ack("completed", "landed")
 
 
 def main() -> None:
@@ -337,19 +572,33 @@ def main() -> None:
     group.add_argument("--virtual", type=int, help="Number of virtual aircraft (up to 5)")
     parser.add_argument("--id", default="uav-1"); parser.add_argument("--name", default="Drone 1")
     parser.add_argument("--aircraft", default="quad", choices=["quad", "fixed-wing", "vtol", "other"])
+    parser.add_argument("--origin", default="real", choices=["real", "sitl"], help="sitl: ArduPilot/PX4 software-in-the-loop (simulated airframe)")
+    parser.add_argument("--sensors", default="eo", help="Comma-separated: eo, ir, lidar, multispectral, gas")
+    parser.add_argument("--relay", action="store_true", help="The aircraft carries a relay radio")
+    parser.add_argument("--cruise", type=float, default=10.0); parser.add_argument("--endurance", type=float, default=30.0)
     parser.add_argument("--lat", type=float); parser.add_argument("--lon", type=float)
-    parser.add_argument("--allow-commands", action="store_true", help="Forward orbit, hold, relay and return tasks to the autopilot")
+    parser.add_argument("--allow-commands", action="store_true", help="Upload missions and mode changes to the autopilot (otherwise advisory)")
+    parser.add_argument("--allow-arming", action="store_true", help="Arm and take off on a new task (SITL, or with a pilot ready to intervene)")
+    parser.add_argument("--allow-manual", action="store_true", help="Accept browser setpoints in GUIDED mode (simulated aircraft only)")
     parser.add_argument("--video-url", help="An http(s) MJPEG or snapshot URL for the drone's camera")
     args = parser.parse_args()
     token = args.token or token_from_env()
     if not token:
         sys.exit("Set TERRA_DRONE_TOKEN (the same value as on the Terra server) or pass --token.")
+    if args.allow_manual and args.origin != "sitl":
+        sys.exit("--allow-manual is only for simulated aircraft (--origin sitl).")
     terra = Terra(args.server, token)
     try:
         if args.virtual:
             run_virtual(terra, args.virtual, (args.lon, args.lat) if args.lat is not None and args.lon is not None else None, args.rate)
         else:
-            run_mavlink(terra, args.mavlink, args.id, args.name, args.aircraft, args.allow_commands, args.video_url, args.rate)
+            try:
+                import pymavlink  # noqa: F401
+            except ImportError:
+                sys.exit("MAVLink needs pymavlink: pip install pymavlink")
+            spec = {"id": args.id, "name": args.name, "aircraft": args.aircraft, "origin": args.origin, "relay": args.relay,
+                    "sensors": [x.strip() for x in args.sensors.split(",") if x.strip()], "cruise": args.cruise, "endurance": args.endurance}
+            Autopilot(terra, args.mavlink, spec, args.allow_commands, args.allow_arming, args.allow_manual, args.video_url, args.rate).run()
     except KeyboardInterrupt:
         print("Stopped.")
 
