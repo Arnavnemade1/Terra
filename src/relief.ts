@@ -203,11 +203,12 @@ export class Relief {
     s.light = this.lamp;
   }
 
-  /** Contour spacing follows the zoom so lines stay a readable distance apart. */
+  /** Contour spacing follows the camera's height above the ground (not above sea level) so lines stay readable. */
   private retune() {
     if (!this.active) return;
-    const h = this.v.camera.positionCartographic.height;
-    const interval = h < 2500 ? 10 : h < 6000 ? 20 : h < 15000 ? 50 : h < 40000 ? 100 : h < 120000 ? 200 : 500;
+    const cam = this.v.camera.positionCartographic; const ex = this.v.scene.verticalExaggeration || 1;
+    const ground = this.v.scene.globe.getHeight(cam) ?? 0; const above = Math.max(1, cam.height - ground) / ex;
+    const interval = above < 400 ? 10 : above < 1200 ? 20 : above < 3000 ? 50 : above < 8000 ? 100 : above < 25000 ? 200 : 500;
     if (this.material.uniforms.interval !== interval) this.material.uniforms.interval = interval;
   }
 
@@ -259,6 +260,9 @@ export class Relief {
     if (changed) scene.requestRender();
   }
 
+  /** For a camera that never stops moving (a drone's): re-check what to plant now and then. */
+  replant() { this.schedule(0); }
+
   private schedule(delay = 350) { clearTimeout(this.timer); this.timer = setTimeout(() => this.plant(), delay); }
 
   /**
@@ -274,19 +278,30 @@ export class Relief {
     if (!this.active || !this.opts.trees || !g || scene.mode !== C.SceneMode.SCENE3D) { this.plantKey = ''; remove(); return; }
     const rect = v.camera.computeViewRectangle(); if (!rect) { remove(); return; }
     const [w, s, e, n] = g.bounds;
-    const vw = Math.max(w, C.Math.toDegrees(rect.west)), vs = Math.max(s, C.Math.toDegrees(rect.south)), ve = Math.min(e, C.Math.toDegrees(rect.east)), vn = Math.min(n, C.Math.toDegrees(rect.north));
-    if (ve <= vw || vn <= vs) { remove(); return; }
-    // Metres per pixel at the centre of the view.
-    const centre = v.camera.pickEllipsoid(new C.Cartesian2(v.canvas.clientWidth / 2, v.canvas.clientHeight / 2));
+    // Metres per pixel at the centre of the view, measured to the terrain (the ellipsoid lies far below mountains).
+    const mid = new C.Cartesian2(v.canvas.clientWidth / 2, v.canvas.clientHeight / 2); const ray = v.camera.getPickRay(mid);
+    const centre = (ray && scene.globe.pick(ray, scene)) || v.camera.pickEllipsoid(mid);
     const range = centre ? C.Cartesian3.distance(v.camera.position, centre) : v.camera.positionCartographic.height;
     const fovy = (v.camera.frustum as C.PerspectiveFrustum).fovy ?? 1;
     const mpp = 2 * Math.tan(fovy / 2) * range / Math.max(1, v.canvas.clientHeight);
     if (mpp > 70) { this.plantKey = ''; remove(); return; }
+    // Plant around the centre of attention, not out to a distant horizon.
+    let vw = C.Math.toDegrees(rect.west), vs = C.Math.toDegrees(rect.south), ve = C.Math.toDegrees(rect.east), vn = C.Math.toDegrees(rect.north);
+    if (centre) {
+      const c = C.Cartographic.fromCartesian(centre); const reach = mpp * v.canvas.clientWidth * 1.4;
+      const clat = C.Math.toDegrees(c.latitude), clon = C.Math.toDegrees(c.longitude);
+      const dLat = reach / 110_574, dLon = reach / (111_320 * Math.cos(c.latitude));
+      vw = Math.max(vw, clon - dLon); ve = Math.min(ve, clon + dLon); vs = Math.max(vs, clat - dLat); vn = Math.min(vn, clat + dLat);
+    }
+    vw = Math.max(w, vw); vs = Math.max(s, vs); ve = Math.min(e, ve); vn = Math.min(n, vn);
+    if (ve <= vw || vn <= vs) { remove(); return; }
     const treeH = C.Math.clamp(mpp * 11, 9, 320), radius = treeH * 0.3;
     const lat0 = (s + n) / 2, cellW = (e - w) / g.width * 111_320 * Math.cos(lat0 * Math.PI / 180), cellH = (n - s) / g.height * 110_574;
-    const perCell = Math.min(16, cellW * cellH / (radius * 2.3) ** 2);
-    const x0 = Math.max(0, Math.floor((vw - w) / (e - w) * g.width)), x1 = Math.min(g.width - 1, Math.ceil((ve - w) / (e - w) * g.width));
-    const y0 = Math.max(0, Math.floor((n - vn) / (n - s) * g.height)), y1 = Math.min(g.height - 1, Math.ceil((n - vs) / (n - s) * g.height));
+    const perCell = Math.min(40, cellW * cellH / (radius * 2.3) ** 2);
+    // Snap the planted block to 6-cell steps (with a margin) so small camera moves do not re-plant the forest.
+    const snap = 6;
+    const x0 = Math.max(0, Math.floor((vw - w) / (e - w) * g.width / snap - 0.5) * snap), x1 = Math.min(g.width - 1, Math.ceil((ve - w) / (e - w) * g.width / snap + 0.5) * snap);
+    const y0 = Math.max(0, Math.floor((n - vn) / (n - s) * g.height / snap - 0.5) * snap), y1 = Math.min(g.height - 1, Math.ceil((n - vs) / (n - s) * g.height / snap + 0.5) * snap);
     const key = [x0, x1, y0, y1, Math.round(Math.log2(mpp) * 2), scene.verticalExaggeration].join(':');
     const weight = (c: number) => TREE.has(c) ? 1 : c === 20 ? 0.45 : c === 30 ? 0.05 : c === 90 ? 0.08 : 0;
     let expected = 0;
