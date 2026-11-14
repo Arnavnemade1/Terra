@@ -3,6 +3,7 @@ import * as C from 'cesium';
 import { Crosshair, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
 import { SWATH, type Sat } from './fleet';
 import { dmsPretty, subPoint } from './geo';
+import { imagery, terrainUrl } from './tiles';
 import type { Bounds } from './types';
 
 export type SensorLayer = { url: string; bounds: Bounds; date?: string };
@@ -93,10 +94,10 @@ export default function SensorView({ sat, at, target, bbox, eo, sar, change, exp
     v.scene.backgroundColor = C.Color.BLACK; v.scene.globe.baseColor = C.Color.fromCssColorString('#0c0d0b');
     v.scene.globe.maximumScreenSpaceError = 1.5; v.scene.highDynamicRange = false;
     v.scene.screenSpaceCameraController.enableInputs = false;
-    v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ url: `${MAPS}/imagery/{z}/{y}/{x}`, tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
+    v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...imagery('maps/imagery/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
     const palettes = new C.PostProcessStage({ fragmentShader: PALETTE_SHADER, uniforms: { ironbow: 1 } });
     palettes.enabled = false; v.scene.postProcessStages.add(palettes); stage.current = palettes;
-    void C.ArcGISTiledElevationTerrainProvider.fromUrl('/api/connector/terrain').then(t => { if (!disposed && !v.isDestroyed()) { v.terrainProvider = t; v.scene.requestRender(); } }).catch(() => {});
+    void C.ArcGISTiledElevationTerrainProvider.fromUrl(terrainUrl()).then(t => { if (!disposed && !v.isDestroyed()) { v.terrainProvider = t; v.scene.requestRender(); } }).catch(() => {});
     setReady(true);
     return () => { disposed = true; layers.current = {}; stage.current = null; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
   }, []);

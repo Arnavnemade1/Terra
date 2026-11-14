@@ -7,6 +7,7 @@ import { createStarSky } from './sky';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature, type TerrainReading } from './relief';
 import { DroneLayer } from './droneLayer';
 import { droneStore } from './drones';
+import { imagery as tileSource, terrainUrl } from './tiles';
 
 export type GlobeHandle = {
   home: () => void; flyTo: (b: Bounds) => void; flyToPoint: (lon: number, lat: number, heightM?: number) => void;
@@ -162,9 +163,10 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       scene.postProcessStages.fxaa.enabled = true;
       globe.baseColor = css('#06121c');
       globe.showGroundAtmosphere = true;
-      globe.maximumScreenSpaceError = 1.6;
-      globe.tileCacheSize = 400;
-      globe.preloadAncestors = true; globe.preloadSiblings = true;
+      // Cesium's own default error budget, and no sibling preloading: about half the tiles for the same view.
+      globe.maximumScreenSpaceError = 2;
+      globe.tileCacheSize = 600;
+      globe.preloadAncestors = true; globe.preloadSiblings = false;
       globe.lightingFadeOutDistance = 6_500_000; globe.lightingFadeInDistance = 14_000_000;
       globe.nightFadeOutDistance = 6_500_000; globe.nightFadeInDistance = 14_000_000;
       if (scene.skyAtmosphere) { scene.skyAtmosphere.show = true; scene.skyAtmosphere.atmosphereLightIntensity = 18; scene.skyAtmosphere.saturationShift = -0.12; scene.skyAtmosphere.brightnessShift = -0.06; }
@@ -295,14 +297,17 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         frames = 0; last = now;
       }, 250);
 
+      // Terrain first and in parallel: no place on the globe can refine until its terrain tile has arrived.
+      const terrainLoad = C.ArcGISTiledElevationTerrainProvider.fromUrl(terrainUrl());
       const providers = async () => {
-        // Every provider request uses the same-origin server connector. No credentials enter this bundle.
+        // Every provider request uses the same-origin server connector (spread over loopback names; see tiles.ts).
+        // No credentials enter this bundle.
         const fallback = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({
-          url: `${GIBS}/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg`,
+          ...tileSource('gibs/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg'),
           maximumLevel: 8, credit: new C.Credit('NASA GIBS · Blue Marble'),
         }));
         fallback.show = true;
-        const provider = new C.UrlTemplateImageryProvider({url: `${MAPS}/imagery/{z}/{y}/{x}`,
+        const provider = new C.UrlTemplateImageryProvider({...tileSource('maps/imagery/{z}/{y}/{x}'),
           tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery · Esri and partners')});
         const base = viewerRef.imageryLayers.addImageryProvider(provider);
         base.nightAlpha = .18; imagery = 'Esri World Imagery'; baseLayer.current = base; base.alpha = latest.current.imageryAlpha;
@@ -313,22 +318,22 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         if (import.meta.env.DEV) Object.assign(window, { __terraRelief: relief.current });
         // The 2D map is cartographic rather than photographic: dark shaded relief, a dark land/water base and dark labels.
         const flatSource = (name: string, credit: string, level = 16) => viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({
-          url: `${MAPS}/${name}/{z}/{y}/{x}`, tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: level, credit: new C.Credit(credit) }));
+          ...tileSource(`maps/${name}/{z}/{y}/{x}`), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: level, credit: new C.Credit(credit) }));
         const shaded = flatSource('relief-dark', 'Esri World Hillshade (dark)'), tint = flatSource('dark', 'Esri World Dark Gray Base');
         tint.alpha = 0.55; flatLayers.current = [shaded, tint];
         for (const l of flatLayers.current) l.show = latest.current.flat;
         let errors = 0;
         provider.errorEvent.addEventListener(() => { if (++errors > 5 && !disposed) {base.show=false;imagery='NASA Blue Marble';setNotice('High-resolution map imagery is unavailable. Showing NASA Blue Marble.');scene.requestRender();} });
-        const night = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ url: `${GIBS}/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png`, maximumLevel: 8, credit: new C.Credit('NASA GIBS · VIIRS Black Marble') }));
+        const night = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...tileSource('gibs/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png'), maximumLevel: 8, credit: new C.Credit('NASA GIBS · VIIRS Black Marble') }));
         night.dayAlpha = 0; night.nightAlpha = 1; night.brightness = 2.2; night.show = false; nightLayer.current = night;
-        labelLayer.current = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({url: `${MAPS}/labels/{z}/{y}/{x}`, tilingScheme:new C.WebMercatorTilingScheme(),maximumLevel:19,credit:new C.Credit('Esri places and borders')}));
+        labelLayer.current = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({...tileSource('maps/labels/{z}/{y}/{x}'), tilingScheme:new C.WebMercatorTilingScheme(),maximumLevel:19,credit:new C.Credit('Esri places and borders')}));
         labelLayer.current.show = latest.current.labels;
         if (disposed) return;
         setReady(true); latest.current.onReady(); scene.requestRender();
         // Open on the selected landscape, keeping map and investigation in the same place.
         if(!new URLSearchParams(location.search).has('investigation'))flyTo(latest.current.region.bbox);
         try {
-          const t = await C.ArcGISTiledElevationTerrainProvider.fromUrl('/api/connector/terrain');
+          const t = await terrainLoad;
           if (disposed) return; terrainProvider.current=t;terrainReady=true;if(latest.current.terrain)viewerRef.terrainProvider=t;scene.requestRender();
         } catch { if(!disposed)setNotice('Terrain is unavailable; imagery is shown on the WGS84 ellipsoid.'); }
       };
@@ -405,7 +410,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     retune.current();
     v.terrainProvider = props.terrain && terrainProvider.current ? terrainProvider.current : new C.EllipsoidTerrainProvider();
     v.resolutionScale = props.quality === 'high' ? Math.min(window.devicePixelRatio, 2) : props.quality === 'low' ? 0.8 : Math.min(window.devicePixelRatio, 1.5);
-    v.scene.globe.maximumScreenSpaceError = props.quality === 'high' ? 1.15 : props.quality === 'low' ? 4 : 1.6;
+    v.scene.globe.maximumScreenSpaceError = props.quality === 'high' ? 1.3 : props.quality === 'low' ? 4 : 2;
     v.scene.requestRender();
   }, [ready, props.terrain, props.lighting, props.quality, props.photoreal]);
   useEffect(() => { const v = viewer.current; if (v && labelLayer.current) { labelLayer.current.show = props.labels; v.scene.requestRender(); } }, [ready, props.labels]);

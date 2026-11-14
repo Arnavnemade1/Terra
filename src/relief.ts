@@ -1,4 +1,5 @@
 import * as C from 'cesium';
+import { imagery } from './tiles';
 import type { Bounds } from './types';
 
 export type LandCover = {
@@ -79,9 +80,9 @@ export class Relief {
     this.v = v; this.sun = v.scene.light; this.ground = v.scene.globe.baseColor.clone(); this.hidden = hide;
     const at = v.imageryLayers.indexOf(after) + 1;
     // A sand-coloured globe shaded by Esri's global hillshade; land cover and GPU shading are layered on top.
-    this.base = new C.ImageryLayer(new C.UrlTemplateImageryProvider({ url: `${MAPS}/hillshade/{z}/{y}/{x}`, tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 16, credit: new C.Credit('Esri World Hillshade') }));
+    this.base = new C.ImageryLayer(new C.UrlTemplateImageryProvider({ ...imagery('maps/hillshade/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 16, credit: new C.Credit('Esri World Hillshade') }));
     this.base.show = false; this.base.alpha = 0.5; this.base.brightness = 1.08; v.imageryLayers.add(this.base, at);
-    this.roads = new C.ImageryLayer(new C.UrlTemplateImageryProvider({ url: `${MAPS}/transport/{z}/{y}/{x}`, tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 18, credit: new C.Credit('Esri World Transportation') }));
+    this.roads = new C.ImageryLayer(new C.UrlTemplateImageryProvider({ ...imagery('maps/transport/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 18, credit: new C.Credit('Esri World Transportation') }));
     // Roads as thin pale lines, as on a topographic sheet, rather than Esri's coloured road classes.
     this.roads.show = false; this.roads.alpha = 0.6; this.roads.saturation = 0; this.roads.brightness = 1.6; v.imageryLayers.add(this.roads, at + 1);
     this.labels = new C.EntityCollection(); v.dataSources.add(new C.CustomDataSource('relief-labels')).then(ds => { if (this.v.isDestroyed()) return; this.labels = ds.entities; this.drawFeatures(); });
