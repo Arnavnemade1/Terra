@@ -286,7 +286,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
         </div>
         <div className="hud-pitch"><span className="pitch-label">GMB</span><div className="pitch-scale"><i style={{ top: `${C.Math.clamp(-gimbalPitch / 90, 0, 1) * 100}%` }}><em>{Math.round(gimbalPitch)}°</em></i></div></div>
         <div className="hud-cross"><i /><i /></div>
-        {mode === 'ir' && marks.map(m => <div key={m.key} className="hot-mark" style={{ left: m.x, top: m.y }}><i /><span>HOT {m.c.toFixed(0)}°C</span></div>)}
+        {mode === 'ir' && marks.map(m => <div key={m.key} className="hot-mark" style={{ left: m.x, top: m.y }}><i /><span>HOT {thermal && m.c >= thermal.maxC - 0.2 ? '≥' : ''}{m.c.toFixed(0)}°C</span></div>)}
         {mode === 'ir' && thermal && <div className="ir-scale"><b>{thermal.maxC.toFixed(0)}°C</b><i style={{ background: SCALE[palette] }} /><b>{thermal.minC.toFixed(0)}°C</b>
           <small>LANDSAT LST {thermal.date}</small></div>}
         {note && <div className={`hud-note ${note.kind}`}><b>NOTE · {NOTE_LABEL[note.kind] ?? note.kind.toUpperCase()}</b><span>{note.text}</span></div>}

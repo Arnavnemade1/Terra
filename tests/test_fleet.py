@@ -249,7 +249,8 @@ def test_thermal_profile_sends_ir_aircraft_to_the_warmest_ground(client, monkeyp
     hot = [t for t in FleetDB(tmp_path / "terra.db").targets() if t["kind"] == "hotspot"]
     assert len(hot) >= 2 and all(t["needs"] == ["ir"] for t in hot)
     warmest = max(hot, key=lambda t: t["priority"])
-    assert "60 °C" in warmest["label"] and warmest["lon"] > 15.0 and warmest["lat"] > 37.8
+    assert "≥60 °C" in warmest["label"] and warmest["lon"] > 15.0 and warmest["lat"] > 37.8  # at the top of the scale
+    assert any(t["label"].endswith(" 53 °C") for t in hot)  # below the top: the reading itself
 
 
 def test_agents_write_field_notes_and_relieve_the_aircraft_they_replace(client, monkeypatch, tmp_path):

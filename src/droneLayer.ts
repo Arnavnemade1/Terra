@@ -142,7 +142,7 @@ export class DroneLayer {
     const launch = info.area?.launch;
     if (launch) this.pad = this.marks.add({ ...ground, position: C.Cartesian3.fromDegrees(launch[0], launch[1]), image: padImage() as unknown as string, id: { kind: 'launch' } });
     for (const t of hot) {
-      const reading = t.label.match(/(-?\d+) °C/)?.[1];
+      const reading = t.label.match(/(≥?-?\d+) °C/)?.[1];
       this.marks.add({ ...ground, position: C.Cartesian3.fromDegrees(t.lon, t.lat), image: markImage('warm', `HOT ${reading ?? ''}°C`) as unknown as string,
         verticalOrigin: C.VerticalOrigin.BOTTOM, pixelOffset: new C.Cartesian2(0, -4), id: { kind: 'target', targetId: t.id } });
     }

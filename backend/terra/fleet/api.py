@@ -291,11 +291,15 @@ async def thermal_targets(bbox: list[float]) -> list[dict]:
     """The warmest ground in the most recent mostly clear Landsat scene, for an IR camera to look at."""
     from ..thermal import hot_spots, thermal
     try:
-        spots = hot_spots(await thermal(bbox), count=4, separation_m=600)
+        scene = await thermal(bbox)
+        spots = hot_spots(scene, count=4, separation_m=600)
     except Exception:
         log.exception("thermal targets failed")
         return []
-    return [{"id": f"hot:{i + 1}", "kind": "hotspot", "label": f"Warm ground {spot['surface_c']:.0f} °C", "lon": spot["lon"], "lat": spot["lat"],
+    # The scene's colour scale stops at its 99.5th percentile; a spot at the top of the scale is that warm or warmer.
+    top = scene.get("maxC", 1e9)
+    reading = lambda c: f"≥{top:.0f} °C" if c >= top - 0.2 else f"{c:.0f} °C"  # noqa: E731
+    return [{"id": f"hot:{i + 1}", "kind": "hotspot", "label": f"Warm ground {reading(spot['surface_c'])}", "lon": spot["lon"], "lat": spot["lat"],
              "radius_m": 250, "priority": round(0.9 - 0.1 * i, 2), "needs": ["ir"], "surface_c": spot["surface_c"]} for i, spot in enumerate(spots)]
 
 
