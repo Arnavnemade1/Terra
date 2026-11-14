@@ -1,0 +1,5 @@
+/* Tailwind theme + utilities only (no preflight), so Arc's CSS modules and the planner keep their styling.
+   Used by the Aceternity 3d-globe in src/components/ui. */
+@layer theme, base, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
