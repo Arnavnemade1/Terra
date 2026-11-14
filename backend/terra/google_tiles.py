@@ -18,6 +18,7 @@ import asyncio
 import os
 import re
 import time
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
@@ -32,7 +33,7 @@ KEY_NAMES = ("GOOGLE_MAPS_TILES_KEY", "GOOGLE_MAPS_KEY", "VITE_GOOGLE_MAPS_KEY")
 _FILE = re.compile(r"datasets/[A-Za-z0-9_-]{1,64}/files/[A-Za-z0-9_-]{1,512}\.(json|glb)")
 _SESSION = re.compile(r"[A-Za-z0-9_-]{1,256}")
 _PASS_HEADERS = ("cache-control", "etag", "expires", "last-modified")
-_status: dict = {"checked": 0.0, "value": None}
+_status: dict = {"checked": 0.0, "value": None, "referer": None}
 _status_lock = asyncio.Lock()
 STATUS_TTL = 600
 
@@ -56,6 +57,32 @@ def api_key() -> str | None:
     return None
 
 
+def referer(request_headers: dict) -> str | None:
+    """The page Terra is open on, sent to Google so keys restricted to websites (HTTP referrers) work.
+
+    Google checks a referrer-restricted key against the Referer of each request. The browser's own request to
+    this gateway carries it, so forwarding it gives the same result as a direct browser request.
+    GOOGLE_MAPS_TILES_REFERER overrides it (for example the public address of a deployment).
+    Only scheme, host and path are sent: no query string, which can hold an investigation id.
+    """
+    for value in (os.getenv("GOOGLE_MAPS_TILES_REFERER", "").strip(), request_headers.get("referer", ""),
+                  (request_headers.get("origin", "") + "/") if request_headers.get("origin") else ""):
+        if not value or len(value) > 512 or any(ord(c) < 33 for c in value):
+            continue
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            continue
+        if parts.scheme in ("http", "https") and parts.hostname:
+            return f"{parts.scheme}://{parts.netloc}{parts.path or '/'}"
+    return None
+
+
+REFUSED = ("Google refused this key (HTTP 403). If the key is restricted to websites, allow the address Terra runs on "
+           "(locally http://localhost:5173/* and http://127.0.0.1:5173/*) or set GOOGLE_MAPS_TILES_REFERER. Otherwise check "
+           "that the key's API restrictions include the Map Tiles API, that the API is enabled and that billing is on.")
+
+
 def rewrite(document: bytes) -> bytes:
     """Point the tileset's absolute child URIs back at this gateway."""
     return document.replace(b'"/v1/3dtiles/', f'"{PUBLIC}/'.encode())
@@ -66,6 +93,9 @@ async def _fetch(path: str, params: dict | None, request_headers: dict, max_byte
     if not key:
         raise HTTPException(503, "Photorealistic 3D tiles need a Google Maps Platform key with the Map Tiles API enabled.")
     headers = {"X-Goog-Api-Key": key}
+    page = referer(request_headers)
+    if page:
+        headers["Referer"] = page
     if request_headers.get("if-none-match"):
         headers["If-None-Match"] = request_headers["if-none-match"]
     try:
@@ -73,7 +103,7 @@ async def _fetch(path: str, params: dict | None, request_headers: dict, max_byte
                                  timeout=20, max_bytes=max_bytes)
     except ConnectorError as exc:
         if exc.status_code in (401, 403):
-            raise HTTPException(502, "Google refused the tile request. Check that the Map Tiles API is enabled for this key.") from None
+            raise HTTPException(502, REFUSED) from None
         if exc.status_code == 429:
             raise HTTPException(429, "Google Map Tiles quota reached. Try again later.") from None
         raise HTTPException(404 if exc.status_code == 404 else 502, str(exc)) from None
@@ -96,23 +126,25 @@ async def _fetch(path: str, params: dict | None, request_headers: dict, max_byte
 
 
 @router.get("/status")
-async def status():
-    return await availability()
+async def status(req: Request):
+    return await availability(dict(req.headers))
 
 
-async def availability() -> dict:
-    """Whether photorealistic tiles can be served, probed at most every ten minutes."""
+async def availability(request_headers: dict | None = None) -> dict:
+    """Whether photorealistic tiles can be served from the asking page, probed at most every ten minutes."""
     if not api_key():
         return {"configured": False, "available": False, "reason": "No Google Maps Platform key is configured on the server."}
+    headers = {k: v for k, v in (request_headers or {}).items() if k in ("referer", "origin")}
+    page = referer(headers)
     async with _status_lock:
-        if _status["value"] and time.monotonic() - _status["checked"] < STATUS_TTL:
+        if _status["value"] and _status["referer"] == page and time.monotonic() - _status["checked"] < STATUS_TTL:
             return _status["value"]
         try:
-            await _fetch("root.json", None, {}, 2_000_000)
+            await _fetch("root.json", None, headers, 2_000_000)
             value = {"configured": True, "available": True, "reason": None}
         except HTTPException as exc:
             value = {"configured": True, "available": False, "reason": exc.detail}
-        _status.update(checked=time.monotonic(), value=value)
+        _status.update(checked=time.monotonic(), value=value, referer=page)
         return value
 
 
