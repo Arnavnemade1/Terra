@@ -102,3 +102,20 @@ ul.plain { display: flex; flex-direction: column; gap: 6px; padding-left: 18px; 
   .report-section { break-inside: avoid-page; }
 }
 
+
+/* Phone: one column, stacked comparisons, wide tables scroll inside their own box, and a two-row header. */
+@media (max-width: 760px) {
+  .sheet-bar { flex-wrap: wrap; height: auto; padding: 6px 8px 0 14px; row-gap: 0; }
+  .sheet-title { flex: 1 1 auto; min-width: 0; }
+  .sheet-nav { order: 10; flex: 1 0 100%; margin: 0 -8px 0 -14px; padding: 0 8px; border-top: 1px solid var(--line); scrollbar-width: none; }
+  .sheet-nav button { height: 44px; }
+  .sheet-actions > button:not(.icon-btn), .sheet-actions > a { height: 44px; }
+  .report { padding: 22px 16px 48px; }
+  .report-head h1 { font-size: 28px; line-height: 1.18; }
+  .report-columns { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .compare.side { grid-template-columns: minmax(0, 1fr); }
+  .sheet .prose { font-size: 16px; }
+  .table { display: block; overflow-x: auto; white-space: nowrap; }
+  .sheet .seg { overflow-x: auto; max-width: 100%; }
+  .sheet .seg button { height: 40px; }
+}

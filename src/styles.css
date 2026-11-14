@@ -55,7 +55,6 @@ ul, ol { list-style: none; }
 .pixelated { image-rendering: pixelated; }
 .break { overflow-wrap: anywhere; }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 @keyframes sweep { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
 /* ---------- shared controls ---------- */
@@ -94,7 +93,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .state { display: inline-flex; align-items: center; gap: 7px; font-weight: 500; color: var(--fg-2); }
 .state::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--fg-3); }
 .state.completed::before { background: var(--ok); }
-.state.running::before, .state.queued::before { background: var(--accent); animation: breathe 1.4s ease-in-out infinite; }
+.state.running::before, .state.queued::before { background: var(--accent); }
 .state.blocked::before { background: var(--warn); }
 .state.failed::before, .state.cancelled::before { background: var(--bad); }
 
@@ -131,6 +130,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .menu > button, .menu > a { position: relative; display: flex; flex-direction: column; padding: 7px 9px; border-radius: var(--r-sm); color: var(--fg); }
 .menu > button:hover:not(:disabled), .menu > a:hover { background: var(--surface-3); }
 .menu > button.on::after { content: '✓'; position: absolute; right: 12px; top: 7px; color: var(--accent); }
+.more-wrap { display: none; }
+.menu-note { font-size: 11.5px; color: var(--fg-3); }
 .menu-label { padding: 9px 9px 3px; font-size: 11.5px; font-weight: 600; color: var(--fg-3); }
 .menu-seg { display: flex; gap: 2px; padding: 2px 9px 6px; }
 .menu-seg button { flex: 1; height: 26px; border-radius: 4px; border: 1px solid var(--rule); font-size: 11.5px; color: var(--fg-2); text-align: center; }
@@ -180,12 +181,12 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .graticule .gx, .graticule .gy { position: absolute; padding: 1px 5px; border-radius: 3px; background: rgba(21, 22, 19, 0.86); border: 1px solid var(--rule-2); font: 500 10px var(--mono); color: var(--fg-2); white-space: nowrap; }
 .graticule .gx { top: 8px; transform: translateX(-50%); }
 .graticule .gy { right: 8px; transform: translateY(-50%); }
-.coord-readout { position: absolute; z-index: 3; left: 12px; bottom: 12px; display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px 0 10px; border-radius: var(--r-sm);
+.coord-readout { position: absolute; z-index: 3; left: 12px; bottom: var(--chrome-bottom); display: flex; align-items: center; gap: 4px; height: 28px; padding: 0 6px 0 10px; border-radius: var(--r-sm);
   background: rgba(21, 22, 19, 0.88); border: 1px solid var(--rule-2); font-size: 12px; color: var(--fg-2); }
 .coord-readout > button.num { color: var(--fg); }
 .coord-readout .quiet { font-size: 11.5px; padding-right: 4px; }
-.map-controls { position: absolute; z-index: 3; right: 12px; bottom: 12px; display: flex; align-items: flex-end; gap: 8px; }
-.hover-card { position: absolute; z-index: 3; right: 12px; bottom: 54px; min-width: 216px; max-width: 290px; padding: 8px 11px 8px; border-radius: var(--r-sm); pointer-events: none;
+.map-controls { position: absolute; z-index: 3; right: 12px; bottom: var(--chrome-bottom); display: flex; align-items: flex-end; gap: 8px; }
+.hover-card { position: absolute; z-index: 3; right: 12px; bottom: calc(var(--chrome-bottom) + 42px); min-width: 216px; max-width: 290px; padding: 8px 11px 8px; border-radius: var(--r-sm); pointer-events: none;
   background: rgba(18, 17, 14, 0.9); border: 1px solid var(--rule-2); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); font-size: 12px; color: var(--fg-2); line-height: 1.5; }
 .hover-card > b { color: var(--fg); font-weight: 600; font-size: 12.5px; }
 .hover-card .hc-row { display: flex; align-items: center; gap: 6px; color: var(--fg); }
@@ -212,7 +213,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .map-hint { position: absolute; z-index: 4; top: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 12px; align-items: center; padding: 7px 8px 7px 12px; border-radius: var(--r-sm);
   background: var(--surface-2); border: 1px solid var(--accent); font-size: 12.5px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4); }
 .map-hint button { color: var(--fg-2); text-decoration: underline; text-underline-offset: 3px; }
-.map-legend { position: absolute; z-index: 3; left: 12px; bottom: 48px; width: 250px; display: flex; flex-direction: column; gap: 4px; padding: 9px 11px 10px; border-radius: var(--r-sm);
+.map-legend { position: absolute; z-index: 3; left: 12px; bottom: calc(var(--chrome-bottom) + 36px); width: 250px; display: flex; flex-direction: column; gap: 4px; padding: 9px 11px 10px; border-radius: var(--r-sm);
   background: rgba(21, 22, 19, 0.92); border: 1px solid var(--rule-2); }
 .map-legend b { font-size: 12px; font-weight: 600; }
 .map-legend .probe { font-size: 11.5px; color: var(--fg-3); }
@@ -233,12 +234,20 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .notice { position: absolute; z-index: 5; top: 60px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; max-width: 480px; padding: 7px 8px 7px 12px;
   border-radius: var(--r-sm); background: var(--surface); border: 1px solid var(--rule-2); font-size: 12.5px; color: var(--fg-2); }
 .notice button { width: 20px; color: var(--fg-3); font-size: 15px; }
-.map-credits { position: absolute; z-index: 2; left: 50%; bottom: 3px; transform: translateX(-50%); max-width: 40%; font-size: 9.5px; color: rgba(235, 232, 222, 0.42);
-  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+/* Attribution strip: one line along the bottom edge of the map, below the map controls, so no credit is ever hidden.
+   Cesium renders into this container outside its own viewer, so its credit list is made static here. */
+.map-area { --chrome-bottom: 30px; }
+.map-credits { position: absolute; z-index: 2; left: 12px; right: 12px; bottom: 5px; min-height: 18px; font-size: 10px; line-height: 18px; color: rgba(235, 232, 222, 0.66);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85); }
+.map-credits .cesium-widget-credits { position: static; display: inline; padding: 0; }
 .map-credits a { color: inherit; }
-.map-credits img { max-height: 11px; vertical-align: middle; opacity: 0.8; }
+.map-credits img { max-height: 13px; vertical-align: middle; opacity: 0.8; }
 .map-credits .cesium-credit-textContainer, .map-credits .cesium-credit-logoContainer { display: inline; }
-.map-credits .cesium-credit-expand-link { color: rgba(235, 232, 222, 0.6); text-decoration: underline; cursor: pointer; }
+.map-credits .cesium-credit-expand-link { color: rgba(235, 232, 222, 0.8); text-decoration: underline; cursor: pointer; margin-left: 6px; }
+/* Google Maps attribution (Map Tiles API policies): the outlined logo at its native 18 px and full opacity, and every
+   data provider in full. Present only while Google tiles are on screen. */
+.map-credits:has(.google-logo) { white-space: normal; overflow: visible; color: rgba(235, 232, 222, 0.86); }
+.map-credits img.google-logo { max-height: none; height: 18px; width: auto; opacity: 1; margin: 0 6px 0 0; vertical-align: -5px; }
 
 /* ---------- right panel ---------- */
 .sidebar { grid-area: side; position: relative; z-index: 4; display: flex; flex-direction: column; min-height: 0; background: var(--surface); border-left: 1px solid var(--rule-2); }
@@ -336,7 +345,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .steps li.done, .steps li.now { color: var(--fg); }
 .tick { width: 16px; height: 16px; margin-top: 1px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--rule-2); }
 .steps li.done .tick { background: var(--surface-3); border-color: var(--surface-3); color: var(--ok); }
-.pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: breathe 1.2s ease-in-out infinite; }
+.pulse { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 .step-name { display: flex; flex-direction: column; font-size: 12.5px; }
 .step-name small { font-size: 11.5px; color: var(--fg-3); margin-top: 2px; }
 .step-time { font-size: 11px; color: var(--fg-3); }
@@ -530,20 +539,42 @@ details.more[open] summary { margin-bottom: 8px; }
 @media (max-width: 1020px) {
   :root { --list-w: 0px; }
   .dock-side { display: none; }
-  .menus .menu-btn { padding: 0 6px; }
   .area-context { display: none; }
+  /* Below laptop width the View, Analysis and Share menus, sources and About fold into one More menu. */
+  .menus, .sources-btn, .about-btn { display: none; }
+  .more-wrap { display: block; flex: none; }
 }
 @media (max-width: 760px) {
-  :root { --top-h: 50px; --dock-h: 74px; }
+  :root { --top-h: 102px; --dock-h: 104px; }
   .workspace { grid-template-columns: 1fr; grid-template-rows: var(--top-h) 46vh var(--dock-h) minmax(0, 1fr); grid-template-areas: 'top' 'map' 'dock' 'side'; }
   .dock-charts { display: none; }
   .sidebar { border-left: 0; border-top: 1px solid var(--rule-2); }
-  .topbar { gap: 8px; padding: 0 8px; overflow-x: auto; }
-  .menus, .sources-btn { display: none; }
+  /* Two rows: brand, area and More; then the three workspaces as a full-width segmented control. */
+  .topbar { flex-wrap: wrap; align-content: center; gap: 4px 8px; padding: 6px 8px; }
+  .modes { order: 10; flex: 1 0 100%; margin: 0; }
+  .modes button { flex: 1; justify-content: center; height: 40px; }
+  .more-wrap { margin-left: auto; }
+  /* On a phone the More menu is a sheet under the top bar. */
+  .menu.more-menu { position: fixed; top: calc(var(--top-h) + 6px); left: 8px; right: 8px; max-width: none; max-height: calc(100dvh - var(--top-h) - 16px); }
+  .menu.more-menu > button, .menu.more-menu > a { min-height: 44px; justify-content: center; }
+  .menu.more-menu .menu-seg button { height: 40px; }
   .modes button { padding: 0 8px; }
   .modes button svg { display: none; }
-  .area-menu { position: fixed; left: 8px; right: 8px; top: 56px; width: auto; max-width: none; }
+  .area-picker { flex: 1 1 auto; min-width: 0; padding-left: 8px; }
+  .area-button { min-width: 0; max-width: 100%; }
+  .area-context { display: none; }
+
+  .area-menu { position: fixed; left: 8px; right: 8px; top: calc(var(--top-h) + 6px); width: auto; max-width: none; max-height: calc(100dvh - var(--top-h) - 16px); }
+
   .map-legend { display: none; }
+  /* Map controls: style switch and full screen only; 2D and zoom presets live in More, and pinch zooms. */
+  .map-controls { left: 8px; right: 8px; justify-content: space-between; }
+  .map-controls .seg-map:not([aria-label="Map style"]), .map-controls .zoom-select { display: none; }
+  .seg-map[aria-label="Map style"] button { padding: 0 12px; }
+  /* Dock: one header line and the transport row, fully visible. */
+  .timeline-range, .timeline-count { display: none; }
+  /* The map-style controls span the width on a phone; the coordinate readout sits on the row above them. */
+  .coord-readout { bottom: calc(var(--chrome-bottom) + 44px); }
   .coord-readout .quiet { display: none; }
   .scale { display: none; }
   .lenses { grid-template-columns: 1fr; }
@@ -574,8 +605,7 @@ details.more[open] summary { margin-bottom: 8px; }
 .hud-bc { position: absolute; bottom: 72px; left: 50%; transform: translateX(-50%); text-align: center; }
 .sensor.expanded .hud-bc { bottom: 18px; }
 .sensor:not(.expanded) .hud { font-size: 10.5px; letter-spacing: 0.02em; }
-.hud .rec { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #ff4d2e; vertical-align: 1px; animation: blink 1.2s steps(2, start) infinite; }
-@keyframes blink { to { visibility: hidden; } }
+.hud .rec { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: #ff4d2e; vertical-align: 1px; }
 .hud-tape { position: absolute; top: 8px; left: 32%; right: 32%; height: 56px; overflow: hidden; }
 .tape-ticks { position: absolute; top: 4px; left: 0; right: 0; height: 26px; border-bottom: 1px solid rgba(244, 241, 232, 0.35); }
 .tape-ticks span { position: absolute; bottom: 0; width: 1px; height: 5px; background: rgba(244, 241, 232, 0.6); }
@@ -604,3 +634,21 @@ details.more[open] summary { margin-bottom: 8px; }
 .sensor-palette:disabled { opacity: 0.4; }
 .zoom-read { min-width: 36px; text-align: center; font-size: 12px; color: var(--fg-2); }
 @media (max-width: 1020px) { .sensor { width: calc(100% - 28px); } .hud-tape, .hud-pitch { display: none; } }
+
+/* Touch: every control at least 44 px tall (and wide when icon-only) on phones and on any coarse-pointer device. */
+@media (max-width: 760px), (pointer: coarse) {
+  .workspace button, .workspace select, .workspace input:not([type=range]):not([type=checkbox]), .workspace a.secondary, .workspace a.primary { min-height: 44px; }
+  .workspace .icon-btn, .workspace .map-btn, .workspace .copy, .workspace .compass { min-width: 44px; min-height: 44px; }
+  .workspace input[type=range] { height: 44px; }
+  .workspace a.link { display: inline-block; padding: 12px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) { .spin, .boot-line { animation: none; } }
+
+/* Phone sensor view (after the base sensor rules so it wins): full map width; the centre readout appears only
+   full screen, where it clears the crosshair; the control bar wraps onto a second row. */
+@media (max-width: 760px) {
+  .sensor { top: 8px; right: 8px; width: calc(100% - 16px); max-height: calc(100% - 16px); }
+  .sensor:not(.expanded) .hud-bc { display: none; }
+  .sensor-bar { flex-wrap: wrap; height: auto; padding: 6px 8px; row-gap: 6px; }
+}

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { ArrowUpRight, BarChart3, Calendar, Check, ChevronDown, Copy, Expand, Eye, Info, Navigation, Satellite, Settings, Share2, Shrink, X } from 'lucide-react';
+import { ArrowUpRight, BarChart3, Calendar, Check, ChevronDown, Copy, Expand, Eye, Info, Menu as MenuIcon, Navigation, Satellite, Settings, Share2, Shrink, X } from 'lucide-react';
 import Globe, { type GlobeHandle, type Hover, type Mark, type Overlay, type Telemetry } from './Globe';
 import { decodeGrid, type Grid, type ReliefOptions, type TerrainContext } from './relief';
 import Search, { boxAround, type Hazard } from './Search';
@@ -86,7 +86,9 @@ export default function App() {
   const [submitting, setSubmitting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [flat, setFlat] = useState(false);
-  const [style, setStyle] = useState<'photo' | 'relief'>(() => readJSON<'photo' | 'relief'>('terra.style', 'photo') === 'relief' ? 'relief' : 'photo');
+  const [style, setStyle] = useState<MapStyle>(() => { const v = readJSON<MapStyle>('terra.style', 'photo'); return v === 'relief' || v === 'photoreal' ? v : 'photo'; });
+  // Google Photorealistic 3D Tiles: offered only when the server has a working Map Tiles API key.
+  const [photorealState, setPhotorealState] = useState<{ available: boolean; reason: string | null } | null>(null);
   const [terrain, setTerrain] = useState<{ ctx: TerrainContext; grid: Grid | null } | null>(null);
   const [terrainState, setTerrainState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [drawingProfile, setDrawingProfile] = useState(false);
@@ -102,7 +104,7 @@ export default function App() {
   const [footprints, setFootprints] = useState(true);
   const [feeds, setFeeds] = useState<Record<string, FeedState>>({});
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [menu, setMenu] = useState<'area' | 'view' | 'analysis' | 'share' | 'sources' | 'about' | null>(null);
+  const [menu, setMenu] = useState<'area' | 'view' | 'analysis' | 'share' | 'more' | 'sources' | 'about' | null>(null);
   const [detail, setDetail] = useState(false);
   const [dossier, setDossier] = useState(false);
   const [refresh, setRefresh] = useState(0);
@@ -183,6 +185,17 @@ export default function App() {
   useEffect(() => { const id = setInterval(() => setNow(Date.now()), 15_000); return () => clearInterval(id); }, []);
   useEffect(() => { writeJSON('terra.layers', ls); }, [ls]);
   useEffect(() => { writeJSON('terra.style', style); }, [style]);
+  useEffect(() => {
+    let alive = true;
+    void api<{ available: boolean; reason: string | null }>('/connector/google3d/status')
+      .then(v => { if (alive) setPhotorealState(v); })
+      .catch(() => { if (alive) setPhotorealState({ available: false, reason: 'The map service did not answer.' }); });
+    return () => { alive = false; };
+  }, []);
+  const photorealReady = Boolean(photorealState?.available);
+  // A saved Photoreal choice falls back to terrain and imagery until (and unless) the tiles are available.
+  const mapStyle: Exclude<MapStyle, 'photoreal'> | 'photoreal' = style === 'photoreal' && !photorealReady ? 'photo' : style;
+  const onPhotorealError = useCallback((message: string) => { setPhotorealState({ available: false, reason: message }); }, []);
   // Land cover and named features for the relief map and the pointer readout (areas up to 2 degrees across).
   useEffect(() => {
     setTerrain(null); const b = region.bbox;
@@ -444,7 +457,7 @@ export default function App() {
   const set = (id: LayerId, patch: Partial<Setting>) => setLs(s => ({ ...s, [id]: { ...s[id], ...patch } }));
   const layerRows: LayerRowSpec[] = [
     { id: 'terrain', name: 'Terrain (3D)', sub: 'Exaggeration', thumb: `/api/connector/maps/relief-dark/${tile(aoiCentre.lat, aoiCentre.lon, 9)}`, on: ls.terrain.on, value: ls.terrain.value, max: 3, disabled: flat },
-    { id: 'imagery', name: 'Satellite imagery', note: style === 'relief' ? 'Replaced by the relief map' : 'Esri World Imagery', thumb: `/api/connector/maps/imagery/${tileAt}`, on: ls.imagery.on, value: ls.imagery.value, disabled: flat || style === 'relief' },
+    { id: 'imagery', name: 'Satellite imagery', note: mapStyle === 'relief' ? 'Replaced by the relief map' : mapStyle === 'photoreal' ? 'Esri World Imagery above 300 km; Google 3D tiles below, hidden while a radar layer shows' : 'Esri World Imagery', thumb: `/api/connector/maps/imagery/${tileAt}`, on: ls.imagery.on, value: ls.imagery.value, disabled: flat || mapStyle === 'relief' },
     { id: 'contours', name: 'Contours', note: 'Relief map · spacing follows the zoom', swatch: Swatch.contours(), on: ls.contours.on, disabled: flat || style !== 'relief' },
     { id: 'landcover', name: 'Land cover', note: terrain?.ctx.landcover ? `ESA WorldCover 2021 · ${terrain.ctx.landcover.resolution_m} m cells` : terrainState === 'loading' ? 'Reading ESA WorldCover…' : 'ESA WorldCover 2021', swatch: Swatch.cover(), on: ls.landcover.on, disabled: flat || style !== 'relief' || !terrain?.grid },
     { id: 'trees', name: 'Trees and shrubs', note: 'Placed where land cover has them', swatch: Swatch.trees(), on: ls.trees.on, disabled: flat || style !== 'relief' || !terrain?.grid },
@@ -478,6 +491,43 @@ export default function App() {
   const conditions = result?.surface_conditions;
   const meta0 = ((result?.provenance as { inputs?: { metadata?: Record<string, unknown> }[] } | undefined)?.inputs || [])[0]?.metadata || {};
 
+  // Menu contents, shared by the desktop menus and the phone's single More sheet.
+  const viewItems = <>
+          <span className="menu-label">Map</span>
+          <button className={!flat && mapStyle === 'photo' ? 'on' : ''} onClick={() => { setFlat(false); setStyle('photo'); }}>3D terrain and imagery</button>
+          <button className={!flat && mapStyle === 'relief' ? 'on' : ''} onClick={() => { setFlat(false); setStyle('relief'); }}>3D relief map</button>
+          <button className={!flat && mapStyle === 'photoreal' ? 'on' : ''} disabled={!photorealReady} title={photorealReady ? 'Google Photorealistic 3D Tiles below 300 km' : photorealState?.reason || 'Checking the map service…'}
+            onClick={() => { setFlat(false); setStyle('photoreal'); }}>Photorealistic 3D (Google){!photorealReady && <small className="menu-note">{photorealState ? 'Unavailable' : 'Checking…'}</small>}</button>
+          <button className={flat ? 'on' : ''} onClick={() => setFlat(true)}>2D relief map</button>
+          <button disabled={!nisarSat} onClick={() => nisarSat && openSensor(nisarSat)}>Sensor view from NISAR’s next pass</button>
+          <button className={lighting ? 'on' : ''} onClick={() => setLighting(v => !v)}>Day and night, live</button>
+          <button className={footprints ? 'on' : ''} onClick={() => setFootprints(v => !v)}>Radar acquisition outlines</button>
+          <span className="menu-label">Display filter</span>
+          <div className="menu-seg">{DISPLAY_MODES.map(dm => <button key={dm.id} className={display === dm.id ? 'on' : ''} onClick={() => setDisplay(dm.id)} title={dm.hint}>{dm.id === 'normal' ? 'True' : dm.label}</button>)}</div>
+          <span className="menu-label">Detail</span>
+          <div className="menu-seg">{['low', 'balanced', 'high'].map(q => <button key={q} className={quality === q ? 'on' : ''} onClick={() => setQuality(q)}>{capital(q)}</button>)}</div>
+  </>;
+  const analysisItems = <>
+          <button onClick={newQuestion}>New question for this area</button>
+          <button onClick={() => { setMode('investigation'); setTab('analysis'); setJob(undefined); setManual(true); setMenu(null); }}>Choose radar dates yourself</button>
+          <button onClick={() => { setPicking(true); setMenu(null); }}>Draw a new area</button>
+          <button onClick={() => { setDrawingProfile(true); setProfileVertices([]); setProfile(null); setMenu(null); }}>Draw a terrain profile</button>
+          {jobs.length > 0 && <span className="menu-label">Saved investigations</span>}
+          {jobs.slice(0, 8).map(j => <button key={j.id} onClick={() => void openJob(j)} className="menu-job"><b>{j.question || j.title}</b><small>{j.title.split(' · ')[0]} · {prettyDate(j.created_at)}</small></button>)}
+  </>;
+  const shareItems = <>
+          <button disabled={!job} onClick={() => { void navigator.clipboard?.writeText(location.href); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>{copied ? 'Link copied' : 'Copy link to this investigation'}</button>
+          <button disabled={!result} onClick={() => { setDossier(true); setMenu(null); }}>Open the report</button>
+          {job && result ? <a href={artifactUrl(job, 'public-result.json')} download>Download measurements and sources</a> : <button disabled>Download measurements and sources</button>}
+          <button onClick={() => { globe.current?.screenshot(); setMenu(null); }}>Save an image of the map</button>
+  </>;
+  const sourceItems = <>{Object.entries({ satellites: 'CelesTrak orbital elements', nisar: 'NASA / ASF catalog', earthquakes: 'USGS earthquakes', events: 'USGS volcanoes · GDACS · NASA EONET', fires: 'NASA FIRMS' }).map(([k, name]) => { const f = feeds[k]; return <li key={k}>
+          <i className={`led ${f?.state === 'live' ? 'ok' : f?.state === 'stale' ? 'warn' : f?.state === 'offline' ? 'bad' : ''}`} />
+          <span>{name}<small>{f ? `${f.count.toLocaleString('en')} records${f.fetchedAt ? ` · updated ${new Date(f.fetchedAt).toISOString().slice(11, 16)} UTC` : ''}` : 'connecting'}</small></span></li>; })}
+          <li><i className={`led ${health?.temporal.connected ? 'ok' : 'bad'}`} /><span>Investigation service<small>{health?.temporal.connected ? 'Durable workflows connected' : 'Offline'}</small></span></li>
+          <li><i className={`led ${originals ? 'ok' : ''}`} /><span>NASA Earthdata<small>{originals ? 'Original NISAR products available' : 'No credential set'}</small></span></li>
+          <li><i className={`led ${writer ? 'ok' : ''}`} /><span>Language model<small>{writer ? `${writer} plans and writes; every number is checked` : 'Not configured'}</small></span></li>
+          <li><i className={`led ${photorealReady ? 'ok' : ''}`} /><span>Google Map Tiles<small>{photorealReady ? 'Photorealistic 3D available (View menu)' : photorealState?.reason || 'Checking'}</small></span></li></>;
   return <div className={`app workspace mode-${mode}`} onClick={() => menu && setMenu(null)}>
     {/* ------------------------------------------------ top bar */}
     <header className="topbar" onClick={e => e.stopPropagation()}>
@@ -502,58 +552,46 @@ export default function App() {
       </nav>
       <div className="menus">
         <MenuButton id="view" label="View" icon={<Eye size={14} />} menu={menu} setMenu={setMenu}>
-          <span className="menu-label">Map</span>
-          <button className={!flat && style === 'photo' ? 'on' : ''} onClick={() => { setFlat(false); setStyle('photo'); }}>3D terrain and imagery</button>
-          <button className={!flat && style === 'relief' ? 'on' : ''} onClick={() => { setFlat(false); setStyle('relief'); }}>3D relief map</button>
-          <button className={flat ? 'on' : ''} onClick={() => setFlat(true)}>2D relief map</button>
-          <button disabled={!nisarSat} onClick={() => nisarSat && openSensor(nisarSat)}>Sensor view from NISAR’s next pass</button>
-          <button className={lighting ? 'on' : ''} onClick={() => setLighting(v => !v)}>Day and night, live</button>
-          <button className={footprints ? 'on' : ''} onClick={() => setFootprints(v => !v)}>Radar acquisition outlines</button>
-          <span className="menu-label">Display filter</span>
-          <div className="menu-seg">{DISPLAY_MODES.map(dm => <button key={dm.id} className={display === dm.id ? 'on' : ''} onClick={() => setDisplay(dm.id)} title={dm.hint}>{dm.id === 'normal' ? 'True' : dm.label}</button>)}</div>
-          <span className="menu-label">Detail</span>
-          <div className="menu-seg">{['low', 'balanced', 'high'].map(q => <button key={q} className={quality === q ? 'on' : ''} onClick={() => setQuality(q)}>{capital(q)}</button>)}</div>
+          {viewItems}
         </MenuButton>
         <MenuButton id="analysis" label="Analysis" icon={<BarChart3 size={14} />} menu={menu} setMenu={setMenu}>
-          <button onClick={newQuestion}>New question for this area</button>
-          <button onClick={() => { setMode('investigation'); setTab('analysis'); setJob(undefined); setManual(true); setMenu(null); }}>Choose radar dates yourself</button>
-          <button onClick={() => { setPicking(true); setMenu(null); }}>Draw a new area</button>
-          <button onClick={() => { setDrawingProfile(true); setProfileVertices([]); setProfile(null); setMenu(null); }}>Draw a terrain profile</button>
-          <span className="menu-label">Saved investigations</span>
-          {jobs.slice(0, 8).map(j => <button key={j.id} onClick={() => void openJob(j)} className="menu-job"><b>{j.question || j.title}</b><small>{j.title.split(' · ')[0]} · {prettyDate(j.created_at)}</small></button>)}
+          {analysisItems}
         </MenuButton>
         <MenuButton id="share" label="Share" icon={<Share2 size={14} />} menu={menu} setMenu={setMenu}>
-          <button disabled={!job} onClick={() => { void navigator.clipboard?.writeText(location.href); setCopied(true); setTimeout(() => setCopied(false), 1500); }}>{copied ? 'Link copied' : 'Copy link to this investigation'}</button>
-          <button disabled={!result} onClick={() => { setDossier(true); setMenu(null); }}>Open the report</button>
-          {job && result ? <a href={artifactUrl(job, 'public-result.json')} download>Download measurements and sources</a> : <button disabled>Download measurements and sources</button>}
-          <button onClick={() => { globe.current?.screenshot(); setMenu(null); }}>Save an image of the map</button>
+          {shareItems}
         </MenuButton>
       </div>
+      <MenuButton id="more" label="More" icon={<MenuIcon size={15} />} menu={menu} setMenu={setMenu} className="more-wrap">
+        <span className="menu-label">Analysis</span>
+        {analysisItems}
+        <span className="menu-label">Share</span>
+        {shareItems}
+        {viewItems}
+        <span className="menu-label">Sources</span>
+        <ul className="source-list">{sourceItems}</ul>
+        <p className="card-note">Every external request goes through Terra’s server. Keys never reach the browser.</p>
+        <p className="card-note">Imagery © Esri and partners; photorealistic 3D © Google Maps and its data providers; contains modified Copernicus Sentinel-2 data. Data from NASA, ASF, ISRO, USGS, GDACS, CelesTrak, Open-Meteo and OpenStreetMap contributors.</p>
+      </MenuButton>
       <button className={`sources-btn ${menu === 'sources' ? 'on' : ''}`} onClick={() => setMenu(v => v === 'sources' ? null : 'sources')}><i className={`led ${liveCount >= feedCount - 1 && health?.temporal.connected ? 'ok' : 'warn'}`} />{liveCount}/{feedCount} live</button>
-      <button className={`icon-btn ${menu === 'about' ? 'on' : ''}`} onClick={() => setMenu(v => v === 'about' ? null : 'about')} aria-label="About and settings"><Settings size={15} /></button>
+      <button className={`icon-btn about-btn ${menu === 'about' ? 'on' : ''}`} onClick={() => setMenu(v => v === 'about' ? null : 'about')} aria-label="About and settings"><Settings size={15} /></button>
       {menu === 'sources' && <div className="menu sources-menu" role="dialog" aria-label="Data sources">
-        <ul className="source-list">{Object.entries({ satellites: 'CelesTrak orbital elements', nisar: 'NASA / ASF catalog', earthquakes: 'USGS earthquakes', events: 'USGS volcanoes · GDACS · NASA EONET', fires: 'NASA FIRMS' }).map(([k, name]) => { const f = feeds[k]; return <li key={k}>
-          <i className={`led ${f?.state === 'live' ? 'ok' : f?.state === 'stale' ? 'warn' : f?.state === 'offline' ? 'bad' : ''}`} />
-          <span>{name}<small>{f ? `${f.count.toLocaleString('en')} records${f.fetchedAt ? ` · updated ${new Date(f.fetchedAt).toISOString().slice(11, 16)} UTC` : ''}` : 'connecting'}</small></span></li>; })}
-          <li><i className={`led ${health?.temporal.connected ? 'ok' : 'bad'}`} /><span>Investigation service<small>{health?.temporal.connected ? 'Durable workflows connected' : 'Offline'}</small></span></li>
-          <li><i className={`led ${originals ? 'ok' : ''}`} /><span>NASA Earthdata<small>{originals ? 'Original NISAR products available' : 'No credential set'}</small></span></li>
-          <li><i className={`led ${writer ? 'ok' : ''}`} /><span>Language model<small>{writer ? `${writer} plans and writes; every number is checked` : 'Not configured'}</small></span></li></ul>
+        <ul className="source-list">{sourceItems}</ul>
         <p className="card-note">Every external request goes through Terra’s server. Keys never reach the browser.</p></div>}
       {menu === 'about' && <div className="menu about-menu" role="dialog" aria-label="About Terra"><div className="prose">
         <p>Terra answers questions about how the ground changes, using radar from NISAR, the joint NASA–ISRO mission. Radar sees through cloud and darkness, so every pass counts.</p>
         <p className="small"><kbd>/</kbd> find a place · <kbd>Space</kbd> play the timeline · <kbd>L</kbd> layers · <kbd>1</kbd>–<kbd>5</kbd> display filters · right-click marks an area · <kbd>Esc</kbd> closes</p>
-        <p className="small quiet">Imagery © Esri and partners; contains modified Copernicus Sentinel-2 data. Data from NASA, ASF, ISRO, USGS, GDACS, CelesTrak, Open-Meteo and OpenStreetMap contributors.</p></div></div>}
+        <p className="small quiet">Imagery © Esri and partners; photorealistic 3D © Google Maps and its data providers (shown on the map when in view); contains modified Copernicus Sentinel-2 data. Data from NASA, ASF, ISRO, USGS, GDACS, CelesTrak, Open-Meteo and OpenStreetMap contributors.</p></div></div>}
     </header>
 
     {/* ------------------------------------------------ map */}
     <main className="map-area">
       <Globe ref={globe} region={region} observations={observations} selected={activeObservation} footprints={footprints && !job} terrain={ls.terrain.on} lighting={lighting}
-        labels={ls.labels.on} photoreal={false} quality={quality} picking={picking} overlays={overlays} imageryAlpha={ls.imagery.on ? ls.imagery.value : 0} labelAlpha={ls.labels.value}
+        labels={ls.labels.on} photoreal={mapStyle === 'photoreal'} onPhotorealError={onPhotorealError} quality={quality} picking={picking} overlays={overlays} imageryAlpha={ls.imagery.on ? ls.imagery.value : 0} labelAlpha={ls.labels.value}
         exaggeration={ls.terrain.on ? Math.max(0.01, ls.terrain.value) : 1} mode={display} layers={liveLayers} marks={marks} flat={flat} profiling={drawingProfile} profileVertices={profileVertices}
         satTime={satTime} satFocus={mode === 'satellites' ? selectedSat : null} onPathPoint={onPathPoint}
-        relief={style === 'relief'} reliefOptions={reliefOptions} terrainContext={terrainContext} onHover={onHover}
+        relief={mapStyle === 'relief'} reliefOptions={reliefOptions} terrainContext={terrainContext} onHover={onHover}
         onPick={pick} onQuickPick={quickPick} onSelect={onSelect} onProbe={onProbe} onTelemetry={onTelemetry} onFeeds={onFeeds} onReady={() => {}} />
-      <MapChrome flat={flat} setFlat={setFlat} style={style} setStyle={setStyle} globe={globe} bbox={region.bbox} />
+      <MapChrome flat={flat} setFlat={setFlat} style={mapStyle} setStyle={setStyle} photoreal={photorealReady} globe={globe} bbox={region.bbox} />
       <HoverCard jobId={result ? job?.id : undefined} hasPatches={hotspots.length > 0} changeBounds={delta?.bounds} />
       {!sensor && nisarSat && !flat && <button className="map-tool" onClick={() => openSensor(nisarSat)} title="A simulated view of this area from NISAR at its next pass"><Satellite size={14} />NISAR view</button>}
       {sensor && (() => { const s = fleet.sats.find(x => x.norad === sensor.norad); if (!s) return null;
@@ -706,15 +744,17 @@ export default function App() {
   }
 }
 
-function MenuButton({ id, label, icon, menu, setMenu, children }: { id: 'view' | 'analysis' | 'share'; label: string; icon: React.ReactNode; menu: string | null; setMenu: (m: 'view' | 'analysis' | 'share' | null) => void; children: React.ReactNode }) {
-  return <div className="menu-wrap">
+function MenuButton({ id, label, icon, menu, setMenu, children, className = '' }: { id: 'view' | 'analysis' | 'share' | 'more'; label: string; icon: React.ReactNode; menu: string | null; setMenu: (m: 'view' | 'analysis' | 'share' | 'more' | null) => void; children: React.ReactNode; className?: string }) {
+  return <div className={`menu-wrap ${className}`}>
     <button className={`menu-btn ${menu === id ? 'on' : ''}`} onClick={() => setMenu(menu === id ? null : id)} aria-haspopup="menu" aria-expanded={menu === id}>{icon}{label}<ChevronDown size={12} /></button>
-    {menu === id && <div className="menu" role="menu" onClick={e => { if ((e.target as HTMLElement).closest('a')) setMenu(null); }}>{children}</div>}
+    {menu === id && <div className={`menu ${id === 'more' ? 'more-menu' : ''}`} role="menu" onClick={e => { if ((e.target as HTMLElement).closest('a')) setMenu(null); }}>{children}</div>}
   </div>;
 }
 
 /** Compass, zoom presets, 2D/3D, scale bar, coordinate readout and 2D graticule tags. Telemetry-driven, so it re-renders on its own. */
-function MapChrome({ flat, setFlat, style, setStyle, globe, bbox }: { flat: boolean; setFlat: (v: boolean) => void; style: 'photo' | 'relief'; setStyle: (v: 'photo' | 'relief') => void; globe: React.RefObject<GlobeHandle | null>; bbox: Bounds }) {
+type MapStyle = 'photo' | 'relief' | 'photoreal';
+
+function MapChrome({ flat, setFlat, style, setStyle, photoreal, globe, bbox }: { flat: boolean; setFlat: (v: boolean) => void; style: MapStyle; setStyle: (v: MapStyle) => void; photoreal: boolean; globe: React.RefObject<GlobeHandle | null>; bbox: Bounds }) {
   const tel = useSyncExternalStore(telemetryStore.subscribe, telemetryStore.get);
   const [format, setFormat] = useState<'decimal' | 'dms' | 'mgrs'>('decimal');
   const [full, setFull] = useState(false);
@@ -741,7 +781,8 @@ function MapChrome({ flat, setFlat, style, setStyle, globe, bbox }: { flat: bool
     <div className="map-controls">
       {scale && <div className="scale"><span className="scale-labels"><i>0</i><i>{scale.label}</i></span><span className="scale-bar" style={{ width: `${scale.px}px` }} /></div>}
       <div className="seg-map" role="group" aria-label="Map style"><button className={!flat && style === 'photo' ? 'on' : ''} onClick={() => { setStyle('photo'); setFlat(false); }} title="3D terrain with satellite imagery">Photo</button>
-        <button className={!flat && style === 'relief' ? 'on' : ''} onClick={() => { setStyle('relief'); setFlat(false); }} title="3D relief map: shaded terrain, contours, land cover, summits">Relief</button></div>
+        <button className={!flat && style === 'relief' ? 'on' : ''} onClick={() => { setStyle('relief'); setFlat(false); }} title="3D relief map: shaded terrain, contours, land cover, summits">Relief</button>
+        {photoreal && <button className={!flat && style === 'photoreal' ? 'on' : ''} onClick={() => { setStyle('photoreal'); setFlat(false); }} title="Google Photorealistic 3D Tiles below 300 km. Radar layers stay on the terrain globe.">Photoreal</button>}</div>
       <div className="seg-map"><button className={flat ? 'on' : ''} onClick={() => setFlat(true)}>2D</button><button className={!flat ? 'on' : ''} onClick={() => setFlat(false)}>3D</button></div>
       <label className="zoom-select"><select value="" onChange={e => { if (e.target.value) globe.current?.frame(Number(e.target.value)); }} aria-label="Zoom relative to the area">
         <option value="" hidden>{factor >= 10 ? Math.round(factor) : factor.toFixed(1)}×</option>{[0.5, 1, 2, 4, 8].map(f => <option key={f} value={f}>{f}×</option>)}</select><ChevronDown size={11} /></label>

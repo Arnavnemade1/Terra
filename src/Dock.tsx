@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Pause, Play, Plus, SkipForward } from 'lucide-react';
 
 export type Marker = { id: string; t: number; kind: 'acquisition' | 'pair' | 'optical' | 'hazard' | 'note' | 'pass' | 'now'; color?: string; label: string; size?: number };
@@ -30,12 +30,30 @@ function ticks(start: number, end: number): { t: number; top: string; bottom?: s
   return out;
 }
 
+/** Thin the ticks so neighbouring labels stay at least `gap` pixels apart on a track `width` pixels wide (phones).
+ *  Labelled ticks (day or year boundaries) are kept in preference to plain ones. */
+function fitTicks<T extends { t: number; top: string }>(list: T[], start: number, end: number, width: number, gap = 52): T[] {
+  if (!width || list.length < 2) return list;
+  const px = (t: number) => (t - start) / Math.max(1, end - start) * width;
+  const greedy = (pool: T[]) => { const kept: T[] = []; for (const k of pool) if (!kept.length || px(k.t) - px(kept[kept.length - 1].t) >= gap) kept.push(k); return kept; };
+  const all = greedy(list);
+  if (all.length === list.length) return list;
+  const labelled = greedy(list.filter(k => k.top));
+  return labelled.length >= 2 ? labelled : all;
+}
+
 /** The scrubbable timeline: markers for dated evidence, a highlighted band and a current-time handle. */
 export function Timeline({ range, t, onTime, markers, band, playing, onPlay, speed, onSpeed, onStep, title = 'Timeline', withTime = false }: {
   range: [number, number]; t: number; onTime: (t: number) => void; markers: Marker[]; band?: [number, number] | null;
   playing: boolean; onPlay: () => void; speed: number; onSpeed: (s: number) => void; onStep: () => void; title?: string; withTime?: boolean;
 }) {
   const track = useRef<HTMLDivElement>(null);
+  const [trackWidth, setTrackWidth] = useState(0);
+  useEffect(() => {
+    const el = track.current; if (!el) return;
+    const observer = new ResizeObserver(() => setTrackWidth(el.getBoundingClientRect().width)); observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const [start, end] = range; const span = Math.max(1, end - start);
   const x = (v: number) => `${Math.min(100, Math.max(0, (v - start) / span * 100))}%`;
   const fromPointer = (clientX: number) => { const r = track.current?.getBoundingClientRect(); if (!r) return; onTime(start + Math.min(1, Math.max(0, (clientX - r.left) / r.width)) * span); };
@@ -58,7 +76,7 @@ export function Timeline({ range, t, onTime, markers, band, playing, onPlay, spe
             onPointerDown={e => { e.stopPropagation(); onTime(m.t); }} />)}
           <span className="scrub-handle" style={{ left: x(t), ['--shift' as string]: (t - start) / span < 0.08 ? '-8%' : (t - start) / span > 0.92 ? '-92%' : '-50%' }}><em>{stamp(t, withTime)}</em></span>
         </div>
-        <div className="scrub-ticks">{ticks(start, end).map((k, i) => <span key={i} style={{ left: x(k.t) }}><b>{k.top}</b>{k.bottom && <small>{k.bottom}</small>}</span>)}</div>
+        <div className="scrub-ticks">{fitTicks(ticks(start, end), start, end, trackWidth).map((k, i) => <span key={i} style={{ left: x(k.t) }}><b>{k.top}</b>{k.bottom && <small>{k.bottom}</small>}</span>)}</div>
       </div>
     </div>
   </div>;

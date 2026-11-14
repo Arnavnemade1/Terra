@@ -30,6 +30,8 @@ type Props = {
   onHover?: (h: Hover | null) => void;
   onPick: (bbox: Bounds) => void; onQuickPick: (lon: number, lat: number) => void; onSelect: (s: Selection | null) => void; onProbe: (lon: number, lat: number) => void;
   onTelemetry: (t: Telemetry) => void; onFeeds: (s: Record<string, FeedState>) => void; onReady: () => void;
+  /** Google Photorealistic 3D Tiles could not be loaded (key missing, API disabled, quota). */
+  onPhotorealError?: (message: string) => void;
 };
 
 /** What lies under the pointer: the terrain reading plus the marked area (if any) it falls in. */
@@ -45,6 +47,11 @@ const GIBS = '/api/connector/gibs';
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const css = (value: string, alpha = 1) => C.Color.fromCssColorString(value).withAlpha(alpha);
 const PHOTOREAL_BELOW = 300_000; // metres: Google 3D tiles take over from the imagery globe below this altitude
+/** Served by the server connector (backend/terra/google_tiles.py), which attaches the key; none enters this bundle. */
+const GOOGLE_TILESET = '/api/connector/google3d/root.json';
+// Google Maps attribution: the logo on a busy background, 16–19 px tall, never shrunk or faded (Map Tiles API policies).
+const googleCredit = () => new C.Credit('<img class="google-logo" alt="Google" src="/attribution/google-on-dark.png" width="98" height="18">', true);
+const tileError = (q: string) => q === 'high' ? 8 : q === 'low' ? 24 : 16;
 
 function obliqueView(b: Bounds) {
   const rect = C.Rectangle.fromDegrees(b[0], b[1], b[2], b[3]);
@@ -70,6 +77,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const modes = useRef<DisplayModes | null>(null);
   const retune = useRef<() => void>(() => {});
   const tiles = useRef<C.Cesium3DTileset | null>(null);
+  const tilesLoading = useRef(false);
   const relief = useRef<Relief | null>(null);
   const metresPerPixel = useRef(30);
 
@@ -99,6 +107,15 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     },
     screenshot: () => { const v = viewer.current; if (!v) return; v.render(); const a = document.createElement('a'); a.download = `terra-${Date.now()}.png`; a.href = v.canvas.toDataURL('image/png'); a.click(); },
   }));
+
+  // Keep the map controls above the attribution strip, however many lines the credits wrap to: attribution
+  // (Google's logo in particular) must never be covered.
+  useEffect(() => {
+    const el = credits.current; const area = mount.current?.parentElement; if (!el || !area) return;
+    const fit = () => area.style.setProperty('--chrome-bottom', `${Math.max(30, Math.ceil(el.getBoundingClientRect().height) + 10)}px`);
+    const observer = new ResizeObserver(fit); observer.observe(el); fit();
+    return () => { observer.disconnect(); area.style.removeProperty('--chrome-bottom'); };
+  }, []);
 
   useEffect(() => {
     let disposed = false; let v: C.Viewer | undefined; let handler: C.ScreenSpaceEventHandler | undefined;
@@ -147,7 +164,11 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         const t = tiles.current;
         // Science layers stay on the imagery globe so radar pixels sit exactly on the ground.
         const overlaid = latest.current.overlays.some(o => o.show && o.alpha > 0);
-        if (t) { const on = latest.current.photoreal && !overlaid && h < PHOTOREAL_BELOW; if (t.show !== on) { t.show = on; globe.show = !on; scene.requestRender(); } }
+        if (t) {
+          // Google tiles are drawn on their own: while they show, the globe (and with it every non-Google basemap) is hidden.
+          const p = latest.current; const on = p.photoreal && !p.flat && !p.relief && !overlaid && scene.mode === C.SceneMode.SCENE3D && h < PHOTOREAL_BELOW;
+          if (t.show !== on) { t.show = on; globe.show = !on; scene.requestRender(); }
+        }
         // Labels step back while a science layer is shown so the measurements stay legible.
         if (layer) layer.alpha = C.Math.clamp((9_000_000 - h) / 5_000_000, 0, 0.9) * (overlaid ? 0.5 : 1) * latest.current.labelAlpha;
         const sunlit = latest.current.lighting && h > 5_000_000;
@@ -217,7 +238,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         const picked = vv.scene.pick(ev.endPosition);
         vv.canvas.style.cursor = latest.current.profiling || latest.current.picking || latest.current.overlays.some(o => o.show) ? 'crosshair' : picked && (picked as { id?: { kind?: string } }).id?.kind ? 'pointer' : '';
         const onHover = latest.current.onHover; if (!onHover) return;
-        const cart = scene.mode === C.SceneMode.SCENE3D && camera.positionCartographic.height < 400_000 ? pickGround(ev.endPosition) : undefined;
+        // Height, slope and land cover come from Terra's own terrain; nothing is measured from Google's 3D tiles.
+        const cart = scene.mode === C.SceneMode.SCENE3D && globe.show && camera.positionCartographic.height < 400_000 ? pickGround(ev.endPosition) : undefined;
         if (!cart || !relief.current) { onHover(null); return; }
         const lon = C.Math.toDegrees(cart.longitude), lat = C.Math.toDegrees(cart.latitude);
         const mark = (latest.current.marks || []).find(m => lon >= m.bounds[0] && lon <= m.bounds[2] && lat >= m.bounds[1] && lat <= m.bounds[3]) || null;
@@ -288,7 +310,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     return () => {
       disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy();
       live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); live.current = null; modes.current = null; relief.current = null;
-      if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null;
+      if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tilesLoading.current = false;
     };
   }, []);
 
@@ -357,6 +379,28 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     v.scene.requestRender();
   }, [ready, props.terrain, props.lighting, props.quality, props.photoreal]);
   useEffect(() => { const v = viewer.current; if (v && labelLayer.current) { labelLayer.current.show = props.labels; v.scene.requestRender(); } }, [ready, props.labels]);
+
+  // Google Photorealistic 3D Tiles, loaded the first time the style is chosen (each load starts a billed tileset session).
+  useEffect(() => {
+    const v = viewer.current; if (!v || !ready || !props.photoreal || tiles.current || tilesLoading.current) return;
+    tilesLoading.current = true; let failures = 0;
+    // Resource accepts `credits` at runtime (Cesium's own Google loader uses it); the published typings omit it.
+    const resource = new C.Resource({ url: GOOGLE_TILESET, credits: [googleCredit()] } as unknown as C.Resource.ConstructorOptions);
+    C.Cesium3DTileset.fromUrl(resource, { showCreditsOnScreen: true, enableCollision: true, maximumScreenSpaceError: tileError(latest.current.quality),
+      cacheBytes: 768 * 1024 * 1024, maximumCacheOverflowBytes: 512 * 1024 * 1024, preloadWhenHidden: false, foveatedScreenSpaceError: true })
+      .then(t => {
+        tilesLoading.current = false;
+        if (v.isDestroyed() || viewer.current !== v) { t.destroy(); return; }
+        t.show = false; v.scene.primitives.add(t); tiles.current = t;
+        t.tileFailed.addEventListener(() => {
+          if (++failures === 12) { const m = 'Google 3D tiles stopped loading. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); }
+        });
+        retune.current(); v.scene.requestRender();
+      })
+      .catch(() => { tilesLoading.current = false; const m = 'Photorealistic 3D is unavailable right now. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); });
+  }, [ready, props.photoreal]);
+  useEffect(() => { const t = tiles.current; if (t) { t.maximumScreenSpaceError = tileError(props.quality); viewer.current?.scene.requestRender(); } }, [props.quality]);
+  useEffect(() => { retune.current(); viewer.current?.scene.requestRender(); }, [ready, props.photoreal, props.relief, props.flat]);
   useEffect(() => { modes.current?.set(props.mode); }, [props.mode]);
   useEffect(() => { const l = live.current; if (!l) return; for (const [k, on] of Object.entries(props.layers)) l.setVisible(k as LayerKey, on); }, [props.layers]);
   useEffect(() => { live.current?.setTime(props.satTime ?? null); }, [ready, props.satTime]);
