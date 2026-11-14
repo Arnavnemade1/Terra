@@ -8,7 +8,7 @@ const hasWebGL2 = () => {
 };
 
 type Shape = "warp" | "sphere" | "ripple";
-function Dither({ shape, front, back = "#1b1c18", scale = 1 }: { shape: Shape; front: string; back?: string; scale?: number }) {
+function Dither({ shape, front, back = "#162226", scale = 1 }: { shape: Shape; front: string; back?: string; scale?: number }) {
   // Without WebGL2 the card's own muted background shows instead of a blank canvas.
   const supported = useSyncExternalStore(noopSubscribe, hasWebGL2, () => false);
   if (!supported) return null;
@@ -19,6 +19,6 @@ function Dither({ shape, front, back = "#1b1c18", scale = 1 }: { shape: Shape; f
   );
 }
 
-export const ProblemArt = () => <Dither shape="warp" front="#ff5a1f" scale={0.8} />;
-export const AnswerArt = () => <Dither shape="sphere" front="#ece9df" back="#151613" scale={0.9} />;
-export const GetArt = () => <Dither shape="ripple" front="#8fbf6a" />;
+export const ProblemArt = () => <Dither shape="warp" front="#7fb0e0" scale={0.8} />;
+export const AnswerArt = () => <Dither shape="sphere" front="#e8f0e6" back="#10191c" scale={0.9} />;
+export const GetArt = () => <Dither shape="ripple" front="#c0d9bd" />;

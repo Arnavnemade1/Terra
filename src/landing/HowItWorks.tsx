@@ -29,12 +29,12 @@ const SCENE = (() => {
   return { before, after, delta };
 })();
 const gray = (db: number) => { const t = Math.min(1, Math.max(0, (db + 28) / 26)); const v = Math.round(40 + t * 190); return `rgb(${v},${v - 2},${v - 8})`; };
-const change = (d: number) => d <= 0 ? `rgba(255,90,31,${Math.min(1, 0.35 + -d / 14)})` : `rgba(127,176,224,${Math.min(1, 0.35 + d / 10)})`;
+const change = (d: number) => d <= 0 ? `rgba(127,176,224,${Math.min(1, 0.35 + -d / 14)})` : `rgba(232,176,74,${Math.min(1, 0.35 + d / 10)})`;
 
 const STEPS = [
   { title: "Pick a place and two dates", text: "Choose where to look and when. Terra lists every NISAR pass over the area and keeps only pairs that can be compared fairly.", callout: ["Earlier pass", "Radar brightness on the first date. Dark means little signal came back, bright means a lot."] },
   { title: "Read the later pass", text: "The same place, from the same track and direction, on the later date. Same geometry, so differences are the ground and not the viewing angle.", callout: ["Later pass", "Looks similar at a glance, which is why subtracting the two is the reliable way to see change."] },
-  { title: "Subtract and flag", text: "Later minus earlier, in decibels. Anything that moved by the threshold or more is flagged: orange where it got darker, blue where it got brighter.", callout: ["Change map", "Drag the threshold. A lower value flags more of the scene, and more of it is noise."] },
+  { title: "Subtract and flag", text: "Later minus earlier, in decibels. Anything that moved by the threshold or more is flagged: blue where it got darker, amber where it got brighter.", callout: ["Change map", "Drag the threshold. A lower value flags more of the scene, and more of it is noise."] },
   { title: "Find the hotspots", text: "The strongest patches are outlined and named, then read against optical imagery, land cover and weather before anything is written.", callout: ["Two hotspots", "A large darkening, like a flooded field, and a smaller brightening, like cleared or burned ground."] },
 ] as const;
 
@@ -86,7 +86,7 @@ export function HowItWorks() {
                 aria-label={`A synthetic radar scene, step ${stage + 1} of ${STEPS.length}: ${STEPS[stage].title}`}>
                 <Cells stage={stage} threshold={threshold} />
                 {stage >= 3 && (
-                  <g fill="none" stroke="#ece9df" strokeWidth="3" strokeDasharray="8 6">
+                  <g fill="none" stroke="#e8f0e6" strokeWidth="3" strokeDasharray="8 6">
                     <circle cx={12 * CELL + 10} cy={14 * CELL + 10} r={7.4 * CELL} />
                     <circle cx={30 * CELL + 10} cy={7 * CELL + 10} r={5.2 * CELL} />
                   </g>

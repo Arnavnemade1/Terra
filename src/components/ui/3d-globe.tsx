@@ -225,15 +225,15 @@ function Marker({
           <button
             type="button"
             className={cn(
-              "flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-full bg-[#1b1c18] py-1 pr-3 pl-1 text-[13px] font-medium text-[#ece9df] shadow-lg ring-1 ring-black/10 transition-transform duration-200",
+              "flex cursor-pointer items-center gap-2 whitespace-nowrap rounded-full bg-[#162226] py-1 pr-3 pl-1 text-[13px] font-medium text-[#e8f0e6] shadow-lg ring-1 ring-black/10 transition-transform duration-200",
               hovered && "scale-105",
             )}
             onMouseEnter={handlePointerEnter}
             onMouseLeave={handlePointerLeave}
             onClick={handleClick}
           >
-            <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#ff5a1f]">
-              <span className="relative h-2.5 w-2.5 rounded-full bg-white" />
+            <span className="relative flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#c0d9bd]">
+              <span className="relative h-2.5 w-2.5 rounded-full bg-[#10191c]" />
             </span>
             {marker.label}
             <span className="text-neutral-500">Open the satellite map →</span>

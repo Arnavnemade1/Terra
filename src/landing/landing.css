@@ -1,13 +1,13 @@
 /* Terra uses the Space Bar palette over Arc tokens: cream paper, red accent, green. One typeface (Inter) throughout. */
 :root[data-page="landing"] {
-  /* Terra's workspace palette (src/styles.css): warm graphite surfaces, one International Orange accent. */
+  /* Terra's green-globe palette: the logo's deep green-black tile (#10191c) and sage line (#c0d9bd). */
   color-scheme: dark;
-  --background: #0f100e; --surface: #151613; --surface-raised: #1b1c18; --surface-muted: #1b1c18;
-  --foreground: #ece9df; --text-secondary: #aeab9f; --text-muted: #7b796f;
-  --border: rgba(232, 228, 214, 0.15); --border-subtle: rgba(232, 228, 214, 0.08); --border-strong: rgba(232, 228, 214, 0.28);
-  --accent: #ff5a1f; --accent-strong: #ff7340; --accent-subtle: rgba(255, 90, 31, 0.13); --accent-foreground: #1b0a02;
-  --control-on: #ff5a1f; --control-glyph: #1b0a02; --control-track: #25271f; --control-track-hover: #2e3026; --control-fill: #ff5a1f;
-  --brand-red: #ff5a1f; --brand-green: #8fbf6a;
+  --background: #0b1114; --surface: #10191c; --surface-raised: #162226; --surface-muted: #162226;
+  --foreground: #e8f0e6; --text-secondary: #a9b9a9; --text-muted: #75887b;
+  --border: rgba(192, 217, 189, 0.17); --border-subtle: rgba(192, 217, 189, 0.09); --border-strong: rgba(192, 217, 189, 0.3);
+  --accent: #c0d9bd; --accent-strong: #d6e8d3; --accent-subtle: rgba(192, 217, 189, 0.13); --accent-foreground: #10191c;
+  --control-on: #c0d9bd; --control-glyph: #10191c; --control-track: #22322f; --control-track-hover: #2b3e3a; --control-fill: #c0d9bd;
+  --water: #7fb0e0; --bright: #e8b04a;
   --success: #8fbf6a; --danger: #e5634f; --warning: #e8b04a; --info: #7fb0e0;
   --tone-teal: #6fc0b3; --tone-sky: #7fb0e0; --tone-orchid: #c58bd8; --tone-violet: #a495e0; --tone-rose: #e5634f; --tone-amber: #e8b04a; --tone-green: #8fbf6a;
   --shadow-resting: 0 1px 2px rgba(0,0,0,.4); --shadow-raised: 0 6px 18px rgba(0,0,0,.45); --shadow-floating: 0 20px 48px rgba(0,0,0,.55);
@@ -51,7 +51,7 @@ body { margin: 0; background: var(--background); color: var(--foreground); }
 .bento-unit { font-size: .45em; margin-left: .1em; color: var(--text-secondary); letter-spacing: 0; }
 .cell-a { grid-column: 1; grid-row: 1 / 3; min-height: 420px; }
 .cell-a .bento-num { font-size: clamp(3rem, 7vw, 6rem); }
-.cell-a img { position: absolute; right: -8%; top: -4%; width: 58%; opacity: .95; pointer-events: none; }
+.cell-a img { filter: hue-rotate(115deg) saturate(.55) brightness(1.15); position: absolute; right: -8%; top: -4%; width: 58%; opacity: .95; pointer-events: none; }
 .cell-b { grid-column: 2; grid-row: 1; } .cell-c { grid-column: 3; grid-row: 1; } .cell-d { grid-column: 2 / 4; grid-row: 2; }
 @media (max-width: 760px) {
   .bento { grid-template-columns: 1fr; }
@@ -63,10 +63,10 @@ body { margin: 0; background: var(--background); color: var(--foreground); }
 .mg { margin: 8px 0 0; display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 24px 40px; align-items: center;
   padding: 28px; border: 1px solid var(--border); border-radius: var(--radius-surface); background: var(--surface); }
 .mg-route { width: 100%; height: auto; overflow: visible; font-size: 12px; fill: var(--text-secondary); }
-.mg-out { fill: none; stroke: var(--brand-green); stroke-width: 5; stroke-linecap: round; }
-.mg-back { fill: none; stroke: var(--brand-red); stroke-width: 3; stroke-dasharray: 2 9; stroke-linecap: round; }
-.mg-home { fill: var(--foreground); } .mg-you { fill: var(--brand-green); }
-.mg-dash-label { fill: var(--brand-red); }
+.mg-out { fill: none; stroke: var(--success); stroke-width: 5; stroke-linecap: round; }
+.mg-back { fill: none; stroke: var(--accent); stroke-width: 3; stroke-dasharray: 2 9; stroke-linecap: round; }
+.mg-home { fill: var(--foreground); } .mg-you { fill: var(--success); }
+.mg-dash-label { fill: var(--accent); }
 .mg-gauges { list-style: none; margin: 0; padding: 0; display: grid; gap: 16px; }
 .mg-row { display: flex; justify-content: space-between; font-size: .9375rem; font-weight: 500; margin-bottom: 6px; }
 .mg-pct { color: var(--text-secondary); font-weight: 400; font-variant-numeric: tabular-nums; }
@@ -120,9 +120,9 @@ body { margin: 0; background: var(--background); color: var(--foreground); }
 .how-callout { position: absolute; left: 12px; right: 12px; bottom: 12px; pointer-events: none; display: flex; }
 .how-card { display: grid; gap: 4px; max-width: 380px; padding: 12px 14px; border-radius: 14px; background: color-mix(in oklab, var(--surface-raised) 94%, transparent); border: 1px solid var(--border); box-shadow: var(--shadow-floating); font-size: .8125rem; line-height: 1.45; color: var(--text-secondary); }
 .how-card strong { color: var(--foreground); font-size: .9375rem; font-weight: 600; }
-.how-card[data-tone="red"] { border-color: var(--brand-red); } .how-card[data-tone="red"] strong { color: var(--brand-red); }
+.how-card[data-tone="red"] { border-color: var(--accent); } .how-card[data-tone="red"] strong { color: var(--accent); }
 .how-card[data-tone="yellow"] { border-color: var(--warning); } .how-card[data-tone="yellow"] strong { color: var(--warning); }
-.how-card[data-tone="green"] strong { color: var(--brand-green); }
+.how-card[data-tone="green"] strong { color: var(--success); }
 .how-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 24px; align-items: center; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
 .how-readout { margin: 0; font-size: .875rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; } .how-readout strong { color: var(--foreground); font-weight: 600; }
 .how-credit { font-size: .6875rem; color: var(--text-muted); text-align: right; }

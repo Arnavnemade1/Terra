@@ -20,7 +20,7 @@ const MAP = "/app.html";
 const go = (href: string) => () => { window.location.href = href; };
 
 const Mark = ({ className }: { className?: string }) => (
-  <img className={className} src="/terra-mark.svg" alt="" width={24} height={24} />
+  <img className={className} src="/favicon.svg" alt="" width={24} height={24} />
 );
 
 const faq: FaqItem[] = [
@@ -121,9 +121,9 @@ export function Landing() {
           </p>
           <MarginGraphic />
           <div className="statuses">
-            <Badge tone="danger" dot size="lg">Orange: got darker, more water-like</Badge>
-            <Badge tone="info" dot size="lg">Blue: got brighter</Badge>
-            <Badge tone="warning" dot size="lg">Grey: under 3 dB, not flagged</Badge>
+            <Badge tone="info" dot size="lg">Blue: got darker, more water-like</Badge>
+            <Badge tone="warning" dot size="lg">Amber: got brighter</Badge>
+            <Badge tone="neutral" dot size="lg">Grey: under 3 dB, not flagged</Badge>
           </div>
           <ExpandableCard title="Show the rule">
             <code className="formula">change (dB) = later backscatter − earlier backscatter, flagged when |change| ≥ 3 dB</code>
