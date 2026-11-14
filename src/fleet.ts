@@ -56,6 +56,42 @@ export function predictPasses(sats: Sat[], lat: number, lon: number, from: numbe
   return out.sort((a, b) => a.at - b.at);
 }
 
+/**
+ * Imaging geometry for side-looking radars whose swath is known. NISAR's L-band SAR looks left and images the ground
+ * at 33–47° incidence, which from about 747 km is roughly 420–680 km from its ground track; a close overpass alone does
+ * not mean the radar sees the area.
+ */
+export const SWATH: Record<number, { nearKm: number; farKm: number; side: 'left' | 'right'; label: string }> = {
+  65053: { nearKm: 420, farKm: 680, side: 'left', label: 'L-SAR 33–47° incidence, left-looking' },
+};
+const bearing = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const r = Math.PI / 180, p1 = lat1 * r, p2 = lat2 * r, dl = (lon2 - lon1) * r;
+  return (Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) / r + 360) % 360;
+};
+/** Which side of the ground track a point lies on at time `t` (negative: left), and how far from the sub-satellite point. */
+export function crossTrack(s: Sat, lat: number, lon: number, t: number): { side: number; km: number } | null {
+  const p = subPoint(s.orbit, new Date(t)), q = subPoint(s.orbit, new Date(t + 10_000)); if (!p || !q) return null;
+  return { side: ((bearing(p.lat, p.lon, lat, lon) - bearing(p.lat, p.lon, q.lat, q.lon) + 540) % 360) - 180, km: distanceKm(lat, lon, p.lat, p.lon) };
+}
+/** The next time the point falls inside the satellite's imaging swath (closest approach of that pass), or null. */
+export function swathPass(s: Sat, lat: number, lon: number, from: number, days = 13): number | null {
+  const sw = SWATH[s.norad]; if (!sw) return null;
+  let prev = Infinity, prevPrev = Infinity, prevT = from;
+  for (let t = from; t <= from + days * 86_400_000;) {
+    const p = subPoint(s.orbit, new Date(t)); if (!p) { t += 60_000; continue; }
+    const d = distanceKm(lat, lon, p.lat, p.lon);
+    if (prev < prevPrev && prev <= d && prev >= sw.nearKm && prev <= sw.farKm) {
+      const x = crossTrack(s, lat, lon, prevT);
+      if (x && (x.side < 0) === (sw.side === 'left')) return prevT;
+    }
+    prevPrev = prev; prev = d; prevT = t;
+    // Far from the area, skip ahead in proportion to the distance (ground speed is about 7 km/s).
+    t += d > sw.farKm + 1500 ? Math.min(600_000, (d - sw.farKm - 1000) / 7 * 1000) : 15_000;
+    if (d > sw.farKm + 1500) { prev = Infinity; prevPrev = Infinity; }
+  }
+  return null;
+}
+
 /** Altitude and distance-to-area series for one satellite. */
 export function trackSeries(s: Sat, lat: number, lon: number, from: number, minutes: number, stepSec: number) {
   const x: number[] = [], alt: (number | null)[] = [], dist: (number | null)[] = [];
