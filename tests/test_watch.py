@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from terra.watch import assess_change, distance_km, next_nisar_pass, pick_new_acquisition, sub_point
+from terra.watch import assess_change, comparable, distance_km, next_nisar_pass, pick_new_acquisition, pick_pair, sub_point
 
 # NISAR (NORAD 65053) elements of 2026-11-15, fixed so the prediction is reproducible.
 L1 = "1 65053U 25163A   26319.24014874  .00000229  00000+0  82365-4 0  9997"
@@ -24,6 +24,18 @@ def test_next_pass_matches_the_workspace_and_lies_in_the_left_swath():
     assert 420 <= distance_km(37.75, 15.025, lat, lon) <= 680
 
 
+def test_pass_in_the_baselines_direction_matches_the_archive():
+    """Etna's acquisitions on track 51 (descending) start at 17:55:02 UTC every 12 days (2026-10-15, 10-27, ...). The
+    next descending pass predicted from the orbit must land on that repeat: 2026-11-20, within a couple of minutes.
+    The undirected prediction (04:08, ascending) could never be compared with a descending baseline."""
+    start = datetime(2026, 11, 15, 2, 0, tzinfo=timezone.utc)
+    down = next_nisar_pass(L1, L2, 37.75, 15.025, start, direction="DESCENDING")
+    repeat = datetime(2026, 10, 15, 17, 55, 2, tzinfo=timezone.utc) + 3 * (datetime(2026, 10, 27, tzinfo=timezone.utc) - datetime(2026, 10, 15, tzinfo=timezone.utc))
+    assert down is not None and abs((down - repeat).total_seconds()) < 120
+    up = next_nisar_pass(L1, L2, 37.75, 15.025, start, direction="ascending")
+    assert up is not None and up.strftime("%Y-%m-%d %H:%M") == "2026-11-20 04:08"
+
+
 def test_next_pass_found_for_any_land_area_within_13_days():
     start = datetime(2026, 11, 15, tzinfo=timezone.utc)
     for lat, lon in [(19.4, -155.25), (-4.5, -74.5), (64.0, -22.4), (35.4, 138.7)]:
@@ -31,7 +43,7 @@ def test_next_pass_found_for_any_land_area_within_13_days():
         assert at is not None and (at - start).days <= 13
 
 
-REF = {"id": "ref", "product": "GCOV", "date": "2026-10-15T17:55:02Z", "track": 51, "frame": 69, "direction": "DESCENDING"}
+REF = {"id": "ref", "product": "GCOV", "date": "2026-10-15T17:55:02Z", "track": 51, "frame": 69, "direction": "DESCENDING", "maturity": "PROVISIONAL", "product_version": "P05023"}
 
 
 def test_new_acquisition_must_share_the_viewing_geometry_and_be_newer():
@@ -46,6 +58,34 @@ def test_new_acquisition_must_share_the_viewing_geometry_and_be_newer():
     assert pick_new_acquisition(obs, REF)["id"] == "newest"
     assert pick_new_acquisition([o for o in obs if o["id"] in ("older", "other-track")], REF) is None
     assert pick_new_acquisition(obs, None) is None
+
+
+def test_pairs_respect_the_processing_release():
+    """Etna, live: the 2026-10-27 product is VALIDATED (P05036) while the baseline is PROVISIONAL (P05023); the
+    science refuses that pair, so the watch must not propose it, and must say why."""
+    validated = {**REF, "id": "oct27", "date": "2026-10-27T17:55:02Z", "maturity": "VALIDATED", "product_version": "P05036"}
+    partner, new, reason = pick_pair([REF, validated], REF)
+    assert new is None and "P05036" in reason and "P05023" in reason
+    # Once an earlier acquisition from the same release exists after the baseline, the pair is that one and the new one.
+    reprocessed = {**validated, "id": "oct15-validated", "date": "2026-10-15T17:55:03Z"}
+    partner, new, _ = pick_pair([REF, validated, reprocessed], REF)
+    assert (partner["id"], new["id"]) == ("oct15-validated", "oct27")
+    # A same-release newer pass pairs with the baseline itself.
+    nov8 = {**REF, "id": "nov8", "date": "2026-11-08T17:55:02Z"}
+    assert [x["id"] for x in pick_pair([REF, validated, nov8], REF)[:2]] == ["ref", "nov8"]
+    # Pairs that failed before are skipped.
+    assert pick_pair([REF, nov8], REF, {"nov8"})[1] is None
+
+
+def test_comparable_is_what_the_science_accepts():
+    dual = {**REF, "polarizations": ["HH", "HV"], "frequency": "A"}
+    assert comparable(dual, {**dual, "id": "b", "maturity": "provisional"})              # case is not a difference
+    assert comparable(dual, {**dual, "id": "b", "polarizations": ["HH"]})                 # a shared co-pol channel is enough
+    assert not comparable(dual, {**dual, "id": "b", "polarizations": ["VV", "VH"]})       # nothing in common
+    assert not comparable(dual, {**dual, "id": "b", "frequency": "B"})
+    assert not comparable(dual, {**dual, "id": "b", "frame": 70})
+    assert comparable(dual, {**dual, "id": "b", "frame": None})                           # frame unknown: the science checks the grid
+    assert not comparable(dual, {**dual, "id": "b", "product_version": None})
 
 
 def _investigation(pct, spots, status="completed"):
@@ -114,57 +154,91 @@ def _dev_server() -> str | None:
     return str(found[0]) if found else None
 
 
-@pytest.mark.asyncio
-@pytest.mark.skipif(_dev_server() is None, reason="no local Temporal dev server binary (.data/temporal-bin)")
-async def test_watch_loop_check_investigate_propose_approve_dispatch():
+def _activities(calls: list, saved: list, assessment: dict):
     from temporalio import activity
-    from temporalio.worker import UnsandboxedWorkflowRunner
-    from temporalio.testing import WorkflowEnvironment
-    from temporalio.worker import Worker
-    from terra.watch_workflows import AreaWatchWorkflow
-
-    saved: list[dict] = []
     new = {**REF, "id": "new", "date": "2026-11-08T17:55:02Z"}
 
     @activity.defn(name="watch_save")
-    async def save(state: dict) -> None: saved.append({k: state.get(k) for k in ("status", "proposal", "dispatched", "reference")})
+    async def save(state: dict) -> None: saved.append({k: state.get(k) for k in ("status", "message", "proposal", "dispatched", "reference", "skipped")})
     @activity.defn(name="watch_reference")
     async def reference(_: dict) -> dict: return REF
     @activity.defn(name="watch_next_pass")
-    async def next_pass(_: dict) -> dict: return {"at": "2026-11-20T04:08:00+00:00"}
+    async def next_pass(p: dict) -> dict: calls.append(f"pass:{p.get('direction')}"); return {"at": "2026-11-20T17:55:00+00:00", "direction": p.get("direction")}
     @activity.defn(name="watch_find_new")
-    async def find_new(p: dict) -> dict | None: calls.append("find"); return new if p["reference"]["id"] == "ref" else None
+    async def find_new(p: dict) -> dict:
+        calls.append("find")
+        if p["reference"]["id"] == "ref" and "new" not in (p.get("skip") or []):
+            return {"partner": REF, "new": new, "reason": ""}
+        return {"partner": None, "new": None, "reason": "No newer acquisition with the same viewing geometry yet."}
     @activity.defn(name="watch_register_investigation")
     async def register(p: dict) -> dict: calls.append("register"); return {"id": "inv-1", "observation_ids": [p["reference"]["id"], p["new"]["id"]]}
     @activity.defn(name="watch_assess")
-    async def assess(_: dict) -> dict: return {"significant": True, "summary": "1.2% changed", "patches": 6}
+    async def assess(_: dict) -> dict: return assessment
     @activity.defn(name="watch_dispatch")
     async def dispatch(p: dict) -> dict: calls.append("dispatch:" + p["investigation_id"]); return {"targets": 6, "coordinator": True}
+    return [save, reference, next_pass, find_new, register, assess, dispatch]
 
-    CALLS.clear(); calls = CALLS
+
+async def _run_watch(assessment: dict, script):
+    from temporalio.worker import UnsandboxedWorkflowRunner, Worker
+    from temporalio.testing import WorkflowEnvironment
+    from terra.watch_workflows import AreaWatchWorkflow
+
+    saved: list[dict] = []
+    CALLS.clear()
     async with await WorkflowEnvironment.start_local(dev_server_existing_path=_dev_server(), ui=False) as env:
         queue = "watch-test-" + uuid.uuid4().hex[:6]
         async with Worker(env.client, task_queue=queue, workflows=[AreaWatchWorkflow, FakeInvestigation], workflow_runner=UnsandboxedWorkflowRunner(),
-                          activities=[save, reference, next_pass, find_new, register, assess, dispatch]):
+                          activities=_activities(CALLS, saved, assessment)):
             handle = await env.client.start_workflow(AreaWatchWorkflow.run, {"id": "watch-etna", "name": "Mount Etna", "bbox": [14.95, 37.7, 15.1, 37.8]},
                                                      id="watch-etna-" + uuid.uuid4().hex[:6], task_queue=queue)
+
             async def until(pred, what):
+                state = {}
                 for _ in range(200):
                     state = await handle.query(AreaWatchWorkflow.snapshot)
                     if pred(state):
                         return state
                     await asyncio.sleep(0.05)
                 raise AssertionError(f"timed out waiting for {what}: {state.get('status')}")
-            await until(lambda s: s.get("status") == "waiting_pass", "the predicted pass")
-            await handle.signal(AreaWatchWorkflow.check_now)  # don't wait for 2026-11-20
-            state = await until(lambda s: s.get("status") == "proposal", "a proposal")
-            assert state["proposal"]["id"] == "inv-1" and state["reference"]["id"] == "new"
-            assert "dispatch:inv-1" not in calls  # never dispatches without the operator
-            await handle.signal(AreaWatchWorkflow.decide, {"action": "approve", "proposal": "inv-1"})
-            state = await until(lambda s: s.get("dispatched"), "the dispatch")
-            assert calls[:3] == ["find", "register", "investigate:ref,new"] and "dispatch:inv-1" in calls
-            await until(lambda s: s.get("status") == "waiting_pass", "the next pass")
+            await script(handle, until, AreaWatchWorkflow)
             await handle.signal(AreaWatchWorkflow.stop)
-            final = await handle.result()
-            assert final["status"] == "stopped" and final["cycles"] == 1
-            assert [s["status"] for s in saved][:3] == ["watching", "waiting_pass", "checking"]
+            return await handle.result(), saved
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(_dev_server() is None, reason="no local Temporal dev server binary (.data/temporal-bin)")
+async def test_watch_loop_check_investigate_propose_approve_dispatch():
+    async def script(handle, until, W):
+        await until(lambda s: s.get("status") == "waiting_pass", "the predicted pass")
+        await handle.signal(W.check_now)  # don't wait for 2026-11-20
+        state = await until(lambda s: s.get("status") == "proposal", "a proposal")
+        assert state["proposal"]["id"] == "inv-1" and state["reference"]["id"] == "new"
+        assert not any(c.startswith("dispatch") for c in CALLS)  # never dispatches without the operator
+        await handle.signal(W.decide, {"action": "approve", "proposal": "inv-1"})
+        await until(lambda s: s.get("dispatched"), "the dispatch")
+        await until(lambda s: s.get("status") == "waiting_pass", "the next pass")
+    final, saved = await _run_watch({"significant": True, "status": "completed", "summary": "1.2% changed", "patches": 6}, script)
+    assert CALLS[:4] == ["pass:DESCENDING", "find", "register", "investigate:ref,new"] and "dispatch:inv-1" in CALLS
+    assert final["status"] == "stopped" and final["cycles"] == 1
+    assert [s["status"] for s in saved][:3] == ["watching", "waiting_pass", "checking"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(_dev_server() is None, reason="no local Temporal dev server binary (.data/temporal-bin)")
+async def test_a_refused_comparison_keeps_the_baseline_and_is_not_retried():
+    """Live, Etna: the science refused 2026-10-15 vs 10-27 (maturity differs) and the watch reported "no significant
+    change" and moved its baseline. A failed comparison must say so, keep the baseline, and skip that pass next time."""
+    async def script(handle, until, W):
+        await until(lambda s: s.get("status") == "waiting_pass", "the predicted pass")
+        await handle.signal(W.check_now)
+        state = await until(lambda s: s.get("cycles") == 1 and s.get("status") == "waiting_pass", "the refused comparison")
+        assert state["reference"]["id"] == "ref" and state["skipped"] == ["new"] and not state.get("proposal")
+        await handle.signal(W.check_now)
+        await until(lambda s: s.get("status") == "waiting_data", "the next search")
+    final, saved = await _run_watch({"significant": False, "status": "failed", "summary": "Cannot compare acquisitions: maturity differs."}, script)
+    said = [s["message"] for s in saved]
+    assert any(m.startswith("Could not compare 2026-10-15 with 2026-11-08: Cannot compare acquisitions") for m in said)
+    assert not any("No significant change" in m for m in said)
+    assert CALLS.count("register") == 1 and not any(c.startswith("dispatch") for c in CALLS)
+    assert final["reference"]["id"] == "ref"

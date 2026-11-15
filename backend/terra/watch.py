@@ -62,9 +62,12 @@ def _bearing(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return (math.degrees(math.atan2(math.sin(dl) * math.cos(p2), math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl))) + 360) % 360
 
 
-def next_nisar_pass(line1: str, line2: str, lat: float, lon: float, start: datetime, days: float = 13) -> datetime | None:
+def next_nisar_pass(line1: str, line2: str, lat: float, lon: float, start: datetime, days: float = 13,
+                    direction: str | None = None) -> datetime | None:
     """The next time the point falls inside NISAR's left-looking swath (closest approach of that pass), or None.
-    NISAR repeats its ground track every 12 days, so 13 days always contains at least one imaging pass."""
+    `direction` ("ASCENDING" / "DESCENDING") keeps only passes flying that way: a change comparison needs the same
+    viewing geometry as the baseline. NISAR repeats its ground track every 12 days, so 13 days always contains one."""
+    want = {"ASCENDING": 1, "DESCENDING": -1}.get(str(direction or "").upper())
     from sgp4.api import Satrec
     sat = Satrec.twoline2rv(line1, line2)
     t = start; end = start + timedelta(days=days)
@@ -78,7 +81,8 @@ def next_nisar_pass(line1: str, line2: str, lat: float, lon: float, start: datet
             a, b = sub_point(sat, prev_t), sub_point(sat, prev_t + timedelta(seconds=10))
             if a and b:
                 side = (_bearing(a[0], a[1], lat, lon) - _bearing(a[0], a[1], b[0], b[1]) + 540) % 360 - 180
-                if side < 0:  # the area is left of the track: inside the imaged swath
+                heading = 1 if b[0] > a[0] else -1  # northbound = ascending
+                if side < 0 and (want is None or heading == want):  # left of the track (imaged), flying the right way
                     return prev_t
         prev_prev, prev, prev_t = prev, d, t
         # Far from the area, skip ahead in proportion to the distance (ground speed ~7 km/s).
@@ -94,15 +98,63 @@ def _date(item: dict) -> str:
     return str(item.get("date") or "")
 
 
+GEOMETRY = ("track", "direction", "frame")
+RELEASE = ("maturity", "product_version")  # the science refuses pairs whose product maturity or processing release differ
+LIKE = {"HH", "HHHH", "VV", "VVVV"}
+
+
+def _norm(key: str, value):
+    return str(value).upper() if key in ("maturity", "direction") and value is not None else value
+
+
+def comparable(a: dict, b: dict) -> bool:
+    """Same viewing geometry, frequency, a shared co-polarized channel, and the same product maturity and processing
+    release: what `science.check_compatibility` requires of a pair (it re-checks everything, including the pixel grid,
+    when the investigation runs)."""
+    if a.get("product") != "GCOV" or b.get("product") != "GCOV":
+        return False
+    for key in GEOMETRY + RELEASE:
+        x, y = _norm(key, a.get(key)), _norm(key, b.get(key))
+        if key == "frame" and (x is None or y is None):
+            continue
+        if x is None or y is None or x != y:
+            return False
+    if a.get("frequency") and b.get("frequency") and a["frequency"] != b["frequency"]:
+        return False
+    like = lambda o: {p[:2] for p in (o.get("polarizations") or []) if p in LIKE}
+    return not (a.get("polarizations") and b.get("polarizations")) or bool(like(a) & like(b))
+
+
+def _release(o: dict) -> str:
+    return f"{str(o.get('maturity') or 'unknown').lower()} {o.get('product_version') or ''}".strip()
+
+
+def pick_pair(observations: list[dict], baseline: dict | None, skip: set[str] | frozenset = frozenset()) -> tuple[dict | None, dict | None, str]:
+    """The newest acquisition after the baseline that can be compared with something: the baseline itself when it is
+    comparable, otherwise the latest earlier acquisition from the same geometry and processing release. Returns
+    (partner, new, reason); reason explains why there is no pair."""
+    if not baseline:
+        return None, None, "No baseline acquisition."
+    newer = sorted((o for o in observations if o.get("product") == "GCOV" and _date(o) > _date(baseline) and o.get("id") not in skip
+                    and all(_norm(k, o.get(k)) == _norm(k, baseline.get(k)) for k in ("track", "direction"))), key=_date, reverse=True)
+    if not newer:
+        return None, None, "No newer acquisition with the same viewing geometry yet."
+    for new in newer:
+        if comparable(baseline, new):
+            return baseline, new, ""
+        earlier = sorted((o for o in observations if o.get("id") != new.get("id") and _date(baseline) <= _date(o) < _date(new) and comparable(o, new)),
+                         key=_date, reverse=True)
+        if earlier:
+            return earlier[0], new, ""
+    n = newer[0]
+    return None, None, (f"A newer pass exists ({_date(n)[:10]}, {_release(n)}) but it was processed differently from the baseline ({_release(baseline)}), "
+                        "and Terra only compares like with like. The next pass in the same release will be compared with it.")
+
+
 def pick_new_acquisition(observations: list[dict], reference: dict | None) -> dict | None:
-    """The newest GCOV acquisition after the reference with the same viewing geometry (track and direction, and the
-    frame when both have one): radar change is only meaningful between like-for-like looks."""
-    if not reference:
-        return None
-    same = [o for o in observations if o.get("product") == "GCOV" and _date(o) > _date(reference)
-            and o.get("track") == reference.get("track") and o.get("direction") == reference.get("direction")
-            and (reference.get("frame") is None or o.get("frame") is None or o.get("frame") == reference.get("frame"))]
-    return max(same, key=_date) if same else None
+    """The newest acquisition comparable with the reference (kept for callers that only need the new one)."""
+    _, new, _ = pick_pair(observations, reference)
+    return new
 
 
 def latest_acquisition(observations: list[dict]) -> dict | None:
@@ -178,8 +230,8 @@ async def watch_next_pass(payload: dict) -> dict:
     sats = await feeds.satellites()
     nisar = sats["nisar"]
     start = datetime.now(timezone.utc)
-    at = next_nisar_pass(nisar["line1"], nisar["line2"], (s + n) / 2, (w + e) / 2, start)
-    return {"at": at.isoformat() if at else None, "elements_epoch": nisar.get("element_epoch"), "source": sats.get("source")}
+    at = next_nisar_pass(nisar["line1"], nisar["line2"], (s + n) / 2, (w + e) / 2, start, direction=payload.get("direction"))
+    return {"at": at.isoformat() if at else None, "direction": payload.get("direction"), "elements_epoch": nisar.get("element_epoch"), "source": sats.get("source")}
 
 
 async def _catalog(bbox: list[float]) -> list[dict]:
@@ -206,8 +258,9 @@ async def watch_reference(payload: dict) -> dict | None:
 
 
 @activity.defn(name="watch_find_new")
-async def watch_find_new(payload: dict) -> dict | None:
-    return pick_new_acquisition(await _catalog(payload["bbox"]), payload.get("reference"))
+async def watch_find_new(payload: dict) -> dict:
+    partner, new, reason = pick_pair(await _catalog(payload["bbox"]), payload.get("reference"), set(payload.get("skip") or []))
+    return {"partner": partner, "new": new, "reason": reason}
 
 
 @activity.defn(name="watch_register_investigation")

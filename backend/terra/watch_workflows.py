@@ -80,24 +80,27 @@ class AreaWatchWorkflow:
         while not self.stopping:
             # 1. Wait for the next pass whose swath covers the area (or an operator's "check now").
             if not self.check_requested:
-                nxt = await self.act("watch_next_pass", {"bbox": self.state["bbox"]})
+                nxt = await self.act("watch_next_pass", {"bbox": self.state["bbox"], "direction": (self.state.get("reference") or {}).get("direction")})
                 self.state["next_pass_at"] = nxt.get("at")
                 when = datetime.fromisoformat(nxt["at"]) + DATA_LATENCY if nxt.get("at") else workflow.now() + timedelta(days=1)
-                await self.save("waiting_pass", "Waiting for NISAR's next pass over the area." if nxt.get("at") else "No NISAR pass predicted in the next 13 days; checking again tomorrow.")
+                way = str(nxt.get("direction") or "").lower()
+                await self.save("waiting_pass", (f"Waiting for NISAR's next {way} pass over the area (same viewing geometry as the baseline)." if way else "Waiting for NISAR's next pass over the area.")
+                                if nxt.get("at") else "No NISAR pass predicted in the next 13 days; checking again tomorrow.")
                 await self.sleep_until(when)
                 if self.stopping:
                     break
 
             # 2. Look for the new acquisition; products arrive after the pass, so keep looking for a while.
-            found = None
+            found = None; partner = None
             for _ in range(DATA_TRIES):
                 self.check_requested = False
                 await self.save("checking", "Searching the NASA/ASF archive for a new acquisition with the same viewing geometry.")
                 self.state["last_check_at"] = workflow.now().isoformat()
-                found = await self.act("watch_find_new", {"bbox": self.state["bbox"], "reference": self.state["reference"]})
+                pair = await self.act("watch_find_new", {"bbox": self.state["bbox"], "reference": self.state["reference"], "skip": self.state.get("skipped", [])})
+                found, partner = pair.get("new"), pair.get("partner")
                 if found or self.stopping:
                     break
-                await self.save("waiting_data", "No new same-track acquisition yet; NISAR products arrive hours to days after a pass.")
+                await self.save("waiting_data", pair.get("reason") or "No new same-track acquisition yet; NISAR products arrive hours to days after a pass.")
                 await self.sleep_until(workflow.now() + DATA_RETRY)
                 if self.stopping:
                     break
@@ -108,15 +111,20 @@ class AreaWatchWorkflow:
 
             # 3. Measure the change against the previous acquisition (a child investigation, durable on its own).
             request = await self.act("watch_register_investigation", {"watch_id": self.state["id"], "name": self.state["name"], "bbox": self.state["bbox"],
-                                                                         "reference": self.state["reference"], "new": found})
+                                                                         "reference": partner, "new": found})
             self.state["latest_investigation_id"] = request["id"]
-            await self.save("investigating", f"Measuring the change from {str(self.state['reference'].get('date', ''))[:10]} to {str(found.get('date', ''))[:10]}.")
+            await self.save("investigating", f"Measuring the change from {str(partner.get('date', ''))[:10]} to {str(found.get('date', ''))[:10]}.")
             await workflow.execute_child_workflow("InvestigationWorkflow", request, id=request["id"], task_queue=workflow.info().task_queue,
                                                   execution_timeout=timedelta(days=30))
             assessment = await self.act("watch_assess", {"investigation_id": request["id"], "min_changed_pct": self.state["min_changed_pct"]})
             self.state["assessment"] = assessment
-            self.state["reference"] = found
             self.state["cycles"] = self.state.get("cycles", 0) + 1
+            if assessment.get("status") != "completed":
+                # The science refused or failed this pair: say so, keep the baseline, and don't retry the same acquisition.
+                self.state["skipped"] = (self.state.get("skipped") or [])[-19:] + [found.get("id")]
+                await self.save("watching", f"Could not compare {str(partner.get('date', ''))[:10]} with {str(found.get('date', ''))[:10]}: {assessment.get('summary', '')}")
+                continue
+            self.state["reference"] = found
 
             # 4. Significant change: propose a dispatch and wait for the operator (never dispatch on our own).
             if assessment.get("significant"):
