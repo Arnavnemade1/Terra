@@ -64,6 +64,13 @@ test('invalid rewritten routes cannot escape the API prefix', async t => {
     assert.equal(res.statusCode, 400);
   }
 });
+test('Google tiles receive only their provider parameters after Vercel adds its route capture', async t => {
+  const seen = [];
+  configure(t, async url => { seen.push(url.href); return new Response('{}'); });
+  await handler(request('GET', '/api/connector/google3d/root.json?__terra_route=connector%2Fgoogle3d%2Froot.json'), new ResponseSink());
+  await handler(request('GET', '/api/proxy?session=test-session&__terra_route=connector%2Fgoogle3d%2Ftile.glb'), new ResponseSink());
+  assert.deepEqual(seen, ['https://backend.example/api/connector/google3d/root.json', 'https://backend.example/api/connector/google3d/tile.glb?session=test-session']);
+});
 test('invalid configuration and backend failures do not disclose private error content', async t => {
   configure(t, async () => { throw new Error('sensitive upstream details'); });
   const res = new ResponseSink(); await handler(request(), res);
