@@ -22,8 +22,8 @@ CONCURRENCY = 6
 AREA_BUDGET = 900                 # tiles per monitoring area
 AREA_IMAGERY = range(9, 15)       # overview to working views of the area
 AREA_TERRAIN = range(5, 13)
-DRONE_IMAGERY = (14, 15, 16, 17)  # what a camera 50-500 m above the ground draws near its aim point
-DRONE_TERRAIN = (12, 13, 14, 15)
+DRONE_IMAGERY = (14, 15, 16, 17, 18, 19)  # include the textures the close camera actually requests
+DRONE_TERRAIN = (12, 13, 14, 15, 16, 17)
 SEEN_S = 6 * 3600
 
 
@@ -59,6 +59,7 @@ def plan(area: dict | None, drones: list[dict], area_done: bool) -> list[tuple[s
             for layer in ("imagery", "hillshade") + (("labels",) if z <= 13 else ()):
                 for t in box_tiles(area["bbox"], z, max(0, budget)):
                     wanted.append((layer, *t)); budget -= 1
+    area_count = len(wanted)
     for d in drones:
         s = d.get("state") or {}
         if d.get("link_state") != "online" or "lon" not in s or s.get("landed"):
@@ -70,7 +71,9 @@ def plan(area: dict | None, drones: list[dict], area_done: bool) -> list[tuple[s
                 wanted += [("terrain", *t) for t in around(lon, lat, z)]
             for z in DRONE_IMAGERY:
                 wanted += [(layer, *t) for layer in ("imagery", "hillshade") if not (layer == "hillshade" and z > 16) for t in around(lon, lat, z)]
-    return list(dict.fromkeys(wanted))
+    # Aircraft detail goes ahead of the one-time overview, which can contain 900 tiles.
+    # Otherwise opening a close camera waits for the entire monitoring area to finish warming.
+    return list(dict.fromkeys(wanted[area_count:] + wanted[:area_count]))
 
 
 class Warmer:

@@ -12,7 +12,7 @@ type Mode = 'eo' | 'ir' | 'change';
 
 const MAPS = '/api/connector/maps';
 const DEG = Math.PI / 180;
-const FOV = 52;
+const FOV = 72;
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const PALETTES: Record<Palette, string> = { ironbow: 'Ironbow', white: 'White hot', black: 'Black hot' };
 const SCALE: Record<Palette, string> = {
@@ -104,7 +104,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     const v = new C.Viewer(mount.current, {
       baseLayer: false, animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
       navigationHelpButton: false, fullscreenButton: false, selectionIndicator: false, infoBox: false, creditContainer: credits.current ?? document.createElement('div'),
-      requestRenderMode: false, skyBox: false, contextOptions: { webgl: { alpha: false, powerPreference: 'high-performance' } }, msaaSamples: 4,
+      requestRenderMode: false, skyBox: false, contextOptions: { webgl: { alpha: false, powerPreference: 'high-performance' } }, msaaSamples: 2,
     });
     viewer.current = v; const scene = v.scene;
     if (import.meta.env.DEV) Object.assign(window, { __terraFeed: v });
@@ -117,6 +117,11 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     if (scene.skyAtmosphere) { scene.skyAtmosphere.show = true; scene.skyAtmosphere.saturationShift = -0.25; scene.skyAtmosphere.brightnessShift = 0.05; }
     // Sharper rendering without overloading the GPU: up to 1.5× pixels, finer terrain detail, FXAA on top of MSAA.
     v.resolutionScale = Math.min(window.devicePixelRatio, 1.5); scene.globe.maximumScreenSpaceError = 1.25; scene.postProcessStages.fxaa.enabled = true;
+    // Retain close-range detail across turns, instead of discarding it just outside the view.
+    scene.globe.tileCacheSize = 400;
+    scene.globe.loadingDescendantLimit = 64;
+    scene.globe.preloadAncestors = true;
+    scene.globe.preloadSiblings = false;
     const base = v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...imagery('maps/imagery/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
     layers.current.base = base;
     world.current = new Relief(v, base, [base]);
@@ -166,6 +171,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   useEffect(() => {
     const v = viewer.current; if (!v) return;
     const dpr = window.devicePixelRatio || 1;
+    v.targetFrameRate = 30;
     v.useDefaultRenderLoop = visible;
     v.resolutionScale = Math.min(dpr, expanded && visible ? 1.5 : 1.25);
     v.scene.globe.maximumScreenSpaceError = expanded && visible ? 1.25 : 1.6;
@@ -173,6 +179,17 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     const slow = setInterval(() => { if (!v.isDestroyed()) v.render(); }, 500);
     return () => clearInterval(slow);
   }, [visible, expanded]);
+
+  useEffect(()=>{if(!visible){setFlying(false);keys.current.clear();}},[visible]);
+
+  // The parked canvas has a different size. Resize immediately when its container changes,
+  // including when the browser throttles its animation loop in a background tab.
+  useEffect(() => {
+    const el=mount.current;if(!el)return;
+    const resize=()=>{const v=viewer.current;if(v&&!v.isDestroyed()){v.forceResize();v.scene.requestRender();}};
+    const observer=new ResizeObserver(resize);observer.observe(el);resize();
+    return()=>observer.disconnect();
+  }, []);
 
   // Another aircraft: re-point the same camera.
   useEffect(() => { setAim({ az: 0, el: 0 }); setZoom(1); setFlying(false); setMarks([]); setS(store.state(id));setNadir(false);setVideo(false);setVideoState('loading');setSpi(null); }, [id, store]);
@@ -187,8 +204,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     // With globe lighting on, Cesium supplies the eye-space positions the relief shading needs (without it they can
     // arrive undefined in a second globe). The relief's fixed north-west light keeps this daylight at any hour.
     v.scene.globe.enableLighting = eo && relief;
-    // IR: the measured temperature (72 %) over a dim, greyscale view of the ground (28 %), so terrain and fields stay
-    // legible at 30 m thermal pixels; where Landsat has no value (cloud, edge) only that dim ground shows.
+    // Only valid Landsat pixels are coloured; cloud and scene edges retain the dim base imagery.
     const base = layers.current.base;
     if (base) {
       base.show = mode === 'ir' || (eo && !relief);
@@ -293,6 +309,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const ticks: number[] = []; for (let a = Math.floor((gimbalHeading - 40) / 5) * 5; a <= gimbalHeading + 40; a += 5) ticks.push(a);
   const now = new Date();
   const stale=s.status==='stale'||s.status==='lost';
+  const criticalBattery=Number.isFinite(s.batteryPct)&&s.batteryPct<=15&&s.status==='airborne';
   const isLiveVideo=Boolean(s.videoUrl)&&s.source==='real'&&video;
   const hasVideo = Boolean(s.videoUrl) && s.source === 'real';
   const fmt = (n: number, d = 0) => Number.isFinite(n) ? n.toLocaleString('en', { maximumFractionDigits: d, minimumFractionDigits: d }) : '—';
@@ -303,11 +320,12 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'} ${hudDetail?'':'minimal-hud'} ${isLiveVideo?'video-mode':''}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible} inert={!visible}>
     <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onPointerCancel={()=>{drag.current=null;}} onWheel={onWheel}>
       <div ref={mount} className="sensor-canvas" />
-      <div className="camera-head"><div><strong>{s.callsign}</strong><span>{s.name||'Observation camera'}</span><em className={s.source}>{s.source==='real'?'Connected aircraft':s.source==='sitl'?'SITL simulation':'Virtual simulation'}</em></div><div><button onClick={()=>setHudDetail(v=>!v)} aria-label={hudDetail?'Simplify camera HUD':'Show full camera HUD'} aria-pressed={!hudDetail}>{hudDetail?<Eye size={14}/>:<EyeOff size={14}/>}</button><button onClick={onExpand} aria-label={expanded?'Return to map':'Expand camera'}>{expanded?<Minimize2 size={14}/>:<Maximize2 size={14}/>}</button><button onClick={onClose} aria-label="Close camera"><X size={15}/></button></div></div>
+      <div className="camera-head"><div><strong>{s.callsign}</strong><span>{s.name||'Observation camera'}{store.info.area?.name?` · ${store.info.area.name}`:''}</span><em className={s.source}>{s.source==='real'?'Connected aircraft':s.source==='sitl'?'SITL simulation':'Virtual simulation'}</em></div><div><button onClick={()=>setHudDetail(v=>!v)} aria-label={hudDetail?'Simplify camera HUD':'Show full camera HUD'} aria-pressed={!hudDetail}>{hudDetail?<Eye size={14}/>:<EyeOff size={14}/>}</button><button onClick={onExpand} aria-label={expanded?'Return to map':'Expand camera'}>{expanded?<Minimize2 size={14}/>:<Maximize2 size={14}/>}</button><button onClick={onClose} aria-label="Close camera"><X size={15}/></button></div></div>
       {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" onLoad={()=>setVideoState('ready')} onError={()=>setVideoState('error')} />}
       {cameraError&&<div className="camera-state error" role="alert">{cameraError}</div>}
       {isLiveVideo&&videoState!=='ready'&&<div className="camera-state" role="status">{videoState==='error'?'The aircraft video stream is unavailable.':'Connecting to aircraft video…'}{videoState==='error'&&<button onClick={()=>setVideo(false)}>Use rendered view</button>}</div>}
       {stale&&<div className="camera-telemetry-warning" role="status">{s.status==='lost'?'Telemetry lost':'Telemetry delayed'} · last report {s.ageS!==undefined?`${Math.round(s.ageS)} s ago`:'unavailable'}</div>}
+      {!stale&&criticalBattery&&<div className="camera-telemetry-warning" role="status">Battery critical · {Math.round(s.batteryPct)}% · {s.mission.status}</div>}
       <div className="hud" aria-hidden="true">
         <i className="br tl" /><i className="br tr" /><i className="br bl" /><i className="br bottom-r" />
         <div className="hud-tl"><span><b className="rec" />VIEW {recText}<em className={`src ${s.source}`}>{s.source === 'real' ? (hasVideo && video ? 'LIVE VIDEO' : 'LIVE · RENDERED') : s.source === 'sitl' ? 'SITL · ARDUPILOT' : 'SIM'}</em></span>
@@ -353,7 +371,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       <button className="icon-btn" onClick={() => { setNadir(false);setAim({ az: 0, el: 0 }); setZoom(1); }} aria-label="Point the camera back at the mission target" title="Re-centre"><Crosshair size={14} /></button>
 <button className="icon-btn" onClick={()=>setHelp(h=>!h)} aria-label="Camera controls help" aria-expanded={help}><HelpCircle size={14}/></button>
     </div>
-    <div className="camera-context"><span><i className={stale?'warn':'ok'}/>{isLiveVideo?'Aircraft video':mode==='ir'?`Landsat surface temperature · ${thermal?.date} · ~100 m source`:mode==='change'?'NISAR change overlay · measured acquisition pair':`${relief?'Relief':'Imagery'} · rendered from aircraft telemetry`}</span><span>{isLiveVideo?'':tileQueue>0?'Refining terrain…':'Drag to aim · scroll to zoom'}</span></div>
+    <div className="camera-context"><span><i className={stale?'warn':'ok'}/>{isLiveVideo?'Aircraft video':mode==='ir'?`Landsat surface temperature · ${thermal?.date} · ~100 m source`:mode==='change'?'NISAR change overlay · measured acquisition pair':`${relief?'Relief':'Satellite imagery'} · rendered from aircraft telemetry`}</span><span>{isLiveVideo?'':tileQueue>0?'Loading terrain and imagery…':'Drag to aim · scroll to zoom'}</span></div>
     {help&&<div className="camera-help"><strong>Camera controls</strong><p>Drag the image to slew the gimbal. Scroll or use +/− to zoom. Mission target restores tracking; Look down gives a vertical view. The eye button simplifies telemetry.</p><p>IR shows a dated Landsat temperature layer; Δ shows the investigation’s radar change. Areas without a measurement show the base map.</p>{s.source!=='real'&&<p>Fly controls simulation: W/S forward, A/D sideways, Q/E yaw, R/F climb, arrows for gimbal, Shift for speed, Escape to hand back.</p>}</div>}
   </div>;
 }

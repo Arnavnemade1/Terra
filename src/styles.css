@@ -874,3 +874,18 @@ details.more[open] summary { margin-bottom: 8px; }
 .drone-feed .sensor-bar,.drone-feed .sensor-credits,.drone-feed .camera-context { flex:none; }
 .sensor.drone-feed.expanded { bottom:var(--chrome-b,0px);height:auto;max-height:none; }
 @media(max-width:760px){.sensor.drone-feed { max-height:calc(100% - 12px); }.sensor.drone-feed.expanded { bottom:0; }.drone-feed .sensor-screen { aspect-ratio:4/3; }.fleet-head { flex-wrap:wrap; }.profile-pick { flex-wrap:wrap; }.profile-pick button { flex:1 1 90px; } }
+
+/* Keep identity and source readable alongside the camera shortcut in a narrow fleet panel. */
+.fleet-list li>button:first-child { grid-template-columns:28px minmax(0,1fr) 76px;grid-template-rows:auto auto;column-gap:8px;row-gap:4px;padding:10px 8px; }
+.fleet-list .fleet-icon { grid-column:1;grid-row:1 / 3;width:28px;height:32px; }
+.fleet-list .fleet-name { grid-column:2;grid-row:1 / 3;overflow:visible;font-size:12px; }
+.fleet-identity { display:flex;align-items:center;gap:5px;min-width:0; }
+.fleet-identity b,.fleet-identity .src-tag { flex:none; }
+.fleet-identity>span { min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+.fleet-identity .src-tag { margin:0;font-size:8px;letter-spacing:0;padding:1px 3px; }
+.fleet-list .fleet-name small { margin-top:4px;font-size:10px; }
+.fleet-list .fleet-status { grid-column:3;grid-row:1;font-size:11px; }
+.fleet-list .fleet-status small { font-size:10px; }
+.fleet-list .fleet-battery { grid-column:3;grid-row:2;display:flex;align-items:center;justify-content:flex-end;gap:5px; }
+.fleet-list .fleet-battery i { width:32px;height:4px; }.fleet-list .fleet-battery small { font-size:10px;min-width:25px;text-align:right; }
+.fleet-list li>button.fleet-quick-camera { min-width:32px;width:32px;grid-template-columns:1fr; }

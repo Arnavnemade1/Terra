@@ -100,6 +100,10 @@ def test_warmer_plans_the_area_once_and_the_ground_each_camera_sees():
     later = warm.plan(area, [drone], area_done=True)
     assert len(first) <= warm.AREA_BUDGET + len(later) and {t[0] for t in first} >= {"terrain", "imagery", "hillshade", "labels"}
     assert later and all(z in warm.DRONE_IMAGERY or z in warm.DRONE_TERRAIN for _, z, _, _ in later)
+    # A close camera needs level 19 imagery, and must not wait behind the overview batch.
+    assert any(layer == "imagery" and z == 19 for layer, z, _, _ in later)
+    assert any(layer == "terrain" and z == 17 for layer, z, _, _ in later)
+    assert first[:len(later)] == later
     # The camera looks east: the aim point's tiles lie east of the aircraft's own.
     z = 17; own_x, _ = warm.tile(15.05, 37.75, z)
     assert max(x for layer, zz, x, _ in later if zz == z and layer == "imagery") > own_x

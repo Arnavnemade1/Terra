@@ -122,7 +122,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       const ex = v.scene.verticalExaggeration || 1; const carto = C.Cartographic.fromDegrees(st.lon, st.lat);
       const go = (ground: number) => {
         const target = C.Cartesian3.fromDegrees(st.lon, st.lat, ground + st.aglM);
-        v.camera.flyToBoundingSphere(new C.BoundingSphere(target, 1), { offset: new C.HeadingPitchRange((st.headingDeg + 30) * Math.PI / 180, C.Math.toRadians(-26), Math.max(900, st.aglM * 4.5)), duration: reducedMotion() ? 0 : 1.6 });
+        // Keep the context view above nearby ridges, including exaggerated terrain.
+        v.camera.flyToBoundingSphere(new C.BoundingSphere(target, 1), { offset: new C.HeadingPitchRange((st.headingDeg + 30) * Math.PI / 180, C.Math.toRadians(-38), Math.max(1500, st.aglM * 5)), duration: reducedMotion() ? 0 : 1.6 });
       };
       // Never aim from a coarse ground height (distant terrain tiles can be hundreds of metres off on a volcano):
       // sample the most detailed terrain first, so the camera cannot end up inside a mountain.
