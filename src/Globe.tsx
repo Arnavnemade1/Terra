@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import * as C from 'cesium';
+import { DrapedImageProvider } from './drapedImagery';
 import type { Bounds, Observation, Region } from './types';
 import { DisplayModes, type DisplayMode } from './displayModes';
 import { ACCENT, LiveLayers, type FeedState, type LayerKey, type Selection } from './liveLayers';
@@ -82,6 +83,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const flatLayers = useRef<C.ImageryLayer[]>([]);
   const baseLayer = useRef<C.ImageryLayer | null>(null);
   const overlayLayers = useRef(new Map<string, { url: string; layer: C.ImageryLayer }>());
+  const tileOverlays = useRef(new Map<string, C.ImageryLayer>());  // the same science layers, draped onto the Google 3D tiles
   const labelLayer = useRef<C.ImageryLayer | null>(null);
   const nightLayer = useRef<C.ImageryLayer | null>(null);
   const live = useRef<LiveLayers | null>(null);
@@ -236,11 +238,11 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       const tune = () => {
         const layer = labelLayer.current; const h = camera.positionCartographic.height;
         const t = tiles.current;
-        // Science layers stay on the imagery globe so radar pixels sit exactly on the ground.
         const overlaid = latest.current.overlays.some(o => o.show && o.alpha > 0);
         if (t) {
           // Google tiles are drawn on their own: while they show, the globe (and with it every non-Google basemap) is hidden.
-          const p = latest.current; const on = p.photoreal && !p.flat && !p.relief && !overlaid && scene.mode === C.SceneMode.SCENE3D && h < PHOTOREAL_BELOW;
+          // Science layers are draped onto the tiles (drapeOnTiles), so the photoreal view keeps the radar on the ground.
+          const p = latest.current; const on = p.photoreal && !p.flat && !p.relief && scene.mode === C.SceneMode.SCENE3D && h < PHOTOREAL_BELOW;
           // Prepare only the view the user selected. The two basemaps never draw together.
           t.preloadWhenHidden=on&&!tilesHaveView.current;
           const showGoogle=on&&tilesHaveView.current;
@@ -400,7 +402,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy(); smoothOff?.();
       live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); drones.current?.destroy(); live.current = null; modes.current = null; relief.current = null; drones.current = null;
       droneStore.groundAt = null;
-      if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tilesLoading.current = false; tilesHaveView.current=false;
+      if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tileOverlays.current.clear(); tilesLoading.current = false; tilesHaveView.current=false;
     };
   }, []);
 
@@ -484,7 +486,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       .then(t => {
         tilesLoading.current = false;
         if (v.isDestroyed() || viewer.current !== v) { t.destroy(); return; }
-        t.show = false; v.scene.primitives.add(t); tiles.current = t;
+        t.show = false; v.scene.primitives.add(t); tiles.current = t; tileOverlays.current.clear(); drapeOnTiles();
         t.initialTilesLoaded.addEventListener(()=>{if(v.isDestroyed()||viewer.current!==v)return;tilesHaveView.current=true;setGoogleLoading(false);retune.current();v.scene.requestRender();});
         t.tileLoad.addEventListener(()=>{failures=0;v.scene.requestRender();});
         t.tileFailed.addEventListener(() => {
@@ -500,6 +502,26 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   useEffect(() => { const l = live.current; if (!l) return; for (const [k, on] of Object.entries(props.layers)) l.setVisible(k as LayerKey, on); }, [props.layers]);
   useEffect(() => { live.current?.setTime(props.satTime ?? null); }, [ready, props.satTime]);
   useEffect(() => { live.current?.setFocus(props.satFocus ?? null); }, [ready, props.satFocus]);
+
+  // Science layers on the Google 3D tiles: each globe overlay gets a twin layer on the tileset (same provider, opacity and
+  // visibility, same order), so switching to Photoreal keeps the radar change on the ground. Display only, as before.
+  const drapeOnTiles = () => {
+    const t = tiles.current; const draped = tileOverlays.current; if (!t || t.isDestroyed()) return;
+    for (const [id, layer] of draped) {
+      const item = overlayLayers.current.get(id);
+      if (!item || (layer.imageryProvider as unknown as DrapedImageProvider).source !== item.url) { t.imageryLayers.remove(layer, true); draped.delete(id); }
+    }
+    for (const o of latest.current.overlays) {
+      const item = overlayLayers.current.get(o.id); if (!item) continue;
+      let layer = draped.get(o.id);
+      if (!layer) {
+        const smooth = item.layer.magnificationFilter !== C.TextureMagnificationFilter.NEAREST;
+        const provider = new DrapedImageProvider(item.url, item.layer.imageryProvider.rectangle, smooth, new C.Credit('Terra investigation output'), o.id === 'change');
+        layer = new C.ImageryLayer(provider as unknown as C.ImageryProvider); layer.magnificationFilter = item.layer.magnificationFilter; t.imageryLayers.add(layer); draped.set(o.id, layer);
+      }
+      layer.alpha = item.layer.alpha; layer.show = item.layer.show; t.imageryLayers.raiseToTop(layer);
+    }
+  };
 
   // Georeferenced overlays (true colour below radar below change), each with its own opacity, beneath the labels.
   useEffect(() => {
@@ -521,11 +543,11 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         const layer = v.imageryLayers.addImageryProvider(p); layer.alpha = o.alpha; layer.show = o.show;
         // Radar pixels stay crisp (nearest); true-colour photographs are smoothed.
         if (!o.smooth) layer.magnificationFilter = C.TextureMagnificationFilter.NEAREST;
-        current.set(o.id, { url: o.url, layer }); order(); retune.current(); v.scene.requestRender();
+        current.set(o.id, { url: o.url, layer }); order(); drapeOnTiles(); retune.current(); v.scene.requestRender();
       }).catch(() => { if (!canceled) setNotice('A result layer did not load; its data is still in the investigation.'); });
     }
     if (!props.overlays.some(o => o.show)) v.entities.removeById('probe');
-    order(); retune.current(); v.scene.requestRender();
+    order(); drapeOnTiles(); retune.current(); v.scene.requestRender();
     return () => { canceled = true; };
   }, [ready, props.overlays]);
 
