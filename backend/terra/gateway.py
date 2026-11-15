@@ -24,7 +24,7 @@ GIBS = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best"
 # Tiles are kept exactly as long as the provider's own Cache-Control allows (Esri: max-age 86400 with ETags), never
 # when it says private or no-store, in memory and on disk, and revalidated with If-None-Match once they expire.
 DEFAULT_TTL, MAX_TTL = 900, 86400
-MEMORY_BYTES = 192 * 1024 * 1024
+MEMORY_BYTES = 64 * 1024 * 1024
 DISK_BYTES = int(os.getenv("TERRA_TILE_CACHE_MB", "2048")) * 1024 * 1024
 TILE_TIMEOUT = 8.0  # a stalled upstream tile gives up quickly instead of holding a browser connection
 

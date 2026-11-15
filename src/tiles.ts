@@ -40,4 +40,10 @@ export function terrainUrl(): string {
   return sharded ? `${origin('terrain')}/api/connector/terrain` : '/api/connector/terrain';
 }
 
+/** Mesh downloads must not occupy the page's connections while camera workers and API calls start. */
+export function googleTilesUrl(): string {
+  const path='/api/connector/google3d/root.json';
+  return sharded ? `${origin('google')}${path}` : path;
+}
+
 export const tileHostsInUse = () => sharded;

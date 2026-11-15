@@ -18,7 +18,7 @@ import time
 log = logging.getLogger(__name__)
 
 INTERVAL_S = 6.0
-CONCURRENCY = 6
+CONCURRENCY = 2
 AREA_BUDGET = 900                 # tiles per monitoring area
 AREA_IMAGERY = range(9, 15)       # overview to working views of the area
 AREA_TERRAIN = range(5, 13)
