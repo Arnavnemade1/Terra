@@ -9,7 +9,7 @@ from temporalio import activity
 from .db import fleet_db
 from .planner import assess, bid, distance, plan_round
 
-AGENT_STALE_S = 20
+AGENT_STALE_S = 45  # an agent's slowest cadence is 20 s (aircraft out of contact); twice that and it is restarted or woken
 NOTE_EVERY_S = 120          # a field note on arrival, then every two minutes on station
 
 
@@ -59,13 +59,69 @@ def _note_once(db, sender: str, recipient: str, notes: list[dict], previous: lis
     return texts
 
 
+def command_round(db, mode: dict, area: dict, drones: list[dict], tasks: list[dict], t: float) -> list[dict]:
+    """A fleet-wide command overrides the auction: every airborne aircraft holds where it is, or comes home."""
+    current = {x["drone_id"]: x for x in tasks}
+    created = []
+    for d in drones:
+        s = d.get("state", {})
+        if d["link_state"] == "lost" or "lon" not in s or s.get("landed"):
+            continue
+        task = current.get(d["id"])
+        if mode["mode"] == "hold" and not (task and task["kind"] == "hold" and task["created_by"] == "fleet-command"):
+            params = {"lon": s["lon"], "lat": s["lat"], "agl_m": max(40.0, float(s.get("agl_m") or 100)), "radius_m": 30, "speed_mps": 5}
+            created.append(db.create_task(d["id"], "hold", "Hold position (fleet held)", params, "fleet-command", mode.get("reason") or "Held by an operator", 1.2, None, None))
+        elif mode["mode"] == "recall" and not (task and task["kind"] == "return"):
+            params = {"lon": area["launch"][0], "lat": area["launch"][1], "agl_m": 90}
+            created.append(db.create_task(d["id"], "return", "Return to launch (fleet recalled)", params, "fleet-command", mode.get("reason") or "Recalled by an operator", 1.2, None, None))
+    for task in created:
+        db.message("coordinator", task["drone_id"], "command", {"text": f"{task['drone_id']}: {task['label']}.", "task_id": task["id"]})
+    return created
+
+
+def cadence_for_coordinator(changed: bool, pending_acks: int, online: int, mode: str) -> float:
+    """Seconds until the next round: quick while things change, slow when the fleet is settled or absent."""
+    if changed or pending_acks or mode != "normal":
+        return 2.0
+    return 6.0 if online else 15.0
+
+
+def cadence_for_agent(drone: dict, task: dict | None, urgent: bool) -> float:
+    s = drone.get("state", {})
+    if urgent or (task and task["status"] in ("assigned", "acknowledged")):
+        return 2.0
+    if drone["link_state"] == "lost":
+        return 20.0
+    if drone["link_state"] == "stale":
+        return 5.0
+    if s.get("landed") and not task:
+        return 10.0
+    return 3.0
+
+
 def run_coordination_round(payload: dict) -> dict:
     db = fleet_db(); t = time.time()
     area = db.area()
     if not area:
-        db.heartbeat("coordinator", "coordinator", payload.get("workflow_id"), "idle", {"round": payload.get("round"), "text": "Waiting for a monitoring area."})
-        return {"summary": {"status": "idle"}, "need_agents": []}
+        db.heartbeat("coordinator", "coordinator", payload.get("workflow_id"), "idle", {"round": payload.get("round"), "text": "Waiting for a monitoring area.", "next_s": 15.0})
+        return {"summary": {"status": "idle"}, "need_agents": [], "next_s": 15.0}
     drones = db.drones(); tasks = db.tasks(); controlled = set(db.control())
+    mode = db.mode()
+    previous_mode = (db.heartbeat_summary("coordinator") or {}).get("mode", "normal")
+    if mode["mode"] == "normal" and previous_mode != "normal":
+        if db.supersede_commands():
+            db.message("coordinator", "all", "command", {"text": "The fleet resumed: the auction assigns jobs again."})
+        tasks = db.tasks()
+    if mode["mode"] != "normal":
+        created = command_round(db, mode, area, drones, tasks, t)
+        online = [d for d in drones if d["link_state"] == "online"]
+        word = "held: every airborne aircraft holds its position" if mode["mode"] == "hold" else "recalled: every aircraft returns to launch"
+        summary = {"round": payload.get("round"), "online": len(online), "jobs": 0, "assigned": 0, "new_tasks": len(created), "mode": mode["mode"],
+                   "next_s": 2.0, "text": f"Fleet {word} ({mode.get('reason') or 'operator command'})."}
+        db.heartbeat("coordinator", "coordinator", payload.get("workflow_id"), "running", summary)
+        agents = {a["id"]: a for a in db.agents()}
+        need = [d["id"] for d in online if f"agent:{d['id']}" not in agents or t - agents[f"agent:{d['id']}"]["heartbeat"] > AGENT_STALE_S]
+        return {"summary": summary, "need_agents": need, "wake": [x["drone_id"] for x in created], "next_s": 2.0}
     decisions = plan_round(area, db.targets(), drones, tasks, db.bids(), controlled, t, db.refusals(), db.benched())
 
     for task_id in sorted(set(decisions["released"])):
@@ -89,16 +145,23 @@ def run_coordination_round(payload: dict) -> dict:
     db.set_jobs(decisions["jobs"])
 
     online = [d for d in drones if d["link_state"] == "online"]
+    # Supervision: every aircraft in contact has a live agent (started, or woken if its heartbeat went quiet), and
+    # agents of aircraft that have left the fleet are forgotten.
+    db.forget_agents({f"agent:{d['id']}" for d in drones})
     agents = {a["id"]: a for a in db.agents()}
     need = [d["id"] for d in online if f"agent:{d['id']}" not in agents or t - agents[f"agent:{d['id']}"]["heartbeat"] > AGENT_STALE_S]
     assigned = sum(1 for j in decisions["jobs"] if j.get("assigned_drone"))
+    pending = sum(1 for x in db.tasks() if x["status"] == "assigned")
+    changed = bool(created or decisions["released"] or decisions["retarget"])
+    next_s = cadence_for_coordinator(changed, pending, len(online), "normal")
     summary = {"round": payload.get("round"), "online": len(online), "jobs": len(decisions["jobs"]), "assigned": assigned,
-               "new_tasks": len(created), "reasons": payload.get("reasons", [])[-3:],
+               "new_tasks": len(created), "reasons": payload.get("reasons", [])[-3:], "mode": "normal", "next_s": next_s, "pending_acks": pending,
+               "agents": len([a for a in agents.values() if a["kind"] == "drone" and a["age_s"] < AGENT_STALE_S]), "restarting": need,
                "text": f"{assigned} of {len(decisions['jobs'])} jobs covered by {len(online)} aircraft online."}
     previous = db.heartbeat("coordinator", "coordinator", payload.get("workflow_id"), "running", summary)
     summary["notes"] = _note_once(db, "coordinator", "all", decisions["messages"], previous.get("notes", []))
     db.heartbeat("coordinator", "coordinator", payload.get("workflow_id"), "running", summary)
-    return {"summary": {k: v for k, v in summary.items() if k != "notes"}, "need_agents": need}
+    return {"summary": {k: v for k, v in summary.items() if k != "notes"}, "need_agents": need, "wake": [x["drone_id"] for x in created], "next_s": next_s}
 
 
 def run_drone_agent_round(payload: dict) -> dict:
@@ -133,7 +196,7 @@ def run_drone_agent_round(payload: dict) -> dict:
         except Exception:  # observations are best effort; the agent's other duties continue
             note = None
     feasible = sum(1 for b in bids if b["feasible"])
-    summary = {"round": payload.get("round"), "findings": [f["kind"] for f in findings], "feasible_bids": feasible, "bids": len(bids),
+    summary = {"round": payload.get("round"), "findings": [f["kind"] for f in findings], "feasible_bids": feasible, "bids": len(bids), "next_s": cadence_for_agent(drone, task, False),
                "task": (task or {}).get("label"), "text": f"{drone['name']}: {(task or {}).get('label', 'no task')}; can take {feasible} of {len(bids)} jobs."}
     previous = db.heartbeat(f"agent:{drone_id}", "drone", payload.get("workflow_id"), drone["link_state"], summary)
     new = [f for f in findings if f["kind"] not in previous.get("findings", [])]
@@ -141,7 +204,8 @@ def run_drone_agent_round(payload: dict) -> dict:
         db.message(f"agent:{drone_id}", "coordinator", f["kind"], {"text": f["text"]})
     urgent = [f for f in new if f.get("urgent")]
     retire = drone["link_state"] == "lost" and (drone.get("age_s") or 0) > 600
-    return {"urgent": bool(urgent), "reason": urgent[0]["kind"] if urgent else "", "retire": retire, "summary": summary, "note": (note or {}).get("kind")}
+    return {"urgent": bool(urgent), "reason": urgent[0]["kind"] if urgent else "", "retire": retire, "summary": summary, "note": (note or {}).get("kind"),
+            "next_s": cadence_for_agent(drone, task, bool(urgent))}
 
 
 @activity.defn

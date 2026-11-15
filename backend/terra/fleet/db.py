@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS fleet_notes (
     lon REAL NOT NULL, lat REAL NOT NULL, text TEXT NOT NULL, data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS fleet_notes_drone ON fleet_notes (drone_id, t);
+CREATE TABLE IF NOT EXISTS fleet_mode (
+    id TEXT PRIMARY KEY, mode TEXT NOT NULL, reason TEXT, set_by TEXT, updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS fleet_credentials (
     token_hash TEXT PRIMARY KEY, drone_id TEXT NOT NULL, label TEXT, created_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
 );
@@ -111,8 +114,10 @@ class FleetDB:
         return db
 
     # ------------------------------------------------------------------ area and targets
-    def set_area(self, name: str, bbox: list[float], targets: list[dict], investigation_id: str | None = None, profile: str = "change") -> dict:
-        launch = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]  # launch from the centre: shortest reach to every target
+    def set_area(self, name: str, bbox: list[float], targets: list[dict], investigation_id: str | None = None, profile: str = "change",
+                 launch: list[float] | None = None) -> dict:
+        # Launch where the crew set up (a deployment), else from the centre: shortest reach to every target.
+        launch = [round(launch[0], 6), round(launch[1], 6)] if launch else [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2]
         t = now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -363,6 +368,37 @@ class FleetDB:
             rows = db.execute("SELECT * FROM fleet_agents ORDER BY id").fetchall()
         t = now()
         return [{**dict(r), "summary": _loads(r["summary"], {}), "age_s": round(t - r["heartbeat"], 1)} for r in rows]
+
+    def heartbeat_summary(self, agent_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT summary FROM fleet_agents WHERE id=?", (agent_id,)).fetchone()
+        return _loads(row["summary"], {}) if row else None
+
+    def forget_agents(self, keep: set[str]) -> int:
+        """Drop the records of drone agents whose aircraft have left the fleet (the coordinator's record stays)."""
+        with self.connect() as db:
+            rows = db.execute("SELECT id FROM fleet_agents WHERE kind='drone'").fetchall()
+            gone = [r["id"] for r in rows if r["id"] not in keep]
+            db.executemany("DELETE FROM fleet_agents WHERE id=?", [(g,) for g in gone])
+        return len(gone)
+
+    # ------------------------------------------------------------ fleet-wide commands (hold, recall, resume)
+    def set_mode(self, mode: str, reason: str, set_by: str = "operator") -> dict:
+        with self.connect() as db:
+            db.execute("INSERT INTO fleet_mode VALUES ('fleet', ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET mode=excluded.mode, reason=excluded.reason, set_by=excluded.set_by, updated_at=excluded.updated_at",
+                       (mode, reason, set_by, now()))
+        return self.mode()
+
+    def mode(self) -> dict:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM fleet_mode WHERE id='fleet'").fetchone()
+        return {"mode": row["mode"], "reason": row["reason"], "set_by": row["set_by"], "since": row["updated_at"]} if row else {"mode": "normal", "reason": None, "set_by": None, "since": None}
+
+    def supersede_commands(self) -> int:
+        """End the holds and recalls a fleet command created, so the auction takes over again."""
+        with self.connect() as db:
+            return db.execute("UPDATE fleet_tasks SET status='superseded', updated_at=?, reason='The fleet resumed.' WHERE status IN ('assigned','acknowledged','active') AND created_by='fleet-command'",
+                              (now(),)).rowcount
 
 
 # ---------------------------------------------------------------- field notes and credentials (methods added to FleetDB)
