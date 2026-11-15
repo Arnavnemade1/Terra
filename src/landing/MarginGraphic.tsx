@@ -27,7 +27,7 @@ export function MarginGraphic() {
         <text x={20 + pos(-24) * 5.2} y="40" textAnchor="middle" className="mg-dash-label">Water-like</text>
         <text x={20 + pos(-10.5) * 5.2} y="40" textAnchor="middle">Typical land</text>
         <text x={20 + pos(-1.5) * 5.2} y="40" textAnchor="end">Very bright</text>
-        <text x="280" y="132" textAnchor="middle" className="mg-dash-label">A change of 3 dB or more between dates is flagged</text>
+        <text x="280" y="132" textAnchor="middle" className="mg-dash-label">A change beyond the scene’s own threshold is flagged</text>
       </svg>
       <ul className="mg-gauges">
         {bands.map((b) => (

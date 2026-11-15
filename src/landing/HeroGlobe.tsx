@@ -9,8 +9,8 @@ const markers: GlobeMarker[] = [{ ...PACAYA, src: "", label: "Pacaya–Samiria" 
 // initialRotation turns the planet so the marker faces the camera (see latLngToVector3 in 3d-globe.tsx).
 const rad = Math.PI / 180;
 const config = {
-  textureUrl: "/brand/earth.jpg",
-  bumpMapUrl: "/brand/earth.jpg",
+  textureUrl: "/brand/earth.webp",
+  bumpMapUrl: "/brand/earth.webp",
   showAtmosphere: true,
   atmosphereColor: "#7fb0e0",
   atmosphereIntensity: 0.35,

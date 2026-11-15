@@ -34,7 +34,7 @@ const change = (d: number) => d <= 0 ? `rgba(127,176,224,${Math.min(1, 0.35 + -d
 const STEPS = [
   { title: "Pick a place and two dates", text: "Choose where to look and when. Terra lists every NISAR pass over the area and keeps only pairs that can be compared fairly.", callout: ["Earlier pass", "Radar brightness on the first date. Dark means little signal came back, bright means a lot."] },
   { title: "Read the later pass", text: "The same place, from the same track and direction, on the later date. Same geometry, so differences are the ground and not the viewing angle.", callout: ["Later pass", "Looks similar at a glance, which is why subtracting the two is the reliable way to see change."] },
-  { title: "Subtract and flag", text: "Later minus earlier, in decibels. Anything that moved by the threshold or more is flagged: blue where it got darker, amber where it got brighter.", callout: ["Change map", "Drag the threshold. A lower value flags more of the scene, and more of it is noise."] },
+  { title: "Subtract and flag", text: "Later minus earlier, in decibels. Anything that moved by the threshold or more is flagged: blue where it got darker, amber where it got brighter.", callout: ["Change map", "Drag the threshold. A lower value flags more of the scene, and more of it is noise. In a real analysis Terra chooses it from the scene's own statistics."] },
   { title: "Find the hotspots", text: "The strongest patches are outlined and named, then read against optical imagery, land cover and weather before anything is written.", callout: ["Two hotspots", "A large darkening, like a flooded field, and a smaller brightening, like cleared or burned ground."] },
 ] as const;
 

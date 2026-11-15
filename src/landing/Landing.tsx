@@ -99,7 +99,7 @@ export function Landing() {
           </div>
           <div className="cards feature-cards">
             <Card title="The problem" media={<ProblemArt />} status="Why it is hard" description="Radar images are grainy and hard to read, and two dates taken from different angles cannot be compared at all." />
-            <Card title="The answer" media={<AnswerArt />} status="What Terra does" description="Pair only passes with the same geometry, subtract them in decibels, and flag the patches that moved by 3 dB or more." />
+            <Card title="The answer" media={<AnswerArt />} status="What Terra does" description="Pair only passes with the same geometry, subtract them in decibels, and flag the patches whose change stands out from that scene's own speckle." />
             <Card title="What you get" media={<GetArt />} status="What you see" description="A change map on the globe, up to six outlined hotspots, and a written answer whose numbers are checked against the evidence." />
           </div>
         </Section>
@@ -123,10 +123,10 @@ export function Landing() {
           <div className="statuses">
             <Badge tone="info" dot size="lg">Blue: got darker, more water-like</Badge>
             <Badge tone="warning" dot size="lg">Amber: got brighter</Badge>
-            <Badge tone="neutral" dot size="lg">Grey: under 3 dB, not flagged</Badge>
+            <Badge tone="neutral" dot size="lg">Grey: below the scene's threshold, not flagged</Badge>
           </div>
           <ExpandableCard title="Show the rule">
-            <code className="formula">change (dB) = later backscatter − earlier backscatter, flagged when |change| ≥ 3 dB</code>
+            <code className="formula">change (dB) = later backscatter − earlier backscatter, flagged when |change| ≥ T, where T comes from the scene's change histogram (Kittler–Illingworth), else the 0.1% speckle false-alarm level, else 3 dB</code>
           </ExpandableCard>
         </Section>
 
