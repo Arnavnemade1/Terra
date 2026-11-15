@@ -4,6 +4,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { artifactUrl, type Hotspot, type Optical } from './Dossier';
 import type { Conditions } from './Panels';
+import Polarizations, { channel, patchLead, type PolRow } from './Polarizations';
 import { api, prettyDate, safeUrl, type Investigation, type Observation } from './types';
 
 export const STAGES = ['discover', 'prepare', 'analyze', 'verify', 'synthesize'];
@@ -185,12 +186,14 @@ export function Results({ job, result: r, writer, plan, focusSpot, onRewritten, 
       <div><span>Area measured</span><b className="num">{num(obs[0].valid_projected_area_km2, 0)} km²</b></div>
     </div>}
 
+    {change && <Polarizations rows={(change as unknown as { polarizations?: PolRow[] }).polarizations} leading={(change as unknown as { leading_polarization?: string | null }).leading_polarization} hotspots={change.hotspots} />}
+
     {(change?.hotspots?.length || 0) > 0 && <div className="spots">
       <span className="label">Where it changed most</span>
       <ol>{change!.hotspots!.map(h => <li key={h.rank}><button className={focusSpot === h.rank ? 'on' : ''} onClick={() => onSpot(h)}>
         <span className={`rank ${h.direction === 'increase' ? 'up' : 'down'}`}>{h.rank}</span>
         <span className="spot-text"><b>{h.direction === 'increase' ? 'Brighter' : 'Darker'} by {num(Math.abs(h.mean_change_db ?? NaN), 1)} dB on average</b>
-          <span className="num">{num(h.area_km2, 2)} km² · {h.centre[0].toFixed(3)}, {h.centre[1].toFixed(3)}</span></span>
+          <span className="num">{num(h.area_km2, 2)} km² · {h.centre[0].toFixed(3)}, {h.centre[1].toFixed(3)}{(l => l ? ` · clearer in ${l.lead} (${l.z.toFixed(1)}σ vs ${l.z2.toFixed(1)}σ)` : Object.keys(h.by_polarization ?? {}).length > 1 ? ` · ${Object.keys(h.by_polarization!).map(channel).join(' ≈ ')}` : '')(patchLead(h))}</span></span>
       </button></li>)}</ol>
     </div>}
 

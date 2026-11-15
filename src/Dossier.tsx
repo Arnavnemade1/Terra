@@ -11,7 +11,8 @@ type Input = { filename: string; sha256: string; metadata: Record<string, unknow
 type Narrative = { headline?: string; answer?: string; evidence?: string[]; possible_explanations?: string[]; caveats?: string[]; next_steps?: string[]; model?: string; verification?: { numbers_checked: number; unmatched: string[] } };
 export type Optical = { kind: 'before' | 'after' | 'recent'; date: string; sensor: string; resolution_m: number; source_url: string; artifact_name: string; bounds: Bounds;
   quality?: { coverage_pct?: number; obscured_pct?: number; snow_ice_pct?: number }; sha256: string; temporal_offset_days?: number };
-export type Hotspot = { rank: number; direction: 'increase' | 'decrease'; pixels: number; area_km2: number | null; mean_change_db: number | null; peak_change_db: number | null; centre: [number, number]; bounds: Bounds };
+export type Hotspot = { rank: number; direction: 'increase' | 'decrease'; pixels: number; area_km2: number | null; mean_change_db: number | null; peak_change_db: number | null; centre: [number, number]; bounds: Bounds;
+  by_polarization?: Record<string, { mean_change_db: number; standardized_change: number }>; leading_polarization?: string | null };
 type Stats = Record<string, number | null | undefined> & { date?: string; hotspots?: Hotspot[] };
 type Full = NonNullable<Investigation['result']> & { narrative?: Narrative | null; optical_evidence?: Optical[]; enrichment_status?: string;
   surface_conditions?:Conditions; artifacts?: { name: string; url: string; size_bytes: number }[]; timings?: Record<string, unknown> };
