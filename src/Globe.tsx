@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import * as C from 'cesium';
 import { DrapedImageProvider } from './drapedImagery';
+import { GroundHeights } from './groundHeights';
 import type { Bounds, Observation, Region } from './types';
 import { DisplayModes, type DisplayMode } from './displayModes';
 import { ACCENT, LiveLayers, type FeedState, type LayerKey, type Selection } from './liveLayers';
@@ -83,7 +84,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const flatLayers = useRef<C.ImageryLayer[]>([]);
   const baseLayer = useRef<C.ImageryLayer | null>(null);
   const overlayLayers = useRef(new Map<string, { url: string; layer: C.ImageryLayer }>());
-  const tileOverlays = useRef(new Map<string, C.ImageryLayer>());  // the same science layers, draped onto the Google 3D tiles
+  const tileOverlays = useRef(new Map<string, C.ImageryLayer>());
+  const groundHeights = useRef<GroundHeights | null>(null);  // the same science layers, draped onto the Google 3D tiles
   const labelLayer = useRef<C.ImageryLayer | null>(null);
   const nightLayer = useRef<C.ImageryLayer | null>(null);
   const live = useRef<LiveLayers | null>(null);
@@ -246,6 +248,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
           // Prepare only the view the user selected. The two basemaps never draw together.
           t.preloadWhenHidden=on&&!tilesHaveView.current;
           const showGoogle=on&&tilesHaveView.current;
+          if (groundHeights.current) groundHeights.current.source = showGoogle ? 'tiles' : 'terrain';
           if(t.show!==showGoogle){t.show=showGoogle;scene.requestRender();}
           const showTerrain=!showGoogle;
           if(globe.show!==showTerrain){globe.show=showTerrain;scene.requestRender();}
@@ -372,8 +375,11 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         base.nightAlpha = .18; imagery = 'Esri World Imagery'; baseLayer.current = base; base.alpha = latest.current.imageryAlpha;
         relief.current = new Relief(viewerRef, base, [fallback]);
         drones.current = new DroneLayer(viewerRef, droneStore);
-        // True terrain height (the drawn terrain is exaggerated) for aircraft flying at a height above ground.
-        droneStore.groundAt = (lon, lat) => { const h = globe.getHeight(C.Cartographic.fromDegrees(lon, lat)); return h === undefined ? undefined : h / (scene.verticalExaggeration || 1); };
+        // True ground height for aircraft flying at a height above ground: sampled asynchronously and cached (from the
+        // photoreal tiles while they are drawn, otherwise the terrain), never ray-cast per aircraft per frame.
+        const heights = new GroundHeights(scene, () => terrainProvider.current, () => drones.current?.excluded() ?? [], () => scene.requestRender());
+        groundHeights.current = heights; drones.current.ground = heights;
+        droneStore.groundAt = (lon, lat) => heights.get(lon, lat);
         if (import.meta.env.DEV) Object.assign(window, { __terraRelief: relief.current });
         // The 2D map is cartographic rather than photographic: dark shaded relief, a dark land/water base and dark labels.
         const flatSource = (name: string, credit: string, level = 16) => viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({
@@ -401,7 +407,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     return () => {
       disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy(); smoothOff?.();
       live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); drones.current?.destroy(); live.current = null; modes.current = null; relief.current = null; drones.current = null;
-      droneStore.groundAt = null;
+      droneStore.groundAt = null; groundHeights.current?.dispose(); groundHeights.current = null;
       if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tileOverlays.current.clear(); tilesLoading.current = false; tilesHaveView.current=false;
     };
   }, []);

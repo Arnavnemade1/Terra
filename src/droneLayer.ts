@@ -1,8 +1,10 @@
 import * as C from 'cesium';
-import { aircraftGltf } from './droneModel';
+import { aircraftGltf, propellers } from './droneModel';
+import type { GroundHeights } from './groundHeights';
 import { ft, type DroneState, type DroneStore, type FieldNote, type Source } from './drones';
 
-type Craft = { model: C.Model | null; loading: boolean; aircraft: string; pill: C.Billboard; tether: C.Polyline; sight: C.Polyline; link: C.Polyline; ground: number | null; pillKey: string; pos: C.Cartesian3 | null };
+type Craft = { props: { node: C.ModelNode; sign: number }[]; spinAt: number; model: C.Model | null; loading: boolean; aircraft: string; pill: C.Billboard; tether: C.Polyline; sight: C.Polyline; link: C.Polyline; ground: number | null; pillKey: string; pos: C.Cartesian3 | null;
+  strobe: C.Billboard; beacon: C.Billboard; ring: C.Billboard; trail: C.Polyline[]; trailPts: C.Cartesian3[]; trailAt: number; rendered: number | undefined; renderedAt: number; phase: number; spin: number };
 const DEG = Math.PI / 180;
 const ACCENT = '#e5622d';
 const SILHOUETTE = C.Color.fromCssColorString(ACCENT);
@@ -34,6 +36,24 @@ function markImage(kind: string, text?: string): HTMLCanvasElement {
   x.fillStyle = colour; x.textBaseline = 'middle'; x.fillText(text, 11 * k, c.height / 2 + k);
   return c;
 }
+
+/** A soft round glow (strobe, beacon). */
+function glowImage(rgb: string): HTMLCanvasElement {
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d')!;
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, `rgba(${rgb}, 1)`); g.addColorStop(0.18, `rgba(${rgb}, 0.95)`); g.addColorStop(0.45, `rgba(${rgb}, 0.28)`); g.addColorStop(1, `rgba(${rgb}, 0)`);
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64); return c;
+}
+/** The mark on the ground under an aircraft: a thin ring around a dot. */
+function ringImage(): HTMLCanvasElement {
+  const k = 2; const c = document.createElement('canvas'); c.width = c.height = 28 * k; const x = c.getContext('2d')!;
+  x.beginPath(); x.arc(14 * k, 14 * k, 10 * k, 0, Math.PI * 2); x.lineWidth = 1.6 * k; x.strokeStyle = 'rgba(255, 255, 255, 0.85)'; x.stroke();
+  x.beginPath(); x.arc(14 * k, 14 * k, 2.2 * k, 0, Math.PI * 2); x.fillStyle = 'rgba(255, 255, 255, 0.9)'; x.fill();
+  return c;
+}
+let sprites: { strobe: HTMLCanvasElement; beacon: HTMLCanvasElement; ring: HTMLCanvasElement } | null = null;
+const sprite = () => (sprites ??= { strobe: glowImage('255, 255, 255'), beacon: glowImage('255, 64, 48'), ring: ringImage() });
+const TRAIL_S = 20, TRAIL_EVERY_MS = 400, TRAIL_ALPHA = [0.42, 0.26, 0.15, 0.07];
 
 /** The launch site: a ground station pad. */
 function padImage(): HTMLCanvasElement {
@@ -74,6 +94,12 @@ export class DroneLayer {
   private crafts = new Map<string, Craft>();
   private pills: C.BillboardCollection; private lines: C.PolylineCollection; private routes: C.CustomDataSource;
   private marks: C.BillboardCollection; private marksKey = ''; private pad: C.Billboard | null = null;
+  /** Strobes, beacons and ground rings (depth-tested, so terrain hides them like it hides the aircraft). */
+  private glows: C.BillboardCollection;
+  /** Cached ground heights (set by the globe); never ray-cast the terrain per aircraft per frame. */
+  ground: GroundHeights | null = null;
+  /** Whether an airborne aircraft is on screen: the scene then renders continuously, otherwise twice a second. */
+  private onScreen = false;
   private visible = false; private selected: string | null = null; private routeKey = '';
   private raf = 0; private off: (() => void)[] = [];
   /** Flying with an aircraft: the main camera chases it every frame (see follow()). */
@@ -87,6 +113,7 @@ export class DroneLayer {
     this.pills = v.scene.primitives.add(new C.BillboardCollection({ scene: v.scene }));
     this.lines = v.scene.primitives.add(new C.PolylineCollection());
     this.marks = v.scene.primitives.add(new C.BillboardCollection({ scene: v.scene }));
+    this.glows = v.scene.primitives.add(new C.BillboardCollection({ scene: v.scene }));
     this.routes = new C.CustomDataSource('drone-routes'); void v.dataSources.add(this.routes);
     this.off.push(v.scene.preUpdate.addEventListener(() => this.update()));
     this.off.push(store.subscribe(() => { this.drawRoutes(); this.drawMarks(); }));
@@ -94,20 +121,26 @@ export class DroneLayer {
 
   setVisible(on: boolean) {
     if (on === this.visible) return; this.visible = on;
-    this.pills.show = on; this.lines.show = on; this.routes.show = on; this.marks.show = on;
+    this.pills.show = on; this.lines.show = on; this.routes.show = on; this.marks.show = on; this.glows.show = on;
     for (const c of this.crafts.values()) if (c.model) c.model.show = on;
     cancelAnimationFrame(this.raf);
-    // The scene renders on demand; keep frames coming while aircraft are moving.
-    if (on) { let odd = false; const loop = () => { odd = !odd; if ((odd || this.chase) && !this.v.isDestroyed()) this.v.scene.requestRender(); this.raf = requestAnimationFrame(loop); }; loop(); }
+    // The scene renders on demand. While an airborne aircraft is on screen (or the camera flies with one) keep frames
+    // coming for smooth motion; otherwise twice a second is enough to notice one flying into view.
+    if (on) { let odd = false, last = 0; const loop = () => {
+      odd = !odd; const now = performance.now();
+      if (!this.v.isDestroyed() && ((this.chase || (this.onScreen && odd)) || now - last > 500)) { last = now; this.v.scene.requestRender(); }
+      this.raf = requestAnimationFrame(loop); }; loop(); }
     this.drawRoutes(); this.drawMarks(); this.v.scene.requestRender();
   }
+  /** Everything this layer draws, for height sampling to ignore. */
+  excluded(): object[] { return [...[...this.crafts.values()].flatMap(c => c.model ? [c.model] : []), this.pills, this.lines, this.glows, this.marks]; }
   setSelected(id: string | null) { this.selected = id; this.routeKey = ''; this.drawRoutes(); }
 
   destroy() {
     cancelAnimationFrame(this.raf); this.off.forEach(f => f());
     if (this.v.isDestroyed()) return;
     for (const c of this.crafts.values()) if (c.model) this.v.scene.primitives.remove(c.model);
-    this.v.scene.primitives.remove(this.pills); this.v.scene.primitives.remove(this.lines); this.v.scene.primitives.remove(this.marks); this.v.dataSources.remove(this.routes, true);
+    this.v.scene.primitives.remove(this.pills); this.v.scene.primitives.remove(this.lines); this.v.scene.primitives.remove(this.marks); this.v.scene.primitives.remove(this.glows); this.v.dataSources.remove(this.routes, true);
   }
 
   private drawRoutes() {
@@ -160,8 +193,17 @@ export class DroneLayer {
     const states = this.store.states(); const seen = new Set<string>();
     for (const s of states) { seen.add(s.id); this.place(s, g, ex); }
     for (const [id, c] of this.crafts) if (!seen.has(id)) {
-      if (c.model) scene.primitives.remove(c.model); this.pills.remove(c.pill); this.lines.remove(c.tether); this.lines.remove(c.sight); this.lines.remove(c.link); this.crafts.delete(id);
+      if (c.model) scene.primitives.remove(c.model); this.pills.remove(c.pill); this.lines.remove(c.tether); this.lines.remove(c.sight); this.lines.remove(c.link);
+      this.glows.remove(c.strobe); this.glows.remove(c.beacon); this.glows.remove(c.ring); c.trail.forEach(t => this.lines.remove(t)); this.crafts.delete(id);
     }
+    // Is any airborne aircraft on screen? (Cheap: project each drawn position to the window.)
+    const w = this.v.canvas.clientWidth, hgt = this.v.canvas.clientHeight; let any = false;
+    for (const s of states) {
+      const c = this.crafts.get(s.id); if (!c?.pos || s.status === 'landed') continue;
+      const xy = C.SceneTransforms.worldToWindowCoordinates(scene, c.pos);
+      if (xy && xy.x > -50 && xy.y > -50 && xy.x < w + 50 && xy.y < hgt + 50) { any = true; break; }
+    }
+    this.onScreen = any;
     this.links(states, g, ex);
     this.chaseCamera(scene);
     this.declutterLabels(states);
@@ -182,7 +224,6 @@ export class DroneLayer {
       if (!overlaps) occupied.push(r);
     }
   }
-
 
   /**
    * Fly with an aircraft: the camera sits behind it and follows its turns smoothly, from the aircraft's drawn
@@ -233,7 +274,7 @@ export class DroneLayer {
     for (let i = 0; i < 12; i++) {
       const offset = new C.HeadingPitchRange(f.h, pitch, f.r);
       cam.lookAt(c.pos, offset);
-      const at = cam.positionCartographic; const ground = scene.globe.getHeight(at);
+      const at = cam.positionCartographic; const ground = this.groundAt(C.Math.toDegrees(at.longitude), C.Math.toDegrees(at.latitude), scene.globe, scene.verticalExaggeration || 1);
       if (ground === undefined || at.height > ground + 25) break;
       pitch = Math.max(-1.45, pitch - 0.08);
     }
@@ -245,7 +286,8 @@ export class DroneLayer {
   private links(states: DroneState[], g: C.Globe, ex: number) {
     const launch = this.store.info.area?.launch;
     const relays = states.filter(s => s.status === 'airborne' && s.mission.kind === 'relay');
-    const padHeight = launch ? (g.getHeight(C.Cartographic.fromDegrees(launch[0], launch[1])) ?? 0) + 3 * ex : 0;
+    const padGround = launch ? this.groundAt(launch[0], launch[1], g, ex) : undefined;
+    const padHeight = launch ? (padGround ?? 0) + 3 * ex : 0;
     const padPos = launch ? C.Cartesian3.fromDegrees(launch[0], launch[1], padHeight) : null;
     for (const s of states) {
       const c = this.crafts.get(s.id); if (!c) continue;
@@ -263,11 +305,24 @@ export class DroneLayer {
     if (this.pad) this.pad.show = Boolean(launch);
   }
 
+  /** Drawn ground height (exaggerated like the terrain) from the cache; ray-casts the globe only before the first samples arrive. */
+  private groundAt(lon: number, lat: number, g: C.Globe, ex: number): number | undefined {
+    const h = this.ground?.get(lon, lat); if (h !== undefined) return h * ex;
+    return g.show ? g.getHeight(C.Cartographic.fromDegrees(lon, lat)) : undefined;
+  }
+
   private place(s: DroneState, g: C.Globe, ex: number) {
     let c = this.crafts.get(s.id);
     if (!c || c.aircraft !== s.aircraft) {
       if (c?.model) this.v.scene.primitives.remove(c.model);
+      const glow = { position: C.Cartesian3.ZERO, show: false, eyeOffset: new C.Cartesian3(0, 0, -6) };
       c = c ?? {
+        props: [], spinAt: performance.now(),
+        strobe: this.glows.add({ ...glow, image: sprite().strobe as unknown as string, scale: 0.42 }),
+        beacon: this.glows.add({ ...glow, image: sprite().beacon as unknown as string, scale: 0.3, pixelOffset: new C.Cartesian2(0, -7) }),
+        ring: this.glows.add({ ...glow, image: sprite().ring as unknown as string, scale: 0.5, eyeOffset: new C.Cartesian3(0, 0, -25) }),
+        trail: TRAIL_ALPHA.map(a => this.lines.add({ width: 2, show: false, material: C.Material.fromType('Color', { color: C.Color.WHITE.withAlpha(a) }) })),
+        trailPts: [], trailAt: 0, rendered: undefined, renderedAt: 0, phase: Math.random() * 1.4, spin: 0,
         model: null, loading: false, aircraft: s.aircraft, ground: null, pillKey: '',
         pill: this.pills.add({ position: C.Cartesian3.ZERO, show: true, scale: 0.5, verticalOrigin: C.VerticalOrigin.BOTTOM, pixelOffset: new C.Cartesian2(0, -24), disableDepthTestDistance: Number.POSITIVE_INFINITY, id: { kind: 'drone', droneId: s.id } }),
         tether: this.lines.add({ width: 1, material: C.Material.fromType('Color', { color: C.Color.WHITE.withAlpha(0.4) }) }),
@@ -278,13 +333,48 @@ export class DroneLayer {
       c.model = null; c.aircraft = s.aircraft; this.crafts.set(s.id, c); this.load(s, c);
     }
     // Height of the drawn ground under the aircraft (exaggerated like the terrain), eased so LOD changes never jolt it.
-    const carto = C.Cartographic.fromDegrees(s.lon, s.lat);
-    // Never inside the drawn terrain (coarse tiles can sit above the true ground), never below the true ground.
-    const rendered = g.getHeight(carto); const known = s.groundM !== null ? s.groundM * ex : null;
-    const drawn = rendered !== undefined && known !== null ? Math.max(rendered, known) : rendered ?? known;
-    if (drawn !== null) c.ground = c.ground === null ? drawn : c.ground + (drawn - c.ground) * 0.12;
-    const base = c.ground ?? (s.groundM ?? 0) * ex;
+    // From the height cache (true ground, or the photoreal tiles while they are drawn); the drawn terrain is checked at
+    // most every 300 ms so an aircraft never sits inside coarse tiles, and never ray-cast per frame.
+    const now = performance.now();
+    const cached = this.ground?.get(s.lon, s.lat);
+    const known = cached !== undefined ? cached * ex : s.groundM !== null ? s.groundM * ex : undefined;
+    if (g.show && now - c.renderedAt > 300) { c.renderedAt = now; c.rendered = g.getHeight(C.Cartographic.fromDegrees(s.lon, s.lat)); }
+    const rendered = g.show ? c.rendered : undefined;
+    const drawn = rendered !== undefined && known !== undefined ? Math.max(rendered, known) : rendered ?? known;
+    if (drawn !== undefined) c.ground = c.ground === null ? drawn : c.ground + (drawn - c.ground) * 0.12;
+    // Until the ground is known, draw nothing (rather than an aircraft at sea level inside a mountain).
+    const grounded = c.ground !== null; const show = this.visible && grounded;
+    if (c.model && c.model.show !== show) c.model.show = show;
+    c.pill.show = show; c.tether.show = show;
+    if (!grounded) { c.pos = null; c.strobe.show = c.beacon.show = c.ring.show = false; c.trail.forEach(t => t.show = false); c.sight.show = false; return; }
+    const base = c.ground!;
     const pos = C.Cartesian3.fromDegrees(s.lon, s.lat, base + s.aglM); c.pos = pos;
+    const airborne = s.status !== 'landed';
+    // Anti-collision strobe (a white double flash) and a red beacon, as on real aircraft; a ring on the ground beneath.
+    const ts = (now / 1000 + c.phase) % 1.4;
+    c.strobe.show = show && airborne && (ts < 0.05 || (ts > 0.16 && ts < 0.21)); c.strobe.position = pos;
+    c.beacon.show = show && airborne && ((now / 1000 + c.phase * 0.7) % 1.0) < 0.14; c.beacon.position = pos;
+    c.ring.show = show && airborne; c.ring.position = C.Cartesian3.fromDegrees(s.lon, s.lat, base + 1.5);
+    c.ring.color = s.id === this.selected ? C.Color.fromCssColorString(ACCENT) : C.Color.WHITE.withAlpha(0.8);
+    // A fading trail of the last 20 s, newest segment brightest.
+    if (airborne && now - c.trailAt > TRAIL_EVERY_MS) { c.trailAt = now; c.trailPts.push(pos); if (c.trailPts.length > TRAIL_S * 1000 / TRAIL_EVERY_MS) c.trailPts.shift(); }
+    if (!airborne) c.trailPts = [];
+    const pts = c.trailPts; const per = Math.ceil(pts.length / c.trail.length); const tint = s.id === this.selected ? C.Color.fromCssColorString(ACCENT) : C.Color.WHITE;
+    c.trail.forEach((line, k) => {
+      const end = pts.length - k * per, start = Math.max(0, end - per - 1);
+      const seg = k === 0 ? [...pts.slice(start, end), pos] : pts.slice(start, end);
+      line.show = show && seg.length >= 2; if (line.show) line.positions = seg;
+      (line.material.uniforms as { color: C.Color }).color = tint.withAlpha(TRAIL_ALPHA[k]);
+    });
+    // Spinning propellers (alternate directions on a quad); a readable speed rather than a strobing one.
+    if (c.props.length) {
+      const dt = Math.min(0.1, (now - c.spinAt) / 1000); c.spinAt = now; c.spin += dt * (airborne ? 11 : 0);
+      const axis = propellers(s.aircraft).axis;
+      for (const p of c.props) {
+        const r = axis === 'y' ? C.Matrix3.fromRotationY(c.spin * p.sign) : C.Matrix3.fromRotationZ(c.spin * p.sign);
+        p.node.matrix = C.Matrix4.multiply(p.node.originalMatrix, C.Matrix4.fromRotationTranslation(r, C.Cartesian3.ZERO), new C.Matrix4());
+      }
+    }
     if (c.model) {
       const hpr = new C.HeadingPitchRoll((s.headingDeg - 90) * DEG, s.pitchDeg * DEG, s.rollDeg * DEG);
       C.Transforms.headingPitchRollToFixedFrame(pos, hpr, C.Ellipsoid.WGS84, undefined, c.model.modelMatrix);
@@ -306,7 +396,7 @@ export class DroneLayer {
     const o = this.sightOverride?.id === s.id ? [this.sightOverride.lon, this.sightOverride.lat] as [number, number] : this.store.sightPoint(s);
     c.sight.show = selected && Boolean(o);
     if (selected && o) {
-      const h = g.getHeight(C.Cartographic.fromDegrees(o[0], o[1])) ?? base;
+      const h = this.groundAt(o[0], o[1], g, ex) ?? base;
       c.sight.positions = [pos, C.Cartesian3.fromDegrees(o[0], o[1], h)];
     }
   }
@@ -320,6 +410,8 @@ export class DroneLayer {
       c.loading = false;
       if (this.v.isDestroyed() || c.aircraft !== aircraft || !this.crafts.has(s.id)) { m.destroy(); return; }
       this.v.scene.primitives.add(m); c.model = m; this.v.scene.requestRender();
+      const spin = () => { const { names } = propellers(aircraft); c.props = names.map((n, i) => ({ node: m.getNode(n), sign: i === 1 || i === 2 ? -1 : 1 })).filter(p => p.node); };
+      if (m.ready) spin(); else m.readyEvent.addEventListener(spin);
     }).catch(() => { c.loading = false; });
   }
 }

@@ -13,7 +13,9 @@ export default defineConfig({
   // No secret is eligible for client-side environment substitution.
   envPrefix: 'TERRA_PUBLIC_',
 
-  server: { port: 5173, strictPort: true, host: '127.0.0.1', fs: { strict: true, deny: ['**/.env', '**/.env.*', '**/.git/**', '**/.data/**', '**/.venv/**', '**/backend/**', '**/scripts/**', '**/tests/**', '**/*.pem', '**/*.key'] }, proxy: { '/api': `http://127.0.0.1:${process.env.TERRA_API_PORT || 8000}` } },
+  // The API, Temporal and the tile cache write into .data constantly; without ignoring it (and the other non-web
+  // trees) the watcher treated every write as a change and reloaded the page every few seconds.
+  server: { port: 5173, strictPort: true, host: '127.0.0.1', watch: { ignored: ['**/.data/**', '**/.venv/**', '**/backend/**', '**/scripts/**', '**/tests/**', '**/dist/**', '**/docs/**', '**/*.db', '**/*.db-*', '**/*.log'] }, fs: { strict: true, deny: ['**/.env', '**/.env.*', '**/.git/**', '**/.data/**', '**/.venv/**', '**/backend/**', '**/scripts/**', '**/tests/**', '**/*.pem', '**/*.key'] }, proxy: { '/api': `http://127.0.0.1:${process.env.TERRA_API_PORT || 8000}` } },
   // Two pages: index.html (landing) and app.html (the satellite map).
   build: { chunkSizeWarningLimit: 900, rollupOptions: { input: { index: page('index.html'), app: page('app.html') } } },
 });
