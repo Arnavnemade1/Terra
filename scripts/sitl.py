@@ -37,9 +37,11 @@ BIN = SRC / "build" / "sitl" / "bin"
 RUN = HOME / "run"
 JOBS = int(os.getenv("TERRA_SITL_JOBS", "4"))  # four compiler jobs; the memory guard below is the hard limit
 MIN_FREE_MB = 1536
-# Physics steps per second. ArduPilot's default 1200 Hz costs about 16 % of a core per vehicle; 400 Hz matches the
-# copter's 400 Hz main loop (and is far above the plane's 50 Hz) and costs roughly a third of that.
+# Physics steps per second (ArduPilot's default is 1200). ArduCopter will not arm unless its gyro rate is at least 1.8x
+# its main loop, so the simulated copters run a 200 Hz loop (plenty for a simulated airframe) on 400 Hz physics, and the
+# plane (50 Hz loop) the same physics: together much less CPU than the defaults.
 SIM_RATE_HZ = int(os.getenv("TERRA_SITL_RATE", "400"))
+FOLLOW_KM = 2.0  # a launch site moved further than this is a new deployment: the vehicles are relaunched there
 
 # The fleet: one fixed-wing mapper and four multirotors, as in the virtual fleet.
 FLEET = [
@@ -60,6 +62,7 @@ RTL_SPEED 1200
 AUTO_OPTIONS 3
 ARMING_CHECK 0
 FENCE_ENABLE 0
+SCHED_LOOP_RATE 200
 BATT_CAPACITY 12000
 SIM_BATT_CAP_AH 12
 """
@@ -228,9 +231,9 @@ def _halt(procs: list[subprocess.Popen]) -> None:
 
 
 def supervise(procs: list[subprocess.Popen], token: str, site: tuple[float, float, float], start, follow: bool) -> None:
-    """Keep the vehicles and bridges running. With `follow`, when the workspace moves the monitoring area more than
-    40 km (beyond where the coordinator tasks aircraft), the vehicles are relaunched at the new launch site, as a
-    ground crew would drive the fleet there."""
+    """Keep the vehicles and bridges running. With `follow`, when the workspace deploys the fleet somewhere else (the
+    launch site moves more than 2 km), the vehicles are relaunched at the new launch site, as a ground crew would
+    drive the fleet there."""
     def stop(*_):
         _halt(procs); sys.exit(0)
     signal.signal(signal.SIGINT, stop); signal.signal(signal.SIGTERM, stop)
@@ -244,7 +247,7 @@ def supervise(procs: list[subprocess.Popen], token: str, site: tuple[float, floa
                 area = terra("/api/fleet/area", token).get("area")
             except Exception:
                 area = None
-            if area and _km(site, tuple(area["launch"])) > 40:
+            if area and _km(site, tuple(area["launch"])) > FOLLOW_KM:
                 print(f"The monitoring area moved to {area['name']} ({_km(site, tuple(area['launch'])):.0f} km away); relaunching the vehicles there.", flush=True)
                 _halt(procs); procs.clear()
                 site = launch_site(token, wait=True); start(site)

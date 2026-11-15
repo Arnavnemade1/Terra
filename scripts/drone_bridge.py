@@ -244,7 +244,7 @@ def run_virtual(terra: Terra, count: int, launch: tuple[float, float] | None, ra
                 terra.call("POST", "/api/fleet/register", {"id": v.id, "name": v.name, "origin": "virtual", "aircraft": v.aircraft, "capabilities": v.caps}); continue
             v.control = reply.get("control")
             new_area = reply.get("area")
-            if new_area and distance(*new_area["launch"], *v.launch) > 30_000:
+            if new_area and distance(*new_area["launch"], *v.launch) > 2_000:  # deployed elsewhere: the crew takes the fleet there
                 v.relocate(tuple(new_area["launch"])); print(f"  {v.id}: moved to the new area", flush=True); continue
             task = reply.get("task")
             if task and (v.task or {}).get("id") != task["id"]:
@@ -416,6 +416,8 @@ class Autopilot:
                 st["battery"] = float(msg.battery_remaining)
             elif kind == "TERRAIN_REPORT" and msg.current_height > 0:
                 st["agl"] = float(msg.current_height)
+            elif kind == "STATUSTEXT" and msg.text.startswith(("PreArm", "Arm")):
+                st["arm_reason"] = msg.text.strip()  # the autopilot's own words, passed on when it will not arm
             elif kind == "EXTENDED_SYS_STATE":
                 st["on_ground"] = msg.landed_state == self.m.MAV_LANDED_STATE_ON_GROUND
             elif kind == "HEARTBEAT" and msg.get_srcComponent() == 1:
@@ -510,13 +512,15 @@ class Autopilot:
             self.set_mode("AUTO"); self.command(224, 1)  # MAV_CMD_DO_SET_MISSION_CURRENT: start from the first item
         elif self.allow_arming:
             self.set_mode("AUTO")
-            armed = False
+            armed = False; self.state.pop("arm_reason", None)
             for _ in range(5):  # pre-arm checks can take a few seconds to clear
                 if self.command(self.m.MAV_CMD_COMPONENT_ARM_DISARM, 1):
                     armed = True; break
                 self.read(2)
             if not armed:
-                self.ack("rejected", "vehicle: the autopilot would not arm"); return
+                why = self.state.get("arm_reason")
+                print(f"{self.spec['id']}: will not arm{f' ({why})' if why else ''}", flush=True)
+                self.ack("rejected", f"vehicle: the autopilot would not arm{f' ({why})' if why else ''}"); return
             if self.spec["aircraft"] != "fixed-wing":
                 self.command(self.m.MAV_CMD_MISSION_START, 0, 0)
         else:
