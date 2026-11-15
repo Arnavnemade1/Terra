@@ -31,3 +31,14 @@
 .ops-agents li time { color: var(--fg-3); font-size: 11px; white-space: nowrap; }
 .ops-agents li small { grid-column: 2 / 4; color: var(--fg-3); font-size: 10.5px; }
 @media (max-width: 400px) { .ops-commands { grid-template-columns: 1fr 1fr; } .ops-agents li { grid-template-columns: 56px minmax(0, 1fr) auto; } }
+.deploy-card { position: absolute; z-index: 7; left: 50%; bottom: calc(var(--chrome-b, 0px) + 64px); transform: translateX(-50%); width: min(420px, calc(100% - 24px)); display: grid; gap: 9px;
+  padding: 12px 14px; border-radius: var(--r); background: rgba(17, 18, 15, 0.96); border: 1px solid var(--rule-2); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); }
+.deploy-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.deploy-card header b { font-size: 14px; font-weight: 650; } .deploy-card header span { font: 500 12px var(--mono); color: var(--accent); }
+.deploy-card label { display: grid; gap: 3px; font-size: 11.5px; color: var(--fg-3); }
+.deploy-card input { height: 32px; padding: 0 9px; border-radius: var(--r-sm); background: var(--bg); border: 1px solid var(--rule-2); color: var(--fg); font: 500 13px var(--sans); }
+.deploy-kinds { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 2px; border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--rule-2); }
+.deploy-kinds button { min-height: 30px; border-radius: 4px; color: var(--fg-2); font: 600 12px var(--sans); }
+.deploy-kinds button.on { background: var(--accent); color: var(--accent-ink); }
+.deploy-card p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--fg-2); } .deploy-card p.warn { color: var(--warn); }
+.deploy-actions { display: flex; gap: 8px; } .deploy-actions .primary { flex: 1; min-height: 36px; } .deploy-actions .secondary { min-height: 36px; }

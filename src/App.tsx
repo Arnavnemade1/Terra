@@ -17,7 +17,7 @@ import { crossTrack, predictPasses, swathPass, SWATH, trackSeries, useFleet, typ
 import SensorView from './SensorView';
 import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
-import FleetOps from './FleetOps';
+import FleetOps, { DeployCard } from './FleetOps';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
 
@@ -133,7 +133,6 @@ export default function App() {
   const [feed, setFeed] = useState<{ id: string; expanded: boolean } | null>(null);
   // The drone camera is created once the Drones workspace is first opened and then kept (warm, out of sight) so
   // opening a camera is immediate; it follows the opened aircraft, else the selected one.
-  const [cameraWarm, setCameraWarm] = useState(false);
   const [firstDrone, setFirstDrone] = useState<string | null>(null);
   useEffect(() => droneStore.subscribe(() => setFirstDrone(droneStore.ids()[0] ?? null)), []);
   const [dockOpen, setDockOpen] = useState<boolean>(() => readJSON('terra.dock', false));
@@ -250,7 +249,7 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
-      if (e.key === 'Escape') { setMenu(null); setDetail(false); setPicking(false); setDrawingProfile(false); setSelection(null); setDeploying(false); }
+      if (e.key === 'Escape') { setMenu(null); setDetail(false); setPicking(false); setDrawingProfile(false); setSelection(null); setDeploy(null); stopFollowing(); }
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === '/') { e.preventDefault(); setMenu('area'); }
       if (e.key === ' ') { e.preventDefault(); setPlaying(p => !p); }
@@ -383,17 +382,28 @@ export default function App() {
   }, [region, patches, places, fleetInvestigation]);
   const onFleetFocus = useCallback((lon: number, lat: number) => globe.current?.flyToPoint(lon, lat, 3500), []);
   // Deploy the fleet anywhere: the next click on the map is the launch site, with a square area around it.
-  const [deploying, setDeploying] = useState(false);
-  const [deployKm, setDeployKm] = useState(5);
-  const onDeployPoint = useCallback((lon: number, lat: number) => {
-    setDeploying(false);
-    void droneStore.deploy(lon, lat, deployKm).then(bbox => globe.current?.flyTo(bbox)).catch(() => setError('The fleet could not be deployed there.'));
-  }, [deployKm]);
+  // Which aircraft the map is flying with (the chase camera), refreshed with the fleet.
+  const [following, setFollowing] = useState<string | null>(null);
+  useEffect(() => droneStore.subscribe(() => setFollowing(globe.current?.following() ?? null)), []);
+  const followDrone = useCallback((id: string) => { globe.current?.followDrone(id); setFollowing(id); }, []);
+  const stopFollowing = useCallback(() => { globe.current?.stopFollowing(); setFollowing(null); }, []);
+  // Deploying the fleet: draw the perimeter on the map, place the launch pad, confirm.
+  const [deploy, setDeploy] = useState<{ stage: 'draw' | 'confirm'; area: Bounds | null; pad: [number, number] | null } | null>(null);
+  const onDeployArea = useCallback((b: Bounds) => { stopFollowing(); setDeploy({ stage: 'confirm', area: b, pad: [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2] }); }, [stopFollowing]);
+  const onDeployPad = useCallback((lon: number, lat: number) => setDeploy(d => {
+    if (!d?.area) return d; const [w, s2, e, n] = d.area; const mx = (e - w) * 0.25, my = (n - s2) * 0.25;
+    return lon >= w - mx && lon <= e + mx && lat >= s2 - my && lat <= n + my ? { ...d, pad: [lon, lat] } : d;
+  }), []);
+  const launchDeployment = useCallback(async (name: string, profile: FleetProfile) => {
+    if (!deploy?.area) return; const area = deploy.area;
+    try { await droneStore.publishArea(name, area, [], [], profile, null, deploy.pad ?? undefined); setDeploy(null); globe.current?.flyTo(area); }
+    catch { setError('The fleet could not be deployed there.'); }
+  }, [deploy]);
   const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
   useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
-  const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); }, []);
-  useEffect(() => { if (mode === 'drones' || feed) setCameraWarm(true); }, [mode, feed]);
-  const cameraId = cameraWarm ? (feed?.id ?? selectedDrone ?? firstDrone) : null;
+  const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); globe.current?.followDrone(id); }, []);
+  // Release the second WebGL scene and its decoded imagery as soon as the camera closes.
+  const cameraId = feed?.id ?? null;
   const onDroneSight = useCallback((p: { id: string; lon: number; lat: number } | null) => globe.current?.droneSight(p), []);
   const jobId = job?.id;
   const sampleChange = useCallback(async (lon: number, lat: number) => {
@@ -663,7 +673,7 @@ export default function App() {
       <Globe ref={globe} region={region} observations={observations} selected={activeObservation} footprints={footprints && !job} terrain={ls.terrain.on} lighting={lighting}
         labels={ls.labels.on} photoreal={mapStyle === 'photoreal'} onPhotorealError={onPhotorealError} quality={quality} picking={picking} overlays={overlays} imageryAlpha={ls.imagery.on ? ls.imagery.value : 0} labelAlpha={ls.labels.value}
         exaggeration={ls.terrain.on ? Math.max(0.01, ls.terrain.value) : 1} mode={display} layers={liveLayers} marks={marks} flat={flat} profiling={drawingProfile} profileVertices={profileVertices}
-        deploying={deploying} onDeployPoint={onDeployPoint}
+        deploy={deploy} onDeployArea={onDeployArea} onDeployPad={onDeployPad}
         satTime={satTime} satFocus={mode === 'satellites' ? selectedSat : null} onPathPoint={onPathPoint}
         relief={mapStyle === 'relief'} reliefOptions={reliefOptions} terrainContext={terrainContext} onHover={onHover}
         drones={ls.drones.on || mode === 'drones'} selectedDrone={selectedDrone} onSelectDrone={onSelectDrone}
@@ -681,7 +691,11 @@ export default function App() {
         change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={Boolean(feed?.expanded)}
         onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
       {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}
-      {deploying && <div className="map-hint">Click anywhere on Earth to launch the fleet there ({deployKm} km around it).<button onClick={() => setDeploying(false)}>Cancel</button></div>}
+      {following && !deploy && <div className="follow-chip" role="status"><i aria-hidden="true" />Flying with <b>{droneStore.state(following)?.callsign ?? following}</b>
+        <span>drag to orbit · scroll to zoom</span><button onClick={stopFollowing}>Stop</button></div>}
+      {deploy?.stage === 'draw' && <div className="map-hint">Drag on the map to draw the fleet's perimeter (or click two corners). Anywhere on Earth.<button onClick={() => setDeploy(null)}>Cancel</button></div>}
+      {deploy?.stage === 'confirm' && deploy.area && <DeployCard area={deploy.area} pad={deploy.pad} profile={droneStore.info.area?.profile ?? 'change'}
+        onLaunch={launchDeployment} onRedraw={() => setDeploy({ stage: 'draw', area: null, pad: null })} onCancel={() => setDeploy(null)} />}
       {(picking || drawingProfile) && <div className="map-hint">{picking ? 'Click two opposite corners of the new area. Right-click anywhere marks a 30 km area.' : 'Click the start and end of the profile path.'}<button onClick={() => { setPicking(false); setDrawingProfile(false); }}>Cancel</button></div>}
       {(ls.change.on && delta || ls.radar.on && radarNow) && mode === 'investigation' && <div className="map-legend">
         <b>{ls.change.on && delta ? 'Backscatter change' : `Radar · ${prettyDate(String(radarNow?.date))}`}</b>
@@ -788,8 +802,8 @@ export default function App() {
         onFly={flyToSat} onSensor={openSensor} />}
       {mode === 'drones' && <DronesPanel store={droneStore} selected={selectedDrone} patches={patches} places={places} regionName={region.name} regionBox={region.bbox} onMonitorHere={monitorHere}
         onProfile={onFleetProfile} onFocus={onFleetFocus}
-        ops={<FleetOps store={droneStore} deploying={deploying} onDeploy={() => { setDeploying(d => !d); setPicking(false); setDrawingProfile(false); }} radiusKm={deployKm} onRadius={setDeployKm} />}
-        onSelect={id => { setSelectedDrone(id); globe.current?.followDrone(id); }}
+        ops={<FleetOps store={droneStore} deploying={Boolean(deploy)} onDeploy={() => { setDeploy(d => d ? null : { stage: 'draw', area: null, pad: null }); setPicking(false); setDrawingProfile(false); stopFollowing(); }} />}
+        onSelect={id => { setSelectedDrone(id); followDrone(id); }}
         onCamera={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: false }); }}
         onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }} />}
     </aside>
