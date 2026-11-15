@@ -78,17 +78,20 @@ test('Cesium terrain metadata accepts its trailing slash without leaking the rew
   });
   await handler(request('GET', '/api/proxy?f=pjson&__terra_route=connector%2Fterrain%2F'), new ResponseSink());
 });
-test('the server adds a simulation capability only for fleet requests and ignores caller credentials', async t => {
+test('the server adds a simulation capability only for fleet and watch requests and ignores caller credentials', async t => {
   const previous = process.env.TERRA_WORKSPACE_TOKEN;
   process.env.TERRA_WORKSPACE_TOKEN = 'test-simulation-canary';
   t.after(() => { if (previous === undefined) delete process.env.TERRA_WORKSPACE_TOKEN; else process.env.TERRA_WORKSPACE_TOKEN = previous; });
   configure(t, async (url, options) => {
-    assert.equal(options.headers.get('x-terra-workspace-token'), url.pathname.startsWith('/api/fleet/') ? 'test-simulation-canary' : null);
+    assert.equal(options.headers.get('x-terra-workspace-token'), /^\/api\/(?:fleet|watches)(?:\/|$)/.test(url.pathname) ? 'test-simulation-canary' : null);
     return new Response('{}');
   });
   const fleet = request('POST', '/api/fleet/command', { action: 'resume' });
   fleet.headers['x-terra-workspace-token'] = 'untrusted-caller';
   await handler(fleet, new ResponseSink());
+  await handler(request('GET', '/api/watches'), new ResponseSink());
+  await handler(request('POST', '/api/watches/watch-test/check'), new ResponseSink());
+  await handler(request('GET', '/api/watches-public'), new ResponseSink());
   await handler(request(), new ResponseSink());
 });
 test('invalid configuration and backend failures do not disclose private error content', async t => {

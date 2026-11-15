@@ -510,3 +510,20 @@ def test_agents_judge_what_they_see_against_the_patch(client, monkeypatch, tmp_p
     assert one["observations"] == 1 and one["counts"]["supports"] == 1 and one["overall"] == "supported" and one["aircraft"] == ["d0"]
     two = next(p for p in ev["patches"] if p["target_id"] == "patch-2")
     assert two["overall"] == "not yet observed" and ev["totals"]["supports"] == 1
+
+
+def test_hosted_area_watches_share_the_simulation_capability_and_fail_closed(client, monkeypatch):
+    monkeypatch.setattr("terra.fleet.api.LOCAL", {"127.0.0.1"})
+    monkeypatch.setenv("TERRA_FLEET", "virtual")
+    monkeypatch.setenv("TERRA_WORKSPACE_TOKEN", "test-watch-capability")
+    headers = {"x-terra-workspace-token": "test-watch-capability"}
+    assert client.get("/api/watches", headers=headers).status_code == 200
+    assert client.post("/api/watches", json={}, headers=headers).status_code == 422
+    for action in ("check", "stop"):
+        assert client.post(f"/api/watches/watch-missing/{action}", headers=headers).status_code == 404
+    assert client.post("/api/watches/watch-missing/decide", json={"proposal":"missing","action":"dismiss"}, headers=headers).status_code == 409
+    assert client.get("/api/watches", headers={"x-terra-workspace-token":"wrong"}).status_code == 403
+    assert client.get("/api/watches", headers={**headers,"origin":"https://foreign.example"}).status_code == 403
+    db = FleetDB(api.get_settings().database)
+    db.register({"id":"real-aircraft","name":"Real","origin":"real","aircraft":"quad","capabilities":{}})
+    assert client.get("/api/watches", headers=headers).status_code == 403

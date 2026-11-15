@@ -33,7 +33,7 @@ export default async function handler(req, res) {
   upstream.search = incoming.search;
   const headers = new Headers();
   for (const name of requestHeaders) if (req.headers[name]) headers.set(name, req.headers[name]);
-  if ((upstream.pathname === '/api/fleet' || upstream.pathname.startsWith('/api/fleet/')) && process.env.TERRA_WORKSPACE_TOKEN) {
+  if ((/^\/api\/(?:fleet|watches)(?:\/|$)/.test(upstream.pathname)) && process.env.TERRA_WORKSPACE_TOKEN) {
     headers.set('x-terra-workspace-token', process.env.TERRA_WORKSPACE_TOKEN);
   }
   headers.set('x-forwarded-host', req.headers.host || '');

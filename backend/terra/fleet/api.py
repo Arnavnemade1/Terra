@@ -229,6 +229,8 @@ def operator(request: Request, authorization: str | None = Header(default=None))
         allowed = (request.method == "GET" and (path in ("", "/operations") or path.startswith("/evidence/"))) or (
             request.method == "POST" and (path in ("/area", "/command", "/tasks", "/dispatch") or
             re.fullmatch(r"/drones/[A-Za-z0-9_-]{1,32}/(?:control|release)", path)))
+        allowed = allowed or (request.method in ("GET", "POST") and request.url.path == "/api/watches") or (
+            request.method == "POST" and re.fullmatch(r"/api/watches/[A-Za-z0-9-]{1,90}/(?:check|decide|stop)", request.url.path))
         if os.getenv("TERRA_FLEET") != "virtual" or not allowed:
             raise HTTPException(403, "This workspace can operate the simulated fleet only. Aircraft connections require operator access.")
         if request.headers.get("sec-fetch-site") != "same-origin" or (request.headers.get("origin") and not _workspace_origin(request.headers["origin"], request)):
