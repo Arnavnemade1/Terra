@@ -1,16 +1,11 @@
-import { useRef, useState, useEffect, type ReactNode } from "react";
-import { useInView } from "motion/react";
-import { SlotText } from "@/components/arc/slot-text/slot-text";
+import type { ReactNode } from "react";
 
-/** Rolls from 0 to the value once the cell scrolls into view. */
+/** A figure, rendered as itself: no count-up, so it is never shown as 0 (in previews, print or reduced motion). */
 function Count({ to, decimals = 0, suffix = "" }: { to: number; decimals?: number; suffix?: string }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const seen = useInView(ref, { once: true, margin: "0px 0px -15% 0px" });
-  const [v, setV] = useState(0);
-  useEffect(() => { if (seen) setV(to); }, [seen, to]);
+  const text = to.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals }).replace(/^-/, "\u2212");
   return (
-    <span ref={ref} className="bento-num">
-      <SlotText value={v} format={(n) => n.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals })} />
+    <span className="bento-num">
+      {text}
       {suffix && <span className="bento-unit">{suffix}</span>}
     </span>
   );
@@ -30,8 +25,8 @@ function Cell({ className, number, title, art, children }: { className: string; 
 export function Bento() {
   return (
     <div className="bento">
-      <Cell className="cell-a" number={<Count to={3} suffix=" dB" />} title="The smallest change we call change" art={<img src="/brand/waves-transparent.png" alt="" aria-hidden="true" />}>
-        Terra subtracts the earlier radar image from the later one, in decibels. A pixel counts as changed when it moved by 3 dB or more. The threshold is fixed and descriptive, so you can always see what was measured.
+      <Cell className="cell-a" number={<Count to={0.1} decimals={1} suffix=" %" />} title="Chance that speckle alone is called change" art={<img src="/brand/waves.webp" alt="" aria-hidden="true" />}>
+        Terra subtracts the earlier radar image from the later one, in decibels, and sets the threshold from that scene's own change histogram (Kittler–Illingworth). Where no clear change class exists, it uses the smallest change that radar speckle alone would exceed only 0.1% of the time, and 3 dB only if neither can be computed. The report says which rule it used.
       </Cell>
       <Cell className="cell-b" number={<Count to={6} />} title="Hotspots per analysis">
         The six strongest patches of change, outlined on the map and named in the report.
