@@ -1,0 +1,26 @@
+/* Radar patches, their polarimetric hypotheses and the drones' field verdicts. */
+.verify { display: grid; gap: 10px; margin-top: 14px; padding: 12px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--rule); }
+.verify header b { display: block; font-size: 13.5px; font-weight: 650; }
+.verify header small { display: block; margin-top: 2px; font-size: 11.5px; color: var(--fg-3); line-height: 1.4; }
+.verify ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.verify-row { display: grid; gap: 5px; padding: 9px 10px; border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--rule); border-left: 3px solid var(--rule-2); }
+.verify-row.supported { border-left-color: var(--ok); } .verify-row.contradicted { border-left-color: var(--bad); } .verify-row.mixed { border-left-color: var(--warn); }
+.verify-head { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: start; gap: 9px; text-align: left; }
+.verify-rank { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; font: 600 12px var(--mono); background: var(--surface-3); }
+.verify-rank.increase { color: var(--up); } .verify-rank.decrease { color: var(--down); }
+.verify-mech { min-width: 0; } .verify-mech b { display: block; font-size: 13px; font-weight: 600; text-transform: none; }
+.verify-mech b::first-letter { text-transform: uppercase; }
+.verify-mech small { display: block; margin-top: 1px; font-size: 11.5px; line-height: 1.4; color: var(--fg-3); }
+.verify-conf { font-style: normal; font: 600 10.5px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--surface-3); color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.verify-conf.strong { color: var(--ok); } .verify-conf.moderate { color: var(--warn); }
+.verify-basis { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 0 33px; font: 500 11.5px var(--mono); color: var(--fg-2); }
+.verify-q { margin: 0 0 0 33px; font-size: 12.5px; color: var(--fg); } .verify-q small { color: var(--fg-3); font-size: 11px; }
+.verify-field { display: grid; gap: 2px; margin: 2px 0 0 33px; padding-top: 6px; border-top: 1px solid var(--rule); }
+.verify-overall { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--fg-3); }
+.verify-overall.supported { color: var(--ok); } .verify-overall.contradicted { color: var(--bad); } .verify-overall.mixed { color: var(--warn); }
+.verify-field small { font-size: 11px; color: var(--fg-3); }
+.verify-field p { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--fg-2); }
+.verify-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.verify-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; }
+.verify-msg { margin: 0; font-size: 12px; color: var(--fg-2); }
+.verify-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--fg-3); }

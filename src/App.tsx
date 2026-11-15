@@ -18,6 +18,7 @@ import SensorView from './SensorView';
 import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
 import FleetOps, { DeployCard } from './FleetOps';
+import Verification, { type SignedSpot } from './Verification';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
 
@@ -415,7 +416,8 @@ export default function App() {
   const wantThermal = mode === 'drones' || Boolean(feed);
   // The scene covers the fleet's monitoring area (where the cameras are), or the browsed area before one is set.
   const [fleetBox, setFleetBox] = useState<string>('');
-  useEffect(() => droneStore.subscribe(() => setFleetBox(droneStore.info.area?.bbox.join(',') ?? '')), []);
+  const [fleetAreaInvestigation, setFleetAreaInvestigation] = useState<string | null>(null);
+  useEffect(() => droneStore.subscribe(() => { setFleetBox(droneStore.info.area?.bbox.join(',') ?? ''); setFleetAreaInvestigation(droneStore.info.area?.investigation_id ?? null); }), []);
   const thermalBox = fleetBox || region.bbox.join(',');
   useEffect(() => {
     setThermal(null); const b = thermalBox.split(',').map(Number); if (!wantThermal || b.length !== 4 || b[2] - b[0] > 1 || b[3] - b[1] > 1) return; const c = new AbortController();
@@ -774,6 +776,9 @@ export default function App() {
                 onRewritten={(nv: Narrative) => setJob(j => j && j.result ? { ...j, result: { ...j.result, narrative: nv, narrative_status: 'ready', narrative_note: null } as Investigation['result'] } : j)}
                 onSpot={(h: Hotspot) => { setFocusSpot(h.rank); set('hotspots', { on: true }); const [w, s, e, n] = h.bounds; const pad = Math.max(e - w, n - s) * 1.5 + 0.01; globe.current?.flyTo([w - pad, s - pad, e + pad, n + pad]); setProfileVertices([[region.bbox[0], h.centre[0]], [region.bbox[2], h.centre[0]]]); }}
                 onReport={() => setDossier(true)} />}
+              {result && job && hotspots.length > 0 && <Verification jobId={job.id} spots={hotspots as unknown as SignedSpot[]} fleetArea={fleetAreaInvestigation}
+                onSpot={h => { setFocusSpot(h.rank); set('hotspots', { on: true }); const [w, s2, e, n] = h.bounds; const pad = Math.max(e - w, n - s2) * 1.5 + 0.01; globe.current?.flyTo([w - pad, s2 - pad, e + pad, n + pad]); }}
+                onWatch={() => { setMode('drones'); const first = droneStore.states().find(d => d.task?.params && String((d.task as { job_key?: string }).job_key ?? '').startsWith('orbit:patch')) ?? droneStore.states()[0]; if (first) { setSelectedDrone(first.id); followDrone(first.id); } }} />}
             </section>}
           </>}
           {tab === 'evidence' && <section className="evidence">
