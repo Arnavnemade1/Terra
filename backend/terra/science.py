@@ -344,6 +344,19 @@ def _pixel_km2(meta: dict) -> float | None:
     return abs(meta["pixel_spacing"][0] * meta["pixel_spacing"][1]) / 1e6
 
 
+SMOOTH_LOOK_GAIN = 5.4  # a 3x3 average of correlated neighbours: about 9 x 0.6 times the looks of one pixel
+
+
+def _smoothed_change(delta: np.ndarray) -> np.ndarray:
+    """3×3 average of a change image (dB), ignoring invalid samples: the field patches and changed area are read from."""
+    from scipy import ndimage
+    finite = np.isfinite(delta)
+    filled = np.where(finite, delta, 0.0).astype(np.float64)
+    weight = ndimage.uniform_filter(finite.astype(np.float64), 3, mode="constant")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(finite & (weight > 0.5), ndimage.uniform_filter(filled, 3, mode="constant") / weight, np.nan)
+
+
 def _smoothed_db(values: np.ndarray) -> np.ndarray:
     """3×3 average in linear power, ignoring invalid samples; used only to classify and group pixels."""
     from scipy import ndimage
@@ -613,13 +626,20 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
         summary = _summary(delta, inside_masks[0] & inside_masks[1], metadata[0], (-10.0, 10.0, 0.5))
         pol_rows, pol_rasters = _polarization_change(paths, metadata, bbox, threshold)
         selected = next((r for r in pol_rows if r["polarization"] == metadata[0]["selected_polarization"]), None)
+        # Changed area and patches are read from the 3×3-averaged change, whose speckle is set by the effective looks.
+        smooth = _smoothed_change(delta); counted = common & np.isfinite(smooth)
         if automatic:
-            auto = change_thresholds(delta, (selected or {}).get("expected_speckle_sd_db"))
+            looks = (selected or {}).get("enl_before"), (selected or {}).get("enl_after")
+            sd = (selected or {}).get("expected_speckle_sd_db")
+            auto = change_thresholds(smooth, sd / math.sqrt(SMOOTH_LOOK_GAIN) if sd else None,
+                                     (looks[0] * SMOOTH_LOOK_GAIN, looks[1] * SMOOTH_LOOK_GAIN) if None not in looks else None)
+            auto["field"] = "3×3-averaged change (effective looks = ENL × 5.4)"
             limits = {"increase": auto["increase_db"], "decrease": auto["decrease_db"]}
         else:
             auto = None; limits = {"increase": threshold, "decrease": threshold}
-        increasing = int(np.count_nonzero(delta[common] >= limits["increase"]))
-        decreasing = int(np.count_nonzero(delta[common] <= -limits["decrease"]))
+        field = smooth if automatic else delta; counted = counted if automatic else common  # each threshold applies to the field it was derived for
+        increasing = int(np.count_nonzero(field[counted] >= limits["increase"]))
+        decreasing = int(np.count_nonzero(field[counted] <= -limits["decrease"]))
         # Low-return (water-like) area on both dates, counted only where both dates are valid.
         km2 = _pixel_km2(metadata[0])
         dark = [np.nan_to_num(_smoothed_db(a), nan=0.0) < LOW_RETURN_DB for a in arrays]
@@ -634,7 +654,7 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
         scored = [r for r in pol_rows if r["mean_abs_standardized_change"] is not None]
         measurements.update({"kind": "backscatter_change", "change": {
             **summary, "threshold_db": min(limits.values()), "thresholds_db": limits, "threshold_selection": auto or {"method": "fixed", "increase_db": threshold, "decrease_db": threshold},
-            "increasing_pixels": increasing, "decreasing_pixels": decreasing,
+            "increasing_pixels": increasing, "decreasing_pixels": decreasing, "counted_on": "3×3-averaged change" if automatic else "single pixels",
             "threshold_exceedance_pct": float((increasing + decreasing) / common.sum() * 100),
             "increasing_km2": float(increasing * km2) if km2 else None, "decreasing_km2": float(decreasing * km2) if km2 else None,
             "threshold_interpretation": "Descriptive magnitude threshold; not a calibrated significance test or event classification.",

@@ -11,12 +11,13 @@ def test_threshold_is_automatic_only_where_a_change_class_exists():
     speckle = rng.normal(0, 1.2, 200_000)
     both = np.concatenate([rng.normal(0.2, 1.0, 150_000), rng.normal(-5, 1.2, 5_000), rng.normal(4.5, 1.0, 3_000)])
     plain = change_thresholds(speckle, 0.9)
-    assert plain["increase_source"] == plain["decrease_source"] == "fallback" and plain["increase_db"] == 3.0
+    assert plain["increase_source"] == plain["decrease_source"] == "cfar"  # no change class: the 0.1 % false-alarm level of the noise
+    assert plain["increase_db"] == pytest.approx(1.2 * 3.09, abs=0.25)
     two = change_thresholds(both, 0.7)
     assert two["increase_source"] == two["decrease_source"] == "automatic"
     assert 2.5 < two["increase_db"] < 4.5 and 2.5 < two["decrease_db"] < 5  # between the unchanged and changed modes
     one = change_thresholds(np.concatenate([speckle, rng.normal(6, 1.0, 8_000)]), 0.9)
-    assert one["increase_source"] == "automatic" and one["decrease_source"] == "fallback"
+    assert one["increase_source"] == "automatic" and one["decrease_source"] == "cfar"
 
 
 def test_threshold_never_falls_below_twice_the_speckle():
@@ -65,3 +66,16 @@ def test_judgements_use_only_measured_values():
     assert judge("structure", {"cover": "Built-up"}, ctx)["verdict"] == "supports"
     nothing = judge("roughening", {}, ctx)
     assert nothing["verdict"] == "inconclusive" and nothing["reasons"]
+
+
+def test_unchanged_ground_is_modelled_as_speckle_when_the_looks_are_known():
+    from terra.signatures import speckle_tail
+    L = 10.0; db = lambda n: 10 * np.log10(rng.gamma(L, 1 / L, n))  # noqa: E731
+    speckle = db(300_000) - db(300_000)
+    t = change_thresholds(speckle, None, (L, L))
+    assert t["increase_source"] == "cfar" and t["unchanged_model"].startswith("speckle")
+    assert abs(float((speckle >= t["increase_db"]).mean()) - 1e-3) < 6e-4  # the false-alarm rate it promises
+    up, down = speckle_tail(3.0, (L, L))
+    assert 0 < up < 0.2 and abs(up - down) < 0.02  # symmetric for equal looks
+    change = np.concatenate([speckle, db(9_000) + 6 - db(9_000)])
+    assert change_thresholds(change, None, (L, L))["increase_source"] == "automatic"

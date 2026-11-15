@@ -60,25 +60,56 @@ def kittler_illingworth(values: np.ndarray, *, lo: float = 0.5, hi: float = 12.0
     return max(floor_db, best_t)
 
 
-def change_thresholds(delta: np.ndarray, speckle_sd_db: float | None = None) -> dict:
-    """Thresholds for increases and decreases, each automatic when the data support it."""
-    smooth = delta[np.isfinite(delta)].astype(np.float64)
-    out = {"method": "Kittler-Illingworth minimum-error thresholding per direction, accepted only where the changed side holds "
-                     "at least 5x the pixels the unchanged distribution (median, 1.4826 x MAD) predicts; otherwise 3 dB", "fallback_db": FALLBACK_DB}
+def speckle_tail(t_db: float, enl: tuple[float, float]) -> tuple[float, float]:
+    """Probability that speckle alone changes a pixel by more than +t dB, and by more than -t dB.
+
+    Unchanged intensities with L1 and L2 looks: the later/earlier ratio follows an F(2·L2, 2·L1) distribution."""
+    from scipy.stats import f
+    l1, l2 = enl; ratio = 10 ** (t_db / 10)
+    return float(f.sf(ratio, 2 * l2, 2 * l1)), float(f.cdf(1 / ratio, 2 * l2, 2 * l1))
+
+
+def change_thresholds(delta: np.ndarray, speckle_sd_db: float | None = None, enl: tuple[float, float] | None = None, pfa: float = 1e-3) -> dict:
+    """Thresholds for increases and decreases.
+
+    1. Kittler-Illingworth where the histogram has a real change class: at its threshold the changed side holds at
+       least 5x the pixels that unchanged ground would put there. Unchanged ground is modelled as speckle (the
+       F distribution of the intensity ratio for the measured ENL), or by a Gaussian (median, 1.4826 x MAD) when no
+       ENL is known.
+    2. Otherwise CFAR: the smallest change that speckle alone exceeds with probability `pfa` (0.1 %).
+    3. Otherwise 3 dB."""
+    v = delta[np.isfinite(delta)].astype(np.float64)
+    out = {"method": "Kittler-Illingworth minimum-error threshold where a change class exists (at least 5x the pixels speckle predicts); "
+                     f"else the CFAR threshold at a {pfa:.1%} speckle false-alarm rate; else 3 dB", "fallback_db": FALLBACK_DB, "pfa": pfa,
+           "unchanged_model": "speckle F distribution (measured ENL)" if enl else "Gaussian (median, MAD)"}
+    centre = float(np.median(v)) if v.size else 0.0
+    sigma = float(1.4826 * np.median(np.abs(v - centre))) if v.size else 0.0
+    if enl:
+        out["enl"] = [round(x, 2) for x in enl]
     floor = max(1.5, 2 * speckle_sd_db) if speckle_sd_db else 1.5
-    centre = float(np.median(smooth)) if smooth.size else 0.0
-    sigma = float(1.4826 * np.median(np.abs(smooth - centre))) if smooth.size else 0.0
-    for name, values in (("increase", smooth), ("decrease", -smooth)):
+
+    def expected(t: float, side: int) -> float:
+        if enl:
+            up, down = speckle_tail(t, enl); return up if side > 0 else down
+        if sigma <= 0:
+            return 1.0
+        return 0.5 * math.erfc((t - side * centre) / (sigma * math.sqrt(2)))
+
+    for name, side in (("increase", 1), ("decrease", -1)):
+        values = side * v
         t = kittler_illingworth(values, floor_db=floor)
-        accepted = False
-        if t is not None and sigma > 0:
-            offset = t - (centre if name == "increase" else -centre)
-            expected = 0.5 * math.erfc(offset / (sigma * math.sqrt(2)))
-            observed = float((values >= t).mean())
-            accepted = observed >= 0.0005 and observed >= 5 * expected
-            out[f"{name}_tail_excess"] = round(observed / expected, 1) if expected > 0 else None
-        out[f"{name}_db"] = round(t, 2) if accepted else FALLBACK_DB
-        out[f"{name}_source"] = "automatic" if accepted else "fallback"
+        source, chosen = "fallback", FALLBACK_DB
+        if t is not None:
+            e = expected(t, side); observed = float((values >= t).mean())
+            out[f"{name}_tail_excess"] = round(observed / e, 1) if e > 0 else None
+            if observed >= 0.0005 and observed >= 5 * e:
+                source, chosen = "automatic", t
+        if source == "fallback" and (enl or sigma > 0):
+            cfar = next((x for x in np.arange(0.5, 15.01, 0.05) if expected(float(x), side) <= pfa), None)
+            if cfar is not None:
+                source, chosen = "cfar", max(floor, float(cfar))
+        out[f"{name}_db"] = round(chosen, 2)
+        out[f"{name}_source"] = source
     return out
 
 
