@@ -360,7 +360,12 @@ export default function App() {
   const places: Place[] = useMemo(() => (terrain?.ctx.features || []).map(f => ({ name: f.name, lon: f.lon, lat: f.lat, kind: f.kind, elevation_m: f.elevation_m })), [terrain]);
   // The fleet lives in the server's central database; durable agents coordinate it. Publish this area and its targets
   // (changed patches first, then summits) so the coordinator can plan jobs, and follow the fleet once a second.
-  useEffect(() => { droneStore.start(); return () => droneStore.stop(); }, []);
+  // A hidden tab does not poll the fleet; the server then sees no viewer and pauses the virtual aircraft.
+  useEffect(() => {
+    const sync = () => { if (document.hidden) droneStore.stop(); else droneStore.start(); };
+    sync(); document.addEventListener('visibilitychange', sync);
+    return () => { document.removeEventListener('visibilitychange', sync); droneStore.stop(); };
+  }, []);
   // Browsing never moves the fleet. The monitoring area changes only when someone asks (Drones panel); when the
   // workspace shows the fleet's own area, new results (patches, summits) refresh its targets automatically.
   const [fleetReady, setFleetReady] = useState(false);
