@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type HtmlTagDescriptor, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import cesium from 'vite-plugin-cesium';
 import tailwindcss from '@tailwindcss/vite';
@@ -7,8 +7,21 @@ import { fileURLToPath } from 'node:url';
 const src = fileURLToPath(new URL('./src', import.meta.url));
 const page = (name: string) => fileURLToPath(new URL(name, import.meta.url));
 
+// vite-plugin-cesium adds Cesium.js (6.1 MB, 1.8 MB gzipped, a classic render-blocking script) and widgets.css to
+// every HTML page. Only the map (app.html) uses Cesium; the landing's globe is three.js. On app.html the script is
+// deferred: deferred scripts run in document order and the plugin prepends it to <head>, so it still runs before
+// the app's module script (which reads the global Cesium), while the page can paint during the download.
+const cesiumPlugin = cesium({ devMinifyCesium: true }) as Plugin & { transformIndexHtml: () => HtmlTagDescriptor[] };
+const cesiumForMap: Plugin = {
+  ...cesiumPlugin,
+  transformIndexHtml(_html, ctx) {
+    if (!ctx.filename.endsWith('app.html')) return [];
+    return cesiumPlugin.transformIndexHtml().map(tag => tag.tag === 'script' ? { ...tag, attrs: { ...tag.attrs, defer: true } } : tag);
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), cesium({ devMinifyCesium: true }), tailwindcss()],
+  plugins: [react(), cesiumForMap, tailwindcss()],
   resolve: { alias: { '@': src } },
   // No secret is eligible for client-side environment substitution.
   envPrefix: 'TERRA_PUBLIC_',
