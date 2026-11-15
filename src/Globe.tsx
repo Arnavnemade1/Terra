@@ -335,17 +335,25 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       }, C.ScreenSpaceEventType.MOUSE_MOVE);
       v.canvas.addEventListener('mouseleave', () => latest.current.onHover?.(null));
 
+      const lastView: { key: string; centre: C.Cartographic | undefined; mpp: number | null } = { key: '', centre: undefined, mpp: null };
       telemetryTimer = setInterval(() => {
         // Heading and pitch are undefined while the scene morphs between 2D and 3D.
         if (disposed || !v || scene.mode === C.SceneMode.MORPHING) return;
         const now = performance.now(); const pos = camera.positionCartographic;
         const w = v.canvas.clientWidth, h = v.canvas.clientHeight;
-        const center = pickGround(new C.Cartesian2(w / 2, h / 2));
-        let mpp: number | null = null;
-        if (center) {
-          const a = pickGround(new C.Cartesian2(w / 2 - 50, h / 2)), b = pickGround(new C.Cartesian2(w / 2 + 50, h / 2));
-          if (a && b) { mpp = new C.EllipsoidGeodesic(a, b).surfaceDistance / 100; metresPerPixel.current = mpp; }
+        // The centre point and scale only change when the camera does: picking (a render pass over the photoreal tiles)
+        // is skipped while it is still.
+        const p = camera.positionWC, d = camera.directionWC;
+        const viewKey = `${p.x.toFixed(1)},${p.y.toFixed(1)},${p.z.toFixed(1)},${d.x.toFixed(4)},${d.y.toFixed(4)},${d.z.toFixed(4)},${w}x${h},${Math.floor(now / 3000)}`;  // and every 3 s, as tiles refine
+        if (viewKey !== lastView.key) {
+          const centre = pickGround(new C.Cartesian2(w / 2, h / 2)); let scale: number | null = null;
+          if (centre) {
+            const a = pickGround(new C.Cartesian2(w / 2 - 50, h / 2)), b = pickGround(new C.Cartesian2(w / 2 + 50, h / 2));
+            if (a && b) { scale = new C.EllipsoidGeodesic(a, b).surfaceDistance / 100; metresPerPixel.current = scale; }
+          }
+          lastView.key = viewKey; lastView.centre = centre; lastView.mpp = scale;
         }
+        const center = lastView.centre; const mpp = lastView.mpp;
         const l = live.current;
         latest.current.onTelemetry({
           lat: C.Math.toDegrees(pos.latitude), lon: C.Math.toDegrees(pos.longitude), alt: pos.height, heading: Number.isFinite(camera.heading) ? C.Math.toDegrees(camera.heading) : 0, pitch: Number.isFinite(camera.pitch) ? C.Math.toDegrees(camera.pitch) : -90,

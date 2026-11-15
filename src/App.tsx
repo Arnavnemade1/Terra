@@ -13,7 +13,7 @@ import { ACTIVE, Composer, ContextBlock, DEFAULT_QUESTION, Results, Steps, num, 
 import { Card, ConditionsGrid, HazardsPanel, KeyValues, LayersList, SatellitesPanel, Swatch, hazardColor, type LayerRowSpec, type Profile } from './Panels';
 import { EventList, Timeline, stamp, type EventItem, type Marker } from './Dock';
 import { Bars, ChartFrame, Columns, LinePlot } from './charts';
-import { crossTrack, predictPasses, swathPass, SWATH, trackSeries, useFleet, type Sat } from './fleet';
+import { crossTrack, swathPass, SWATH, trackSeries, useFleet, usePasses, type Sat } from './fleet';
 import SensorView from './SensorView';
 import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
@@ -433,9 +433,7 @@ export default function App() {
   const aoiCentre = { lat: (region.bbox[1] + region.bbox[3]) / 2, lon: (region.bbox[0] + region.bbox[2]) / 2 };
   const keySats = useMemo(() => fleet.sats.filter(s => s.key), [fleet.sats]);
   const passStart = Math.floor(now / 600_000) * 600_000;
-  const passes = useMemo(() => mode !== 'hazards' ? predictPasses(keySats, aoiCentre.lat, aoiCentre.lon, passStart, 48, 60) : [],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [keySats, aoiCentre.lat, aoiCentre.lon, passStart, mode === 'satellites']);
+  const passes = usePasses(keySats, aoiCentre.lat, aoiCentre.lon, passStart, mode !== 'hazards');
   const sat: Sat | null = fleet.sats.find(s => s.norad === selectedSat) || null;
   // NISAR repeats its ground track every 12 days, so its next pass is searched over a full cycle.
   const nisarSat = fleet.sats.find(s => s.norad === 65053);

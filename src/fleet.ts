@@ -41,19 +41,53 @@ export function useFleet() {
   return { sats, source: data ? [data.source, data.fleet_source].filter(Boolean).join(' · ') : '', fetchedAt: data?.fetched_at, status: data?.status, error };
 }
 
-/** Closest approaches of each satellite's ground track to a point, within its reach, over the next `hours`. */
-export function predictPasses(sats: Sat[], lat: number, lon: number, from: number, hours = 48, stepSec = 60): Pass[] {
+/**
+ * Closest approaches of each satellite's ground track to a point, within its reach, over the next `hours`.
+ * A coarse search (3-minute steps, ~30 per orbit) finds each local minimum of the distance, which is then refined to
+ * the second by golden-section search: about half the propagations of a 1-minute scan, and more precise.
+ */
+export function predictPasses(sats: Sat[], lat: number, lon: number, from: number, hours = 48, stepSec = 180): Pass[] {
   const out: Pass[] = [];
   for (const s of sats) {
+    const dist = (t: number) => { const p = subPoint(s.orbit, new Date(t)); return p ? distanceKm(lat, lon, p.lat, p.lon) : Infinity; };
     let prev = Infinity, prevPrev = Infinity, prevT = from;
     for (let t = from; t <= from + hours * 3600_000; t += stepSec * 1000) {
-      const p = subPoint(s.orbit, new Date(t)); if (!p) continue;
-      const d = distanceKm(lat, lon, p.lat, p.lon);
-      if (prev < prevPrev && prev <= d && prev <= s.reachKm) out.push({ norad: s.norad, name: s.name, group: s.group, at: prevT, km: Math.round(prev) });
+      const d = dist(t);
+      if (prev < prevPrev && prev <= d) {
+        // The minimum lies within one step either side of prevT.
+        let a = prevT - stepSec * 1000, b = prevT + stepSec * 1000; const g = 0.381966;
+        let x1 = a + g * (b - a), x2 = b - g * (b - a), f1 = dist(x1), f2 = dist(x2);
+        while (b - a > 2000) { if (f1 < f2) { b = x2; x2 = x1; f2 = f1; x1 = a + g * (b - a); f1 = dist(x1); } else { a = x1; x1 = x2; f1 = f2; x2 = b - g * (b - a); f2 = dist(x2); } }
+        const at = f1 < f2 ? x1 : x2, km = Math.min(f1, f2);
+        if (km <= s.reachKm && at >= from) out.push({ norad: s.norad, name: s.name, group: s.group, at: Math.round(at), km: Math.round(km) });
+      }
       prevPrev = prev; prev = d; prevT = t;
     }
   }
   return out.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * The same, computed one satellite per browser task so a 48-hour prediction for the whole fleet never blocks the page
+ * (it used to hold the main thread for ~0.3 s whenever the area or the 10-minute window changed).
+ */
+export function usePasses(sats: Sat[], lat: number, lon: number, from: number, enabled: boolean): Pass[] {
+  const [passes, setPasses] = useState<Pass[]>([]);
+  useEffect(() => {
+    if (!enabled || !sats.length) { setPasses([]); return; }
+    let cancelled = false, i = 0; const out: Pass[] = [];
+    let handle = 0;
+    const step = () => {
+      if (cancelled) return;
+      const t0 = performance.now();
+      while (i < sats.length && performance.now() - t0 < 8) out.push(...predictPasses([sats[i++]], lat, lon, from));
+      if (i < sats.length) handle = window.setTimeout(step, 0);
+      else setPasses(out.sort((a, b) => a.at - b.at));
+    };
+    handle = window.setTimeout(step, 0);
+    return () => { cancelled = true; clearTimeout(handle); };
+  }, [sats, lat, lon, from, enabled]);
+  return passes;
 }
 
 /**
