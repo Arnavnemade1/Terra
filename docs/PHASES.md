@@ -291,6 +291,30 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
 - IR palettes apply only to measured Landsat pixels and preserve nodata transparency. Dated source context stays visible; changing investigations replaces the camera's radar overlay.
 - Validation: production build, 194 backend tests, browser checks at desktop and 360 px, and no configured credentials found in the production bundle. The connected fleet used for UI verification was ArduPilot SITL.
 
+## Phase 4j — Load speed, warm drone cameras, deploy anywhere, durable-agent orchestration (2026-11-14)
+- **Why the map was slow (measured).** A fresh view took 40-120 s. The slowest tiles spent ~53 s queued in the
+  browser and under 1 s at the server: browsers open six HTTP/1.1 connections per host, and every tile and API call
+  shared one. Imagery now spreads over t1-t4.localhost and terrain has its own host (a startup probe falls back to
+  same-origin), Cesium keeps its own nearest-first queue, terrain loads first, and the standard view uses Cesium's
+  default error budget without sibling preloading. A cold view took ~12-23 s afterwards on a heavily loaded machine;
+  the remaining time is mostly one-off shader compilation.
+- **Tile cache** (`gateway.py`): kept exactly as long as the provider's Cache-Control allows (Esri: one day, with
+  ETags), never for private or no-store responses, in memory (192 MB) and on disk (2 GB, least recently used first),
+  revalidated with If-None-Match, an expired copy served if the provider is down; upstream tiles time out at 8 s.
+- **Tile warming** (`fleet/warm.py`): the API fetches the fleet area once and the ground around every airborne
+  aircraft and its camera's aim point ahead of time, into the same cache.
+- **Drone camera**: one camera, created with the Drones workspace and kept warm off-screen (shaders compiled, tiles
+  around the aircraft loaded), re-pointed when another aircraft is chosen: first imagery 0.34 s instead of 1.95 s.
+- **Deploy anywhere**: Orchestration › Deploy anywhere, then click any place on Earth; the launch site moves there
+  with a 2, 5 or 10 km area around it, and the SITL and virtual fleets relaunch at the new pad (moves over 2 km).
+- **Orchestration**: agents and the coordinator pace themselves (about 2 s while something changes, 3 s at work,
+  10 s idle on the ground, 20 s out of contact; the coordinator 6 s when settled) and are woken by signals on awards,
+  acknowledgements and registrations; the coordinator restarts or wakes agents whose heartbeat goes quiet and forgets
+  agents of aircraft that left. Fleet-wide Hold all / Recall all / Resume (`POST /api/fleet/command`) override the
+  auction until resumed. New workflow commands are versioned with `workflow.patched` so running workflows replay.
+- **SITL**: 400 Hz physics with a 200 Hz copter loop (ArduCopter will not arm below a 1.8x gyro-to-loop ratio); the
+  bridge passes the autopilot's own arming message on when it refuses.
+
 ## Phase 5 — Advanced science (§18–21)
 - Physics‑aware checks: speckle filtering, incidence angle and terrain normalization, statistical significance
 - Multisensor fusion (Sentinel‑1, Sentinel‑2, precipitation via GIBS/CMR)
