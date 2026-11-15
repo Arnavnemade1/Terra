@@ -40,6 +40,19 @@ def write_field_note(db, drone: dict, task: dict, now: float) -> dict | None:
     elif o.get("change_db") is not None and abs(o["change_db"]) >= 3:
         kind, extra = "change", " The radar measured a strong change here."
     text = note_text(drone["name"], task["label"], o, reason) + extra
+    # Sent to check a radar patch: judge what was measured against the patch's polarimetric hypothesis.
+    target_id = (task.get("job_key") or "").split(":", 1)[1] if ":" in (task.get("job_key") or "") else None
+    brief = next((t.get("brief") for t in db.targets() if t["id"] == target_id), None) if target_id else None
+    if brief and brief.get("hypothesis"):
+        from ..signatures import judge
+        verdict = judge(brief["hypothesis"], o, {"surface_median_c": o.get("surface_median_c")})
+        o = {**o, "target_id": target_id, "hypothesis": brief["hypothesis"], "verdict": verdict["verdict"], "verdict_reasons": verdict["reasons"]}
+        word = {"supports": "supports", "contradicts": "does not support", "inconclusive": "is inconclusive on"}[verdict["verdict"]]
+        text += f" Check of patch {brief.get('rank')} ({brief.get('question') or brief['hypothesis']}): this {word} it; {verdict['reasons'][0]}."
+        if verdict["verdict"] != "inconclusive" and kind not in ("warm", "change"):
+            kind = "verify"
+        db.message(f"agent:{drone['id']}", "all", "verification", {"text": f"{drone['name']} checked patch {brief.get('rank')}: {word} {brief['hypothesis'].replace('_', ' ')} ({verdict['reasons'][0]}).",
+                                                                     "target_id": target_id, "verdict": verdict["verdict"], "lon": lon, "lat": lat})
     db.add_note(drone["id"], task["id"], kind, lon, lat, text, o)
     if kind in ("warm", "change"):
         reading = f"{o['surface_c']:.0f} °C surface, " if o.get("surface_c") is not None else ""

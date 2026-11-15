@@ -69,7 +69,8 @@ CREATE TABLE IF NOT EXISTS fleet_credentials (
     token_hash TEXT PRIMARY KEY, drone_id TEXT NOT NULL, label TEXT, created_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
 );
 """
-MIGRATIONS = ["ALTER TABLE fleet_area ADD COLUMN investigation_id TEXT", "ALTER TABLE fleet_area ADD COLUMN profile TEXT DEFAULT 'change'"]
+MIGRATIONS = ["ALTER TABLE fleet_area ADD COLUMN investigation_id TEXT", "ALTER TABLE fleet_area ADD COLUMN profile TEXT DEFAULT 'change'",
+              "ALTER TABLE fleet_targets ADD COLUMN brief TEXT"]  # a patch's verification brief (fleet/verify.py)
 ACTIVE = ("assigned", "acknowledged", "active")
 TELEMETRY_KEEP_S = 20 * 60
 MESSAGE_KEEP = 5000
@@ -128,8 +129,11 @@ class FleetDB:
             changed_profile = previous is not None and (previous["profile"] or "change") != profile
             db.execute("DELETE FROM fleet_targets WHERE area_id='active' AND source != 'operator'")
             for item in targets:
-                db.execute("INSERT INTO fleet_targets VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(id) DO UPDATE SET label=excluded.label, lon=excluded.lon, lat=excluded.lat, radius_m=excluded.radius_m, priority=excluded.priority, needs=excluded.needs, updated_at=excluded.updated_at",
-                           (item["id"], item["kind"], item["label"], item["lon"], item["lat"], item["radius_m"], item["priority"], json.dumps(item.get("needs", [])), item.get("source", "investigation"), t))
+                db.execute("INSERT INTO fleet_targets (id, area_id, kind, label, lon, lat, radius_m, priority, needs, source, last_observed, updated_at, brief) "
+                           "VALUES (?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, label=excluded.label, lon=excluded.lon, lat=excluded.lat, "
+                           "radius_m=excluded.radius_m, priority=excluded.priority, needs=excluded.needs, updated_at=excluded.updated_at, brief=excluded.brief",
+                           (item["id"], item["kind"], item["label"], item["lon"], item["lat"], item["radius_m"], item["priority"], json.dumps(item.get("needs", [])),
+                            item.get("source", "investigation"), t, json.dumps(item["brief"]) if item.get("brief") else None))
             moved = not previous or json.loads(previous["bbox"]) != bbox or changed_profile
             if moved:
                 # A new area: every automatic task and reservation is void; people's tasks stay until they end.
@@ -149,7 +153,7 @@ class FleetDB:
     def targets(self) -> list[dict]:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM fleet_targets WHERE area_id='active' ORDER BY priority DESC").fetchall()
-        return [{**dict(r), "needs": _loads(r["needs"], [])} for r in rows]
+        return [{**dict(r), "needs": _loads(r["needs"], []), "brief": _loads(r["brief"], None) if "brief" in r.keys() else None} for r in rows]
 
     def mark_observed(self, target_id: str, t: float) -> None:
         with self.connect() as db:

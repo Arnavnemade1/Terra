@@ -49,7 +49,8 @@ def area_data(bbox: list[float], investigation_id: str | None) -> dict:
             celsius = th["minC"] + la[..., 0].astype(np.float32) / 255 * (th["maxC"] - th["minC"])
             valid = la[..., 1] > 0
             data["thermal"] = {"c": np.where(valid, celsius, np.nan), "bounds": th["bounds"], "date": th["date"], "platform": th.get("platform", "Landsat"),
-                               "p95": float(np.nanpercentile(celsius[valid], 95)) if valid.any() else None}
+                               "p95": float(np.nanpercentile(celsius[valid], 95)) if valid.any() else None,
+                               "median": float(np.nanmedian(celsius[valid])) if valid.any() else None}
     except Exception:
         pass
     try:
@@ -113,6 +114,8 @@ def observe(data: dict, lon: float, lat: float, elevation: float | None = None) 
             out["surface_c"] = round(float(v), 1); out["surface_source"] = f"{th['platform']} surface temperature, {th['date']}"
             if th.get("p95") is not None:
                 out["surface_p95_c"] = round(th["p95"], 1)
+            if th.get("median") is not None:
+                out["surface_median_c"] = round(th["median"], 1)
     cv = data.get("cover")
     if cv:
         code = _pixel(cv["codes"], cv["bounds"], lon, lat)
