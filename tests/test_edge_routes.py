@@ -21,12 +21,26 @@ def test_every_map_layer_has_an_edge_route_to_the_same_upstream():
 
 
 def test_edge_routes_only_reach_the_gateways_public_hosts():
-    allowed = (gateway.ESRI + "/", gateway.GIBS + "/", gateway.TERRAIN)
+    allowed = (gateway.ESRI + "/", gateway.GIBS + "/", gateway.TERRAIN + "/")
     assert EDGE and all(r["destination"].startswith(allowed) for r in EDGE)
-    # Only numeric tile coordinates and the two GIBS layers the gateway serves.
-    assert all(":z(\\d+)/:y(\\d+)/:x(\\d+)" in r["source"] for r in EDGE if "/maps/" in r["source"])
-    gibs = [r for r in EDGE if "/gibs/" in r["source"]]
-    assert gibs and all("BlueMarble_ShadedRelief_Bathymetry|VIIRS_Black_Marble" in r["source"] for r in gibs)
+    # Exact tile paths only: numeric coordinates, the two GIBS layers the gateway serves, no catch-all segments.
+    assert all(":rest" not in r["source"] and "*" not in r["source"] for r in EDGE)
+    assert all(":z(" in r["source"] and ":y(" in r["source"] and ":x(" in r["source"] for r in EDGE)
+    gibs = sorted(r["source"] for r in EDGE if "/gibs/" in r["source"])
+    assert [g.split("/")[4] for g in gibs] == ["BlueMarble_ShadedRelief_Bathymetry", "VIIRS_Black_Marble"]
+
+
+def test_metadata_and_format_or_jsonp_queries_stay_on_the_validated_backend():
+    """ArcGIS answers ?f=html with HTML and ?callback= with JSONP; neither may be served from Terra's origin."""
+    assert not any(r["source"] == "/api/connector/terrain" for r in EDGE)
+    for r in EDGE:
+        assert {m["key"] for m in r.get("missing", []) if m["type"] == "query"} >= {"f", "callback", "format"}
+
+
+def test_edge_responses_cannot_run_as_a_document():
+    rule = next(h for h in CONFIG["headers"] if "connector" in h["source"])
+    values = {h["key"].lower(): h["value"] for h in rule["headers"]}
+    assert values["x-content-type-options"] == "nosniff" and values["content-security-policy"].startswith("sandbox")
 
 
 def test_edge_routes_come_before_the_function_catch_all():
