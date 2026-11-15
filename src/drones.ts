@@ -13,6 +13,8 @@ export type Source = 'virtual' | 'sitl' | 'real';
 export type Profile = 'change' | 'thermal' | 'search';
 export type FieldNote = { id: number; t: number; drone_id: string; task_id: string | null; kind: 'station' | 'observation' | 'warm' | 'change' | string; lon: number; lat: number; text: string;
   data: { surface_c?: number; surface_p95_c?: number; surface_source?: string; cover?: string; change_db?: number; elevation_m?: number; weather?: { temperature_2m?: number; wind_speed_10m?: number; wind_direction_10m?: number } } };
+export type FleetMode = { mode: 'normal' | 'hold' | 'recall'; reason: string | null; set_by: string | null; since: number | null };
+export type AgentView = { id: string; kind: 'drone' | 'coordinator'; workflow_id: string | null; status: string; age_s: number; next_s?: number | null; round?: number | null; text?: string | null };
 export type Enrollment = { drone_id: string; label: string; created_at: number; revoked: number };
 export type EnrollRequest = { id: string; name: string; kind: 'mavlink' | 'sitl'; connection: string; aircraft: 'quad' | 'fixed-wing' | 'vtol'; sensors: string[]; relay: boolean };
 export type TaskView = { id: string; kind: string; label: string; params: Record<string, unknown> & { lon?: number; lat?: number; radius_m?: number; agl_m?: number; bbox?: Bounds; inset?: number; lane_m?: number }; status: string; created_by: string; reason: string | null; created_at: number; updated_at: number; acked_at: number | null };
@@ -33,7 +35,8 @@ export type Place = { name: string; lon: number; lat: number; kind: string; elev
 export type GroundAt = (lon: number, lat: number) => number | undefined;
 export type FleetInfo = {
   connections: boolean; area: { name: string; bbox: Bounds; launch: [number, number]; profile?: Profile; investigation_id?: string | null } | null;
-  coordinator: { running: boolean; summary: { round?: number; text?: string; online?: number; jobs?: number; assigned?: number }; age_s: number | null };
+  coordinator: { running: boolean; summary: { round?: number; text?: string; online?: number; jobs?: number; assigned?: number; next_s?: number; pending_acks?: number; agents?: number; restarting?: string[]; mode?: string }; age_s: number | null };
+  mode: FleetMode; agents: AgentView[];
   messages: FleetMessage[]; notes: FieldNote[]; jobs: { key: string; kind: string; label: string; priority: number; assigned_drone: string | null }[];
   targets: { id: string; kind?: string; label: string; lon: number; lat: number; radius_m: number; priority: number; needs?: string[]; last_observed: number | null }[];
   error: string | null;
@@ -86,7 +89,7 @@ export class DroneStore {
   private resume = new Map<string, { from: DroneState; at: number }>();
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  info: FleetInfo = { connections: false, area: null, coordinator: { running: false, summary: {}, age_s: null }, messages: [], notes: [], jobs: [], targets: [], error: null };
+  info: FleetInfo = { connections: false, area: null, coordinator: { running: false, summary: {}, age_s: null }, mode: { mode: 'normal', reason: null, set_by: null, since: null }, agents: [], messages: [], notes: [], jobs: [], targets: [], error: null };
   groundAt: GroundAt | null = null;
   /** Ground height from an open camera view, which has the finest terrain around its aircraft. */
   feedGroundAt: GroundAt | null = null;
@@ -107,7 +110,7 @@ export class DroneStore {
   async poll() {
     try {
       const v = await api<{ server_time: number; connections_enabled: boolean; area: FleetInfo['area']; coordinator: FleetInfo['coordinator']; messages: FleetMessage[];
-        notes?: FieldNote[]; jobs: FleetInfo['jobs']; targets: FleetInfo['targets']; drones: ServerDrone[] }>('/fleet');
+        notes?: FieldNote[]; jobs: FleetInfo['jobs']; targets: FleetInfo['targets']; drones: ServerDrone[]; mode?: FleetMode; agents?: AgentView[] }>('/fleet');
       const offset = v.server_time - Date.now() / 1000; this.offset = this.offset === null ? offset : this.offset * 0.8 + offset * 0.2;
       const seen = new Set<string>();
       for (const d of v.drones) {
@@ -119,7 +122,7 @@ export class DroneStore {
       }
       for (const id of [...this.meta.keys()]) if (!seen.has(id)) { this.meta.delete(id); this.samples.delete(id); }
       const notes = v.notes ?? []; if (notes[0]?.id !== this.info.notes[0]?.id) this.notesVersion++;
-      this.info = { connections: v.connections_enabled, area: v.area, coordinator: v.coordinator, messages: v.messages, notes, jobs: v.jobs, targets: v.targets, error: null };
+      this.info = { connections: v.connections_enabled, area: v.area, coordinator: v.coordinator, mode: v.mode ?? this.info.mode, agents: v.agents ?? [], messages: v.messages, notes, jobs: v.jobs, targets: v.targets, error: null };
       this.ready = true;
       const key = v.drones.map(d => `${d.id}:${d.task?.id}:${JSON.stringify(d.task?.params ?? null)}:${this.manual.has(d.id)}`).join('|');
       if (key !== this.routeKey) { this.routeKey = key; this.routes++; }
@@ -132,7 +135,7 @@ export class DroneStore {
   /** Publish the monitoring area and its targets; the coordinator plans jobs from them. The profile says what the
    * fleet is for: watching measured change (targets below), the warmest ground in the latest Landsat thermal scene
    * (the server picks those), or searching the area in four sectors. */
-  async publishArea(name: string, bbox: Bounds, patches: Patch[], places: Place[], profile: Profile = this.info.area?.profile ?? 'change', investigationId?: string | null) {
+  async publishArea(name: string, bbox: Bounds, patches: Patch[], places: Place[], profile: Profile = this.info.area?.profile ?? 'change', investigationId?: string | null, launch?: [number, number]) {
     const targets: Record<string, unknown>[] = [
       ...patches.slice(0, 4).map((p, i) => ({ id: `patch-${p.rank}`, kind: 'change', label: p.label, lon: p.centre[1], lat: p.centre[0], priority: [1, 0.85, 0.7, 0.6][i],
         radius_m: Math.max(150, Math.min(3000, Math.hypot((p.bounds[2] - p.bounds[0]) * 111_320 * Math.cos(p.centre[0] * DEG), (p.bounds[3] - p.bounds[1]) * 110_574) / 2)) })),
@@ -141,12 +144,27 @@ export class DroneStore {
     ];
     if (!targets.length) targets.push({ id: 'centre', kind: 'point', label: 'the centre of the area', lon: (bbox[0] + bbox[2]) / 2, lat: (bbox[1] + bbox[3]) / 2, radius_m: 400, priority: 0.5 });
     // The same area, targets and profile again is not news: send it once (the coordinator keeps it).
-    const body = JSON.stringify({ name: name.slice(0, 80), bbox, targets, profile, investigation_id: investigationId ?? null });
+    const body = JSON.stringify({ name: name.slice(0, 80), bbox, targets, profile, investigation_id: investigationId ?? null, ...(launch ? { launch } : {}) });
     const current = this.info.area;
     const unchanged = current && current.bbox.every((v, i) => Math.abs(v - bbox[i]) < 1e-9) && (current.profile ?? 'change') === profile;
     if (body === this.published && unchanged) return; this.published = body;
     await api('/fleet/area', { method: 'POST', body }).catch(() => { this.published = ''; });
     void this.poll();
+  }
+
+  /** Deploy the fleet anywhere: a launch site where you clicked and a square monitoring area around it. */
+  async deploy(lon: number, lat: number, radiusKm: number, profile: Profile = this.info.area?.profile ?? 'change'): Promise<Bounds> {
+    const dx = radiusKm * 1000 / (111_320 * Math.cos(lat * DEG)), dy = radiusKm * 1000 / 110_574;
+    const bbox: Bounds = [lon - dx, lat - dy, lon + dx, lat + dy].map(v => Math.round(v * 1e5) / 1e5) as Bounds;
+    const ns = `${Math.abs(lat).toFixed(2)}° ${lat >= 0 ? 'N' : 'S'}`, ew = `${Math.abs(lon).toFixed(2)}° ${lon >= 0 ? 'E' : 'W'}`;
+    await this.publishArea(`Deployment ${ns} ${ew}`, bbox, [], [], profile, null, [lon, lat]);
+    return bbox;
+  }
+
+  /** Fleet-wide orders: hold everyone in place, recall everyone, or resume the auction. */
+  async command(action: 'hold' | 'recall' | 'resume') {
+    const r = await api<{ mode: FleetMode }>('/fleet/command', { method: 'POST', body: JSON.stringify({ action }) });
+    void this.poll(); return r.mode;
   }
 
   // ------------------------------------------------------------------ adding aircraft
