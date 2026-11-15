@@ -315,6 +315,22 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
 - **SITL**: 400 Hz physics with a 200 Hz copter loop (ArduCopter will not arm below a 1.8x gyro-to-loop ratio); the
   bridge passes the autopilot's own arming message on when it refuses.
 
+## Phase 4k — Radar to drones and back: signatures, automatic thresholds, field verification (2026-11-15)
+- **Thresholds** (`signatures.py`): unchanged ground is modelled as speckle (the intensity ratio follows F(2L, 2L)
+  at the measured ENL); per direction, Kittler-Illingworth where a change class exists (at least 5x what speckle
+  predicts), else the CFAR level at a 0.1 % false-alarm rate, else 3 dB; read from the 3×3-averaged change
+  (effective looks ENL × 5.4). Mount Etna: 4.2 dB up / 3.1 dB down, 1.1 % changed, instead of 16.6 % at a fixed 3 dB.
+- **Signatures**: each patch's co-/cross-polarized change is described as *consistent with* mechanisms (specular
+  smoothing or water, volume loss or gain, double bounce, roughening), with the question a field check answers and
+  the sensors that help; single-polarization products say so.
+- **Dispatch and evidence**: `POST /api/fleet/dispatch` turns an investigation's patches into fleet targets with
+  their briefs; drone agents judge what they measure (Sentinel-2 before/after at the aim point, ESA WorldCover,
+  Landsat temperature) as supporting, contradicting or inconclusive; snow, cloud and plumes are recognised and named
+  as alternative explanations (on Etna: snowmelt). `GET /api/fleet/evidence/{id}` summarises per patch; the
+  investigation shows it live.
+- **Motion**: eased wheel zoom toward the cursor, coarser tiles while moving, softer inertia; a stabilised drone
+  camera (eased gimbal and height, 60 fps while open).
+
 ## Phase 5 — Advanced science (§18–21)
 - Physics‑aware checks: speckle filtering, incidence angle and terrain normalization, statistical significance
 - Multisensor fusion (Sentinel‑1, Sentinel‑2, precipitation via GIBS/CMR)
