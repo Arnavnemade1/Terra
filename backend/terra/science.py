@@ -15,6 +15,8 @@ from typing import Any
 
 import h5py
 import numpy as np
+
+from .signatures import change_thresholds, signature
 import rasterio
 from PIL import Image
 from pyproj import Transformer
@@ -365,7 +367,7 @@ def _surface_classes(values: np.ndarray, meta: dict) -> dict:
             "high_return_km2": float(high.sum() * km2) if km2 else None}
 
 
-def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, threshold: float,
+def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, threshold: float | dict,
               by_pol: dict[str, tuple[np.ndarray, float]] | None = None) -> list[dict]:
     """The largest connected patches whose smoothed change exceeds the threshold, with locations.
 
@@ -383,7 +385,8 @@ def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, thresh
     to_geo = Transformer.from_crs(crs, "EPSG:4326", always_xy=True)
     patches = []
     for sign, direction in ((1, "increase"), (-1, "decrease")):
-        mask = np.isfinite(smooth) & (sign * np.nan_to_num(smooth) >= threshold)
+        limit = threshold[direction] if isinstance(threshold, dict) else threshold
+        mask = np.isfinite(smooth) & (sign * np.nan_to_num(smooth) >= limit)
         mask = ndimage.binary_opening(mask)
         labels, count = ndimage.label(mask)
         if not count:
@@ -418,6 +421,7 @@ def _hotspots(delta: np.ndarray, transform: Affine, crs: str, meta: dict, thresh
                             "centre": [round(float(lat), 5), round(float(lon), 5)],
                             "by_polarization": per,
                             "leading_polarization": max(per, key=lambda q: abs(per[q]["standardized_change"])) if len(per) > 1 else None,
+                            "signature": signature(per, direction) if per else signature({}, direction),
                             "bounds": [round(float(min(w, e)), 5), round(float(min(s, n)), 5), round(float(max(w, e)), 5), round(float(max(s, n)), 5)]})
     patches.sort(key=lambda p: -p["pixels"])
     for rank, patch in enumerate(patches[:HOTSPOT_LIMIT], 1):
@@ -546,7 +550,10 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
         if not path.is_relative_to(root) or supplied.is_symlink() or not path.is_file():
             raise ScienceError("Input must be an existing file within the configured input directory.", "input_not_allowed")
         paths.append(path)
-    threshold = float(manifest.get("threshold_db", 3.0))
+    # None or "auto": a threshold per direction from the data (signatures.change_thresholds); a number: that many dB.
+    requested = manifest.get("threshold_db", 3.0)
+    automatic = requested is None or requested == "auto"
+    threshold = 3.0 if automatic else float(requested)
     if not math.isfinite(threshold) or not 0 < threshold <= 30:
         raise ScienceError("The descriptive change threshold must be between 0 and 30 dB.")
     frequency = manifest.get("frequency", "A")
@@ -604,8 +611,15 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
         delta = np.full(arrays[0].shape, np.nan, dtype=np.float32)
         delta[common] = arrays[1][common] - arrays[0][common]
         summary = _summary(delta, inside_masks[0] & inside_masks[1], metadata[0], (-10.0, 10.0, 0.5))
-        increasing = int(np.count_nonzero(delta[common] >= threshold))
-        decreasing = int(np.count_nonzero(delta[common] <= -threshold))
+        pol_rows, pol_rasters = _polarization_change(paths, metadata, bbox, threshold)
+        selected = next((r for r in pol_rows if r["polarization"] == metadata[0]["selected_polarization"]), None)
+        if automatic:
+            auto = change_thresholds(delta, (selected or {}).get("expected_speckle_sd_db"))
+            limits = {"increase": auto["increase_db"], "decrease": auto["decrease_db"]}
+        else:
+            auto = None; limits = {"increase": threshold, "decrease": threshold}
+        increasing = int(np.count_nonzero(delta[common] >= limits["increase"]))
+        decreasing = int(np.count_nonzero(delta[common] <= -limits["decrease"]))
         # Low-return (water-like) area on both dates, counted only where both dates are valid.
         km2 = _pixel_km2(metadata[0])
         dark = [np.nan_to_num(_smoothed_db(a), nan=0.0) < LOW_RETURN_DB for a in arrays]
@@ -617,19 +631,20 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
                    "low_return_before_pct": float(low_before / common.sum() * 100), "low_return_after_pct": float(low_after / common.sum() * 100),
                    "low_return_before_km2": float(low_before * km2) if km2 else None, "low_return_after_km2": float(low_after * km2) if km2 else None,
                    "newly_low_return_km2": float(became * km2) if km2 else None, "no_longer_low_return_km2": float(ceased * km2) if km2 else None}
-        pol_rows, pol_rasters = _polarization_change(paths, metadata, bbox, threshold)
         scored = [r for r in pol_rows if r["mean_abs_standardized_change"] is not None]
         measurements.update({"kind": "backscatter_change", "change": {
-            **summary, "threshold_db": threshold, "increasing_pixels": increasing, "decreasing_pixels": decreasing,
+            **summary, "threshold_db": min(limits.values()), "thresholds_db": limits, "threshold_selection": auto or {"method": "fixed", "increase_db": threshold, "decrease_db": threshold},
+            "increasing_pixels": increasing, "decreasing_pixels": decreasing,
             "threshold_exceedance_pct": float((increasing + decreasing) / common.sum() * 100),
             "increasing_km2": float(increasing * km2) if km2 else None, "decreasing_km2": float(decreasing * km2) if km2 else None,
             "threshold_interpretation": "Descriptive magnitude threshold; not a calibrated significance test or event classification.",
-            **surface, "hotspots": _hotspots(delta, transforms[0], metadata[0]["crs"], metadata[0], threshold, pol_rasters),
+            **surface, "hotspots": _hotspots(delta, transforms[0], metadata[0]["crs"], metadata[0], limits, pol_rasters),
             "polarizations": pol_rows,
             "leading_polarization": max(scored, key=lambda r: r["mean_abs_standardized_change"])["polarization"] if len(scored) > 1 else None,
             "standardized_change_method": f"Per-pixel change divided by the speckle standard deviation of a two-date difference, from each date's estimated ENL "
                                          f"(mean²/variance in the most homogeneous {ENL_WINDOW}×{ENL_WINDOW} windows). Compared across polarizations by mean absolute value.",
-            "hotspot_method": f"Connected patches of at least {HOTSPOT_MIN_PIXELS} pixels whose 3×3-averaged change is at least {threshold:g} dB in one direction; largest first.",
+            "hotspot_method": f"Connected patches of at least {HOTSPOT_MIN_PIXELS} pixels whose 3×3-averaged change is at least {limits['increase']:g} dB (increase) or {limits['decrease']:g} dB (decrease); largest first.",
+            "signature_method": "Each patch's co- and cross-polarized change and its speckle-standardized size are described as consistent with physical mechanisms (signatures.py): hypotheses to verify, not classifications.",
         }})
         layers.append(_export(delta, transforms[0], metadata[0]["crs"], out, "change", "Backscatter change · later minus earlier", True))
         if len(pol_rows) > 1:
@@ -643,7 +658,7 @@ def run_analysis(manifest: dict, output_dir: str | Path) -> dict:
     provenance = {
         "method": METHOD_VERSION, "formula": "gamma0_db = 10 * log10(gamma0_power); change_db = later_db - earlier_db",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "parameters": {"bbox": bbox, "frequency": frequency, "polarization": metadata[0]["selected_polarization"], "polarizations_analyzed": [r["polarization"] for r in measurements.get("change", {}).get("polarizations", [])], "threshold_db": threshold, "speckle_filter": "none", "maximum_native_pixels": MAX_PIXELS},
+        "parameters": {"bbox": bbox, "frequency": frequency, "polarization": metadata[0]["selected_polarization"], "polarizations_analyzed": [r["polarization"] for r in measurements.get("change", {}).get("polarizations", [])], "threshold_db": "auto" if automatic else threshold, "speckle_filter": "none", "maximum_native_pixels": MAX_PIXELS},
         "inputs": [{"filename": p.name, "sha256": _hash(p), "metadata": m, "window": w, "catalog": e.get("observation", {}),
                     "sidecar_sha256": _hash(Path(str(p) + ".provenance.json")) if m["derivative"] else None} for p, m, w, e in zip(paths, metadata, windows, inputs)],
         "software": {"numpy": np.__version__, "rasterio": rasterio.__version__, "h5py": h5py.__version__},

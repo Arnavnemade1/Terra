@@ -123,7 +123,7 @@ def _atomic_json(path: Path, value: dict) -> None:
 def _manifest(payload: dict) -> dict:
     settings = get_settings()
     return {"mode": payload["mode"], "bbox": payload["bbox"], "inputs": payload["inputs"],
-            "input_root": str(settings.inputs.resolve()), "threshold_db": 3.0, "frequency": "A"}
+            "input_root": str(settings.inputs.resolve()), "threshold_db": "auto", "frequency": "A"}
 
 
 @activity.defn

@@ -359,6 +359,10 @@ Rules:
 - When change.polarizations lists more than one polarization, say which one shows the change more clearly (derived.leading_polarization), citing each
   polarization's mean_abs_standardized_change (change in speckle standard deviations) or a hotspot's by_polarization values. These scale by speckle only.
   A polarization with null standardized values could not be scaled; do not rank it.
+- Each hotspot's signature says what its co-/cross-polarized change is CONSISTENT WITH (signature.consistent_with) and why (signature.mechanism,
+  signature.basis). Present these as possibilities to verify ("consistent with vegetation loss, a burn scar or canopy damage"), never as findings,
+  and name the question a field check would answer (signature.question). change.threshold_selection says whether each direction's threshold was
+  chosen automatically from the data (Kittler-Illingworth) or fell back to 3 dB; mention it once when citing changed area.
 - water_context (when status is "available") splits the newly water-like area by how often JRC mapped it as water from 1984 to 2021: permanent, seasonal, or never.
   Cite the split for water or flood questions; water-like returns where it was never mapped are the stronger new-wetting signal. It is history, not proof of flooding.
 - Low-return area is a proxy, not a water map: call it "water-like" or "very low return" and never "flooded area".
@@ -496,6 +500,8 @@ def _evidence(investigation: dict, context: dict | None) -> dict:
         derived["leading_polarization"] = change["leading_polarization"]
     if change.get("hotspots") is not None:
         derived["hotspot_count"] = len(change["hotspots"])
+        derived["hotspot_signatures"] = [{"rank": spot.get("rank"), "hypothesis": (spot.get("signature") or {}).get("hypothesis"),
+                                          "confidence": (spot.get("signature") or {}).get("confidence")} for spot in change["hotspots"]]
         # Prose can legitimately say "darker by 5 dB" for a signed -5 dB
         # change. Make that magnitude an explicit derived fact; never turn
         # the numeric verifier into a blanket absolute-value comparison.
@@ -592,6 +598,10 @@ def measured_answer(investigation: dict, context: dict | None = None) -> dict:
             answer += (f"\n\nThe largest changed patch is {area}{where}, {word} by {abs(top['mean_change_db']):.1f} dB on average; "
                        f"{len(spots)} patches are listed in the report.")
             bullets.append(f"Largest patch: {area}{where}, mean change {top['mean_change_db']:.1f} dB.")
+            sig = top.get("signature") or {}
+            if sig.get("consistent_with"):
+                bullets.append(f"Its polarimetric signature ({sig.get('basis', '')}) is consistent with " + ", ".join(sig["consistent_with"][:3])
+                               + f"; to verify: {sig.get('question', '').rstrip('?').lower()}?")
         water = evidence.get("water_context") or {}
         if water.get("status") == "available" and water["mapped_pixels"]:
             parts = [f"{water[k]['pct_of_mapped']:.1f}% {label}" for k, label in (("permanent", "permanent water"), ("seasonal", "seasonal water"), ("never", "never mapped as water"))
