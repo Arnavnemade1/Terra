@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useState } from 'react';
-import { Copy, Maximize2, Plus, Video, X } from 'lucide-react';
+import { Copy, Maximize2, Plane, Plus, Video, X } from 'lucide-react';
+import './dronesPanel.css';
 import { ft, kt, type DroneState, type DroneStore, type EnrollRequest, type Enrollment, type FieldNote, type FleetMessage, type Patch, type Place, type Profile, type Source } from './drones';
 import { dm } from './DroneFeed';
 import { KeyValues } from './Panels';
@@ -142,71 +143,101 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
   }
   const op = s?.operation; const t = s?.task;
 
-  return <div className="drones-panel">
-    <header className="fleet-head"><b>Drone Fleet</b><span className="quiet">· {airborne} of {states.length} airborne</span><span className="grow" />
-      {real.length ? <span className="live-chip"><i />LIVE {real.length}</span> : null}
-      {sitl.length ? <span className="sitl-chip" title="ArduPilot SITL: the real ArduCopter and ArduPlane firmware flying simulated airframes">SITL {sitl.length}</span> : null}
-      {states.length - real.length - sitl.length > 0 ? <span className="sim-chip" title="Terra's virtual aircraft, connected through the same protocol as real drones">SIM {states.length - real.length - sitl.length}</span> : null}</header>
-    <div className="profile-pick" role="group" aria-label="What the fleet is for">{PROFILES.map(p => <button key={p.key} className={profile === p.key ? 'on' : ''} disabled={!info.area}
-      onClick={() => { if (p.key !== profile) onProfile(p.key); }} aria-pressed={profile === p.key}>{p.label}</button>)}</div>
-    <p className="profile-note">{PROFILES.find(p => p.key === profile)?.note}</p>
-    <div className="area-line"><span>Monitoring <b>{info.area?.name ?? 'no area yet'}</b></span>
-      {(!info.area || info.area.bbox.some((v, i) => Math.abs(v - regionBox[i]) > 1e-6)) && <button className="mini-btn" onClick={onMonitorHere}
-        title="Virtual aircraft are taken there; real aircraft far away stand by">Monitor {regionName.length > 22 ? `${regionName.slice(0, 22)}…` : regionName}</button>}</div>
-    <div className={`coord-chip ${info.coordinator.running ? 'on' : ''}`} title="The durable coordinator agent (a Temporal workflow) and one agent per aircraft">
-      <i />{info.coordinator.running ? <>Coordinator · round {info.coordinator.summary.round ?? '—'} · {info.coordinator.summary.text}</> : info.area ? 'Coordinator starting or offline: the investigation service may be down.' : 'Waiting for a monitoring area.'}</div>
-    {!states.length && info.connections && <p className="card-note fleet-empty">No aircraft connected yet. The dev stack starts an ArduPilot SITL fleet when it is built (python3 scripts/sitl.py setup), otherwise a virtual fleet; add more below.</p>}
-    <div className="fleet-overview"><div><strong>{states.filter(d=>d.status!=='lost'&&d.status!=='stale').length}<small>/{states.length}</small></strong><span>Reporting</span></div><div><strong>{states.filter(d=>d.task?.status==='active').length}</strong><span>Tasks active</span></div><div className={states.some(attention)?'attention':''}><strong>{states.filter(attention).length}</strong><span>Need attention</span></div></div>
-    <div className="fleet-filters" role="group" aria-label="Filter aircraft">{(['all','airborne','attention'] as const).map(f=><button key={f} className={fleetFilter===f?'on':''} aria-pressed={fleetFilter===f} onClick={()=>setFleetFilter(f)}>{f==='all'?'All aircraft':f==='airborne'?'Airborne':'Needs attention'}</button>)}</div>
-    <ul className="fleet-list">{visibleStates.map(d => <li key={d.id}><button className={d.id === selected ? 'on' : ''} onClick={() => onSelect(d.id)}>
-      <span className="fleet-icon"><AircraftIcon aircraft={d.aircraft} /></span>
-      <span className="fleet-name"><span className="fleet-identity"><b>{d.callsign}</b><span title={d.name}>{d.name}</span><em className={`src-tag ${d.source}`}>{SOURCE[d.source].tag}</em></span><small title={d.mission.task}>{d.mission.task}</small></span>
-      <span className="fleet-status"><em className={d.status === 'stale' || d.status === 'lost' ? 'warn' : d.status === 'landed' ? 'quiet' : ''}>{d.status === 'lost' ? 'No signal' : d.status === 'stale' ? 'Delayed' : d.mission.status}</em><small className="num">{d.status === 'landed' ? 'on ground' : `${fmt(Math.round(ft(d.aglM) / 10) * 10)} ft`}</small></span>
-      <span className="fleet-battery"><i><b style={{ width: `${Number.isFinite(d.batteryPct) ? d.batteryPct : 0}%`, background: d.batteryPct < 30 ? 'var(--warn)' : 'var(--ok)' }} /></i><small className="num">{Number.isFinite(d.batteryPct) ? `${Math.round(d.batteryPct)}%` : '—'}</small></span>
-    </button><button className="fleet-quick-camera" onClick={()=>onCamera(d.id)} aria-label={`Open camera on ${d.callsign}`} title={`Camera · ${d.callsign}`}><Video size={14}/></button></li>)}</ul>
-    {!visibleStates.length&&<p className="card-note fleet-filter-empty">{fleetFilter==='attention'?'No connected aircraft currently meet the low-battery or delayed-telemetry filter.':fleetFilter==='airborne'?'No aircraft are airborne.':'No aircraft connected.'}</p>}
-    {s && <section className="fleet-detail">
-      <header><b>{s.callsign}</b> <span>{s.name}</span><span className="grow" /><span className="status-chip">{s.mission.status}</span></header>
-      <div className="fleet-stats">
-        <div><small>Altitude</small><b className="num">{fmt(Math.round(ft(s.aglM) / 10) * 10)}</b><em>ft AGL</em></div>
-        <div><small>Ground speed</small><b className="num">{fmt(kt(s.speedMps))}</b><em>kn</em></div>
-        <div><small>Heading</small><b className="num">{Math.round(s.headingDeg) % 360}°</b><em>{COMPASS[Math.round(s.headingDeg / 45) % 8]}</em></div>
-        <div><small>Battery</small><b className="num">{Number.isFinite(s.batteryPct) ? `${Math.round(s.batteryPct)}%` : '—'}</b><em>{Number.isFinite(s.minutesLeft) ? `~${Math.max(0, Math.round(s.minutesLeft))} min to reserve` : 'not reported'}</em></div>
-        <div><small>Link</small><b className="num">{Number.isFinite(s.linkDbm) ? `${Math.round(s.linkDbm)}`.replace('-', '−') : '—'}</b><em>dBm</em></div>
-        <div><small>Connected</small><b className="num">{clock(s.flightS)}</b><em>{s.ageS !== undefined ? `last report ${fmt(s.ageS, 1)} s` : ''}</em></div>
+  const [tab, setTab] = useState<'fleet' | 'mission' | 'notes' | 'log'>(() => { try { return (localStorage.getItem('terra.dronesTab') as 'fleet') || 'fleet'; } catch { return 'fleet'; } });
+  const go = (t: typeof tab) => { setTab(t); try { localStorage.setItem('terra.dronesTab', t); } catch { /* convenience only */ } };
+  const mode = info.mode.mode; const c = info.coordinator;
+  const linkBars = (dbm: number) => !Number.isFinite(dbm) ? 0 : dbm > -70 ? 4 : dbm > -80 ? 3 : dbm > -90 ? 2 : 1;
+  const tone = (d: DroneState) => d.status === 'lost' ? 'bad' : d.status === 'stale' || (Number.isFinite(d.batteryPct) && d.batteryPct < 25) ? 'warn' : d.status === 'landed' ? 'idle' : 'ok';
+
+  return <div className="drones-panel dp">
+    <header className="dp-head">
+      <div className="dp-title"><b>Drone fleet</b><span>{info.area?.name ?? 'No operating area'}</span></div>
+      <div className="dp-chips">
+        {real.length ? <span className="live-chip"><i />LIVE {real.length}</span> : null}
+        {sitl.length ? <span className="sitl-chip" title="ArduPilot SITL: real flight firmware on simulated airframes">SITL {sitl.length}</span> : null}
+        {states.length - real.length - sitl.length > 0 ? <span className="sim-chip">SIM {states.length - real.length - sitl.length}</span> : null}
       </div>
-      <KeyValues rows={[
-        ['Task', t ? <span key="t">{t.label} <em className={`task-status ${t.status}`}>{t.status}</em></span> : '—'],
-        ['Why', t?.reason || (t?.created_by === 'operator' ? 'Assigned in the workspace' : '—')],
-        ['Airspace', op ? `${fmt(op.alt_lower_m)}–${fmt(op.alt_upper_m)} m above ground · ${op.geometry.type === 'circle' ? `${fmt(op.geometry.radius_m)} m radius` : 'survey box'} · ${op.state}` : '—'],
-        ['Agent', s.agent ? `${s.agent.summary.text ?? ''} · ${fmt(s.agent.age_s, 0)} s ago` : 'Starting…'],
-        ['Aircraft', `${s.aircraft === 'fixed-wing' ? 'Fixed-wing' : 'Quadcopter'} · ${SOURCE[s.source].long}`],
-        ['Link', `${PROTOCOL[s.protocol] ?? s.protocol}${s.autopilot ? ` · ${s.autopilot}` : ''}`],
-        ['Sensors', s.sensor], ['Position', <span className="num" key="p">{dm(s.lat, s.lon)}</span>], ['Gimbal', `${Math.round(s.gimbal.headingDeg)}° · ${Math.round(s.gimbal.pitchDeg)}°`],
-      ]} />
-      <div className="detail-actions">
-        <button className="primary" onClick={() => onFull(s.id)}><Maximize2 size={13} /> Full camera view</button>
-        <button className="secondary" onClick={() => onCamera(s.id)}><Video size={13} /> Camera</button>
+    </header>
+    <div className={`dp-coord ${c.running ? 'on' : ''} ${mode}`} title="The durable coordinator (a Temporal workflow) and one agent per aircraft">
+      <i />{mode !== 'normal' ? <b>{mode === 'hold' ? 'Fleet held' : 'Fleet recalled'}</b> : null}
+      <span>{c.running ? c.summary.text : info.area ? 'Coordinator starting…' : 'Deploy the fleet to start'}</span></div>
+    <nav className="dp-tabs" role="tablist" aria-label="Drone workspace">{([['fleet', 'Fleet', states.length], ['mission', 'Mission', null], ['notes', 'Notes', info.notes.length || null], ['log', 'Log', null]] as const).map(([k, label, n]) =>
+      <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? 'on' : ''} onClick={() => go(k)}>{label}{n ? <em>{n}</em> : null}</button>)}</nav>
+
+    {tab === 'fleet' && <div className="dp-body" role="tabpanel">
+      <div className="dp-stats">
+        <div><strong>{airborne}</strong><span>Airborne</span></div>
+        <div><strong>{states.filter(d => d.task?.status === 'active').length}</strong><span>On task</span></div>
+        <div className={states.some(attention) ? 'attention' : ''}><strong>{states.filter(attention).length}</strong><span>Attention</span></div>
+        <div><strong>{info.jobs.filter(j => j.assigned_drone).length}<small>/{info.jobs.length}</small></strong><span>Jobs covered</span></div>
       </div>
-      <label className="task-pick"><span>Give a task</span>
-        <select value="" onChange={e => { void assign(s, e.target.value); }}><option value="" disabled>Choose…</option>{options.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}</select></label>
-      {sent && <p className="card-note">{sent}</p>}
-    </section>}
-    <section className="fleet-notes">
+      {!states.length && info.connections && <p className="card-note">No aircraft connected yet. Open Mission to deploy the fleet or add a drone.</p>}
+      <div className="dp-filters" role="group" aria-label="Filter aircraft">{(['all', 'airborne', 'attention'] as const).map(f => <button key={f} className={fleetFilter === f ? 'on' : ''} aria-pressed={fleetFilter === f} onClick={() => setFleetFilter(f)}>{f === 'all' ? 'All' : f === 'airborne' ? 'Airborne' : 'Attention'}</button>)}</div>
+      <ul className="dp-cards">{visibleStates.map(d => { const on = d.id === selected; return <li key={d.id} className={`dp-card ${on ? 'on' : ''} ${tone(d)}`}>
+        <button className="dp-card-main" onClick={() => onSelect(d.id)} aria-expanded={on}>
+          <span className="dp-icon"><AircraftIcon aircraft={d.aircraft} /></span>
+          <span className="dp-id"><b>{d.callsign}</b><span>{d.name}</span><em className={`src-tag ${d.source}`}>{SOURCE[d.source].tag}</em></span>
+          <span className={`dp-pill ${tone(d)}`}>{d.status === 'lost' ? 'No signal' : d.status === 'stale' ? 'Delayed' : d.mission.status}</span>
+          <span className="dp-task" title={d.mission.task}>{d.mission.task}</span>
+          <span className="dp-meters">
+            <span className="dp-bat" title="Battery"><i><b style={{ width: `${Number.isFinite(d.batteryPct) ? d.batteryPct : 0}%` }} className={d.batteryPct < 30 ? 'low' : ''} /></i><small className="num">{Number.isFinite(d.batteryPct) ? `${Math.round(d.batteryPct)}%` : '—'}</small></span>
+            <span className="dp-link" title={`Link ${Number.isFinite(d.linkDbm) ? Math.round(d.linkDbm) : '—'} dBm`}>{[1, 2, 3, 4].map(k => <i key={k} className={k <= linkBars(d.linkDbm) ? 'lit' : ''} style={{ height: 3 + k * 2 }} />)}</span>
+            <small className="num">{d.status === 'landed' ? 'on ground' : `${fmt(Math.round(ft(d.aglM) / 10) * 10)} ft`}</small>
+          </span>
+        </button>
+        {on && <div className="dp-detail">
+          <div className="dp-instruments">
+            <div><small>Altitude</small><b className="num">{fmt(Math.round(ft(d.aglM) / 10) * 10)}</b><em>ft AGL</em></div>
+            <div><small>Speed</small><b className="num">{fmt(kt(d.speedMps))}</b><em>kn</em></div>
+            <div><small>Heading</small><b className="num">{Math.round(d.headingDeg) % 360}°</b><em>{COMPASS[Math.round(d.headingDeg / 45) % 8]}</em></div>
+            <div><small>Battery</small><b className="num">{Number.isFinite(d.batteryPct) ? `${Math.round(d.batteryPct)}%` : '—'}</b><em>{Number.isFinite(d.minutesLeft) ? `~${Math.max(0, Math.round(d.minutesLeft))} min left` : '—'}</em></div>
+          </div>
+          <div className="dp-actions">
+            <button className="primary" onClick={() => onSelect(d.id)}><Plane size={13} /> Fly with</button>
+            <button className="secondary" onClick={() => onCamera(d.id)}><Video size={13} /> Camera</button>
+            <button className="secondary" onClick={() => onFull(d.id)}><Maximize2 size={13} /> Full view</button>
+          </div>
+          {t && <p className="dp-why"><em className={`task-status ${t.status}`}>{t.status}</em> {t.label}{t.reason ? ` · ${t.reason}` : ''}</p>}
+          <div className="dp-tasks" role="group" aria-label={`Give ${d.callsign} a task`}>{options.map(o => <button key={o.key} onClick={() => { void assign(d, o.key); }}>{o.label}</button>)}</div>
+          {sent && <p className="card-note">{sent}</p>}
+          <details className="dp-more"><summary>Aircraft details</summary><KeyValues rows={[
+            ['Airspace', op ? `${fmt(op.alt_lower_m)}–${fmt(op.alt_upper_m)} m AGL · ${op.geometry.type === 'circle' ? `${fmt(op.geometry.radius_m)} m radius` : 'survey box'} · ${op.state}` : '—'],
+            ['Agent', d.agent ? `${d.agent.summary.text ?? ''} · ${fmt(d.agent.age_s, 0)} s ago` : 'Starting…'],
+            ['Aircraft', `${d.aircraft === 'fixed-wing' ? 'Fixed-wing' : 'Quadcopter'} · ${SOURCE[d.source].long}`],
+            ['Link', `${PROTOCOL[d.protocol] ?? d.protocol}${d.autopilot ? ` · ${d.autopilot}` : ''} · ${Number.isFinite(d.linkDbm) ? Math.round(d.linkDbm) : '—'} dBm`],
+            ['Sensors', d.sensor], ['Position', <span className="num" key="p">{dm(d.lat, d.lon)}</span>], ['Connected', clock(d.flightS)],
+          ]} /></details>
+        </div>}
+        <button className="dp-cam" onClick={() => onCamera(d.id)} aria-label={`Open camera on ${d.callsign}`} title={`Camera · ${d.callsign}`}><Video size={14} /></button>
+      </li>; })}</ul>
+      {!visibleStates.length && states.length > 0 && <p className="card-note">{fleetFilter === 'attention' ? 'Nothing needs attention.' : 'No aircraft are airborne.'}</p>}
+    </div>}
+
+    {tab === 'mission' && <div className="dp-body" role="tabpanel">
+      <section className="dp-section"><header><b>What the fleet is for</b></header>
+        <div className="profile-pick" role="group" aria-label="What the fleet is for">{PROFILES.map(p => <button key={p.key} className={profile === p.key ? 'on' : ''} disabled={!info.area}
+          onClick={() => { if (p.key !== profile) onProfile(p.key); }} aria-pressed={profile === p.key}>{p.label}</button>)}</div>
+        <p className="profile-note">{PROFILES.find(p => p.key === profile)?.note}</p>
+        {(!info.area || info.area.bbox.some((v, i) => Math.abs(v - regionBox[i]) > 1e-6)) && <button className="mini-btn" onClick={onMonitorHere}>Operate over {regionName.length > 26 ? `${regionName.slice(0, 26)}…` : regionName}</button>}
+      </section>
+      {ops}
+      {info.connections ? <AddDrone store={store} count={states.length} />
+        : <p className="card-note">Drone connections are off: set TERRA_DRONE_TOKEN on the server, then add aircraft here.</p>}
+      <p className="fleet-foot">Reserved airspace is published as ASTM F3548-shaped operational intents at <code>/api/fleet/operations</code>. Real aircraft are never flown from the browser.</p>
+    </div>}
+
+    {tab === 'notes' && <div className="dp-body" role="tabpanel"><section className="fleet-notes">
       <header><b>Field notes</b><small>{s ? `${s.callsign}'s` : 'every aircraft'}, from what the cameras look at</small></header>
-      {notes.length ? <ol>{notes.slice(0, allNotes ? 40 : 4).map(n => <Note key={n.id} n={n} callsign={callsign(n.drone_id)} onFocus={onFocus} />)}</ol>
+      {notes.length ? <ol>{notes.slice(0, allNotes ? 40 : 8).map(n => <Note key={n.id} n={n} callsign={callsign(n.drone_id)} onFocus={onFocus} />)}</ol>
         : <p className="card-note">On station and every two minutes after, each aircraft's agent notes the ground its camera is on: Landsat surface temperature, radar change, land cover, height and the weather.</p>}
-      {notes.length > 4 && <button className="mini-btn" onClick={() => setAllNotes(a => !a)}>{allNotes ? 'Fewer' : `All ${Math.min(40, notes.length)} notes`}</button>}
-    </section>
-    {ops}
-    <section className="fleet-log">
+      {notes.length > 8 && <button className="mini-btn" onClick={() => setAllNotes(a => !a)}>{allNotes ? 'Fewer' : `All ${Math.min(40, notes.length)} notes`}</button>}
+    </section></div>}
+
+    {tab === 'log' && <div className="dp-body" role="tabpanel"><section className="fleet-log">
       <header><b>Coordination log</b><small>agents, aircraft and people, newest first</small></header>
-      {info.messages.length ? <ol>{info.messages.slice(0, 30).map(m => { const w = sender(m); return <li key={m.id}>
+      {info.messages.length ? <ol>{info.messages.slice(0, 40).map(m => { const w = sender(m); return <li key={m.id}>
         <span className={`who ${w.cls}`}>{w.who}</span><span className="what">{m.body.text ?? m.kind}</span><time>{ago(m.t)}</time></li>; })}</ol>
         : <p className="card-note">Decisions, hand-offs, warnings and acknowledgements appear here as the agents work.</p>}
-    </section>
-    {info.connections ? <AddDrone store={store} count={states.length} />
-      : <p className="card-note fleet-empty">Drone connections are off: set TERRA_DRONE_TOKEN on the server, then add aircraft here.</p>}
-    <p className="fleet-foot">Reserved airspace is published as ASTM F3548-shaped operational intents at <code>/api/fleet/operations</code>. Real aircraft are never flown from the browser.</p>
+    </section></div>}
   </div>;
 }
