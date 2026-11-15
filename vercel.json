@@ -5,11 +5,98 @@
   "installCommand": "npm ci",
   "outputDirectory": "dist",
   "functions": {
-    "api/proxy.js": { "maxDuration": 30 }
+    "api/proxy.js": {
+      "maxDuration": 30
+    }
   },
   "rewrites": [
-    { "source": "/api/:__terra_route*/", "destination": "/api/proxy" },
-    { "source": "/api/:__terra_route*", "destination": "/api/proxy" },
-    { "source": "/app", "destination": "/app.html" }
+    {
+      "source": "/api/connector/maps/imagery/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/labels/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/topo/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/topographic/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/light/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/relief-dark/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade_Dark/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/dark/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/dark-labels/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/terrain-base/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/World_Terrain_Base/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/hillshade/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/maps/transport/:z(\\d+)/:y(\\d+)/:x(\\d+)",
+      "destination": "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/:z/:y/:x"
+    },
+    {
+      "source": "/api/connector/gibs/:layer(BlueMarble_ShadedRelief_Bathymetry|VIIRS_Black_Marble)/:rest*",
+      "destination": "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/:layer/:rest*"
+    },
+    {
+      "source": "/api/connector/terrain",
+      "destination": "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer"
+    },
+    {
+      "source": "/api/connector/terrain/:kind(tile|tilemap)/:rest*",
+      "destination": "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer/:kind/:rest*"
+    },
+    {
+      "source": "/api/:__terra_route*/",
+      "destination": "/api/proxy"
+    },
+    {
+      "source": "/api/:__terra_route*",
+      "destination": "/api/proxy"
+    },
+    {
+      "source": "/app",
+      "destination": "/app.html"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/connector/(maps|gibs|terrain)/(.*)",
+      "headers": [
+        {
+          "key": "CDN-Cache-Control",
+          "value": "public, max-age=86400, stale-while-revalidate=604800"
+        }
+      ]
+    },
+    {
+      "source": "/api/connector/terrain",
+      "headers": [
+        {
+          "key": "CDN-Cache-Control",
+          "value": "public, max-age=86400"
+        }
+      ]
+    }
   ]
 }
