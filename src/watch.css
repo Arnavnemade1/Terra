@@ -1,0 +1,32 @@
+/* Area watch: a durable agent waiting for NISAR's next pass over the area, and its proposals. */
+.watch { display: grid; gap: 10px; margin-top: 14px; padding: 12px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--rule); }
+.watch header { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; }
+.watch header > svg { margin-top: 3px; color: var(--accent); }
+.watch header b { display: block; font-size: 13.5px; font-weight: 650; }
+.watch-title { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.watch header small { display: block; margin-top: 3px; font-size: 11.5px; line-height: 1.4; color: var(--fg-3); }
+.watch-chip { font: 600 10.5px var(--mono); padding: 2px 7px; border-radius: 4px; background: var(--surface-3); color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.watch-chip.proposal { background: var(--accent); color: #fff; }
+.watch-chip.dispatched { color: var(--ok); }
+.watch-chip.checking, .watch-chip.investigating { color: #8fc8ff; }
+.watch-facts { display: grid; margin: 0; border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--rule); }
+.watch-facts div { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 7px 10px; min-width: 0; }
+.watch-facts div + div { border-top: 1px solid var(--rule); }
+.watch-facts dt { font-size: 11px; color: var(--fg-3); }
+.watch-facts dd { margin: 0; display: grid; gap: 1px; min-width: 0; }
+.watch-facts dd b { font-size: 12.5px; font-weight: 600; }
+.watch-facts dd small { font: 500 10.5px var(--mono); color: var(--fg-3); overflow-wrap: anywhere; }
+.watch-msg { margin: 0; font-size: 12px; line-height: 1.45; color: var(--fg-2); }
+.watch-msg.warn { color: var(--warn); }
+.watch-proposal { display: grid; gap: 7px; padding: 10px; border-radius: var(--r-sm); border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--surface-2)); }
+.watch-proposal > b { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.watch-proposal p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--fg); }
+.watch-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.watch-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; }
+.watch-open { justify-self: start; font-size: 12px; }
+.watch-log { padding-top: 8px; border-top: 1px solid var(--rule); }
+.watch-log summary { cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--fg-3); }
+.watch-log ol { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 5px; }
+.watch-log li { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; font-size: 11.5px; line-height: 1.4; color: var(--fg-2); }
+.watch-log time { font: 500 10.5px var(--mono); color: var(--fg-3); }
+@media (max-width: 420px) { .watch-facts div { grid-template-columns: 1fr; gap: 2px; } }

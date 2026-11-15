@@ -19,6 +19,7 @@ import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
 import FleetOps, { DeployCard } from './FleetOps';
 import Verification, { type SignedSpot } from './Verification';
+import Watch from './Watch';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
 
@@ -781,6 +782,7 @@ export default function App() {
               {result && job && hotspots.length > 0 && <Verification jobId={job.id} spots={hotspots as unknown as SignedSpot[]} fleetArea={fleetAreaInvestigation}
                 onSpot={h => { setFocusSpot(h.rank); set('hotspots', { on: true }); const [w, s2, e, n] = h.bounds; const pad = Math.max(e - w, n - s2) * 1.5 + 0.01; globe.current?.flyTo([w - pad, s2 - pad, e + pad, n + pad]); }}
                 onWatch={() => { setMode('drones'); const first = droneStore.states().find(d => d.task?.params && String((d.task as { job_key?: string }).job_key ?? '').startsWith('orbit:patch')) ?? droneStore.states()[0]; if (first) { setSelectedDrone(first.id); followDrone(first.id); } }} />}
+              {result && job && <Watch jobId={job.id} name={region.name} bbox={job.bbox} onOpen={id => { void openJob({ id } as Investigation); }} />}
             </section>}
           </>}
           {tab === 'evidence' && <section className="evidence">
