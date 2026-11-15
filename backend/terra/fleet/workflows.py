@@ -10,7 +10,16 @@ DroneAgentWorkflow (one per aircraft, id "drone-agent-<id>")
     conformance to its reserved airspace; reports changes to the shared message log; signals the coordinator
     when something needs a decision now. Retires after the aircraft has been silent for ten minutes.
 
+Orchestration
+    Neither runs on a fixed clock. Each round says how long to wait before the next (about 2 s while something is
+    changing, 10-20 s for an idle or silent aircraft), and signals cut the wait short: the coordinator wakes the
+    agents of aircraft it has just tasked, the API wakes an agent when its aircraft registers or answers a task,
+    and agents nudge the coordinator when they find something urgent. The coordinator supervises the agents: an
+    aircraft in contact whose agent has gone quiet gets it woken, or started again if it has ended. Fleet-wide
+    commands (hold, recall, resume) are read from the central database at every round.
+
 Both continue as new periodically so their histories stay small, and both survive restarts of any process.
+A wait is a timer either way, so runs started before cadences were adaptive replay unchanged.
 """
 import asyncio
 from datetime import timedelta
@@ -20,19 +29,31 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, WorkflowAlreadyStartedError
 
 COORDINATOR_ID = "fleet-coordinator"
+ORCHESTRATION_V2 = "orchestration-v2"  # versioned change: coordinators started earlier replay without the new signals
 ROUND_SECONDS = 4
 AGENT_SECONDS = 3
 RETRY = RetryPolicy(initial_interval=timedelta(seconds=1), maximum_interval=timedelta(seconds=5), maximum_attempts=3)
+
+
+def _seconds(result: dict, default: float) -> timedelta:
+    return timedelta(seconds=min(30.0, max(1.0, float(result.get("next_s") or default))))
 
 
 @workflow.defn
 class DroneAgentWorkflow:
     def __init__(self) -> None:
         self.last: dict = {}
+        self.woken = False
+        self.reasons: list[str] = []
+
+    @workflow.signal
+    def wake(self, reason: str) -> None:
+        self.woken = True
+        self.reasons = (self.reasons + [str(reason)[:200]])[-10:]
 
     @workflow.query
     def status(self) -> dict:
-        return self.last
+        return {**self.last, "woken_by": self.reasons[-3:]}
 
     @workflow.run
     async def run(self, drone_id: str, start_round: int = 0) -> str:
@@ -53,7 +74,11 @@ class DroneAgentWorkflow:
                     pass
             if n - start_round >= 400:
                 workflow.continue_as_new(args=[drone_id, n])
-            await asyncio.sleep(AGENT_SECONDS)
+            try:
+                await workflow.wait_condition(lambda: self.woken, timeout=_seconds(result, AGENT_SECONDS))
+            except asyncio.TimeoutError:
+                pass
+            self.woken = False
 
 
 @workflow.defn
@@ -93,13 +118,23 @@ class FleetCoordinatorWorkflow:
                 try:
                     await workflow.start_child_workflow(DroneAgentWorkflow.run, args=[drone_id, 0], id=f"drone-agent-{drone_id}",
                                                         parent_close_policy=workflow.ParentClosePolicy.ABANDON)
-                except WorkflowAlreadyStartedError:
-                    pass
+                except WorkflowAlreadyStartedError:  # alive but quiet: wake it rather than start a second one
+                    if workflow.patched(ORCHESTRATION_V2):
+                        await self._wake(drone_id, "the coordinator found its heartbeat quiet")
+            if workflow.patched(ORCHESTRATION_V2):
+                for drone_id in result.get("wake", []):
+                    await self._wake(drone_id, "new task")
             if self.round - start_round >= 250:
                 workflow.continue_as_new(self.round)
             try:
-                await workflow.wait_condition(lambda: self.nudged or self.stopping, timeout=timedelta(seconds=ROUND_SECONDS))
+                await workflow.wait_condition(lambda: self.nudged or self.stopping, timeout=_seconds(result, ROUND_SECONDS))
             except asyncio.TimeoutError:
                 pass
             self.nudged = False
         return "stopped"
+
+    async def _wake(self, drone_id: str, reason: str) -> None:
+        try:
+            await workflow.get_external_workflow_handle(f"drone-agent-{drone_id}").signal("wake", reason)
+        except Exception:  # the agent may have just ended; the next round starts it again
+            pass
