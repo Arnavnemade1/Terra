@@ -21,7 +21,7 @@ const PROFILES: { key: Profile; label: string; note: string }[] = [
   { key: 'thermal', label: 'Thermal watch', note: 'IR aircraft orbit the warmest ground in the latest cloud-free Landsat thermal scene.' },
   { key: 'search', label: 'Search', note: 'Four sectors, each flown as an expanding-square search from its centre at 90 m.' },
 ];
-const NOTE_LABEL: Record<string, string> = { warm: 'Warm ground', change: 'Changed ground', station: 'On station', observation: 'Observation' };
+const NOTE_LABEL: Record<string, string> = { warm: 'Warm ground', change: 'Changed ground', station: 'On station', observation: 'Observation', verify: 'Patch verified' };
 const SENSORS = [['eo', 'EO'], ['ir', 'IR'], ['lidar', 'Lidar'], ['multispectral', 'Multispectral'], ['gas', 'Gas']] as const;
 
 export function AircraftIcon({ aircraft }: { aircraft: DroneState['aircraft'] }) {
@@ -33,7 +33,7 @@ export function AircraftIcon({ aircraft }: { aircraft: DroneState['aircraft'] })
 function sender(m: FleetMessage) {
   if (m.sender === 'coordinator') return { who: 'Coordinator', cls: 'coord' };
   if (m.sender === 'operator') return { who: 'You', cls: 'op' };
-  if (m.sender.startsWith('agent:') && (m.kind === 'observation' || m.kind === 'relieved')) return { who: `${m.sender.slice(6)} agent`, cls: `agent ${m.kind}` };
+  if (m.sender.startsWith('agent:') && (m.kind === 'observation' || m.kind === 'relieved' || m.kind === 'verification')) return { who: `${m.sender.slice(6)} agent`, cls: `agent ${m.kind}` };
   if (m.sender.startsWith('agent:')) return { who: `${m.sender.slice(6)} agent`, cls: 'agent' };
   if (m.sender.startsWith('drone:')) return { who: m.sender.slice(6), cls: 'drone' };
   return { who: m.sender, cls: '' };

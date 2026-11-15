@@ -75,3 +75,6 @@
   .dp-instruments { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dp-actions { grid-template-columns: 1fr 1fr; }
 }
+
+.fleet-log .who.agent.verification { color: #7be36b; }
+.note.verify i { border-color: #7be36b; background: rgba(123, 227, 107, 0.3); } .note.verify .note-head em { color: #7be36b; }

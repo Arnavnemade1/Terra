@@ -8,7 +8,7 @@ const ACCENT = '#e5622d';
 const SILHOUETTE = C.Color.fromCssColorString(ACCENT);
 const RELAY_RANGE_M = 6000;  // as the coordinator plans: beyond this from launch, traffic goes through a relay
 const LINK = { good: C.Color.fromCssColorString('#7be36b'), fair: C.Color.fromCssColorString('#e8b04a'), poor: C.Color.fromCssColorString('#ef5b4c') };
-const NOTE_COLOR: Record<string, string> = { warm: '#ff6a3d', change: '#e8b04a', station: '#f4f1e8', observation: '#cfc9bb' };
+const NOTE_COLOR: Record<string, string> = { warm: '#ff6a3d', change: '#e8b04a', station: '#f4f1e8', observation: '#cfc9bb', verify: '#7be36b' };
 const TAG: Record<Source, string> = { real: 'LIVE', sitl: 'SITL', virtual: 'SIM' };
 const TAG_COLOR: Record<Source, string> = { real: '#9fe07a', sitl: '#8fc8ff', virtual: 'rgba(236, 233, 223, 0.45)' };
 
