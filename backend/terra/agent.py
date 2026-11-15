@@ -150,6 +150,14 @@ async def context_near(bbox: list[float], radius_km: float = 150, timeout: float
 
 
 # ---------------------------------------------------------------- acquisition selection
+CROSS = {"HV", "VH"}
+
+
+def _channels(o: dict) -> set[str]:
+    """Polarization channels as two letters (GCOV names the diagonal terms HHHH, HVHV, ...)."""
+    return {p[:2] if len(p) == 4 else p for p in o.get("polarizations") or []}
+
+
 def _ts(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
 
@@ -186,6 +194,11 @@ def select_acquisitions(mode: str, observations: list[dict], bbox: list[float], 
         items = sorted({o["date"]: o for o in items}.values(), key=lambda o: o["date"])
         if len(items) < 2:
             continue
+        # Without named dates, prefer dates that both carry a cross-polarized channel (HV or VH): only then can the
+        # change be split by polarization ("which polarization shows it"). Single-polarization dates are the fallback.
+        dual = [o for o in items if _channels(o) & CROSS]
+        if not (date_from or date_to) and len(dual) >= 2:
+            items = dual
         if date_from or date_to:
             start = _ts(f"{date_from}T00:00:00+00:00") if date_from else _ts(items[0]["date"])
             end = _ts(f"{date_to}T00:00:00+00:00") if date_to else _ts(items[-1]["date"])
@@ -199,17 +212,24 @@ def select_acquisitions(mode: str, observations: list[dict], bbox: list[float], 
         else:
             a, b = items[0], items[-1]
         days = (datetime.fromisoformat(b["date"].replace("Z", "+00:00")) - datetime.fromisoformat(a["date"].replace("Z", "+00:00"))).days
-        candidates.append((min(a["_cover"], b["_cover"]), days, key, a, b))
+        candidates.append((min(a["_cover"], b["_cover"]), days, key, a, b, bool(_channels(a) & _channels(b) & CROSS), groups[key]))
     if not candidates:
         return [], "No two acquisitions of this area share a track, direction and frame, which a fair change comparison requires."
     if date_from or date_to:
         target = (_ts(f"{date_to}T00:00:00+00:00") if date_to else 0) - (_ts(f"{date_from}T00:00:00+00:00") if date_from else 0)
         candidates.sort(key=lambda c: (c[0] >= 0.95, -abs(c[1] * 86400 - target) if date_from and date_to else c[1]), reverse=True)
     else:
-        candidates.sort(key=lambda c: (c[0] >= 0.95, c[1] if preference != "recent_pair" else -c[1]), reverse=True)
-    cover, days, key, a, b = candidates[0]
+        candidates.sort(key=lambda c: (c[0] >= 0.95, c[5], c[1] if preference != "recent_pair" else -c[1]), reverse=True)
+    cover, days, key, a, b, split, members = candidates[0]
+    shared = sorted(_channels(a) & _channels(b))
+    if split:
+        outside = sorted({o["date"][:10] for o in members if not (_channels(o) & CROSS) and (o["date"] < a["date"] or o["date"] > b["date"])})
+        pols = (f" Both dates carry {' and '.join(shared)}, so the change can be split by polarization."
+                + (f" Single-polarization dates ({', '.join(outside)}) would widen the span but drop {'/'.join(sorted(set(shared) & CROSS))}." if outside and not (date_from or date_to) else ""))
+    else:
+        pols = f" Only {'/'.join(shared) or 'one polarization'} is shared by both dates, so the change cannot be split by polarization."
     return [a["id"], b["id"]], (f"Same track ({key[0]}, {str(key[1] or '').lower()}, frame {key[2]}) and processing ({str(key[3]).lower()}, {key[4]}) "
-                                f"on {a['date'][:10]} and {b['date'][:10]}, {days} days apart. Native alignment and quality masks will be checked before comparison.")
+                                f"on {a['date'][:10]} and {b['date'][:10]}, {days} days apart.{pols} Native alignment and quality masks will be checked before comparison.")
 
 
 def heuristic_mode(question: str) -> str:

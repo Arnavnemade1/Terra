@@ -118,6 +118,22 @@ async def test_model_cannot_use_numbers_from_user_question_as_evidence(monkeypat
         await write_answer(investigation, {})
 
 
+def test_dual_polarization_pairs_are_preferred_so_the_change_can_be_split():
+    """Etna, track 51: 2026-06-17 is HH-only, 08-28 .. 10-15 carry HH+HV. The widest pair (06-17 -> 10-15) could not say
+    which polarization shows the change; the widest dual-polarization pair (08-28 -> 10-15) can, and the plan says so."""
+    items = [obs(1, "2026-06-17T17:55:06Z", pols=("HH",)), obs(2, "2026-08-28T17:55:02Z"), obs(3, "2026-09-21T17:55:02Z"), obs(4, "2026-10-15T17:55:02Z")]
+    ids, why = select_acquisitions("change", items, AOI)
+    assert ids == ["NISAR_2", "NISAR_4"]
+    assert "Both dates carry HH and HV" in why and "2026-06-17" in why and "48 days" in why
+    assert select_acquisitions("change", items, AOI, "recent_pair")[0] == ["NISAR_3", "NISAR_4"]
+    # Named dates are honoured even when that costs the cross-polarized channel, and the plan says what was lost.
+    ids, why = select_acquisitions("change", items, AOI, "widest_span", "2026-06-15", "2026-10-15")
+    assert ids == ["NISAR_1", "NISAR_4"] and "cannot be split by polarization" in why
+    # One dual-polarization date is not a pair: fall back to the widest span.
+    ids, _ = select_acquisitions("change", [obs(1, "2026-06-17T17:55:06Z", pols=("HH",)), obs(4, "2026-10-15T17:55:02Z")], AOI)
+    assert ids == ["NISAR_1", "NISAR_4"]
+
+
 def test_acquisitions_with_different_polarizations_are_not_compared():
     items = [obs(1, "2026-03-20T10:00:00Z", pols=("HH",)), obs(2, "2026-06-12T10:00:00Z", pols=("VV",))]
     assert select_acquisitions("change", items, AOI)[0] == []
