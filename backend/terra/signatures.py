@@ -178,6 +178,62 @@ VEGETATED = {"Tree cover", "Shrubland", "Grassland", "Cropland", "Mangroves", "H
 
 
 def judge(hypothesis: str, observed: dict, context: dict | None = None) -> dict:
+    """Optical change between the Sentinel-2 dates first (an independent sensor), then land cover and temperature."""
+    optical = _judge_optical(hypothesis, observed.get("optical"))
+    rest = _judge_static(hypothesis, observed, context)
+    if optical and optical.get("alternative"):
+        return {**rest, "verdict": "inconclusive", "reasons": optical["reasons"] + rest["reasons"][:1], "alternative": optical["alternative"]}
+    if optical and optical["verdict"] != "inconclusive":
+        agrees = rest["verdict"] == optical["verdict"]
+        return {"verdict": optical["verdict"], "reasons": optical["reasons"] + (rest["reasons"] if agrees else []), "evidence": "optical"}
+    if optical and rest["verdict"] == "inconclusive":
+        return {**rest, "reasons": optical["reasons"] + rest["reasons"][:1]}
+    return rest
+
+
+def _judge_optical(hypothesis: str, o: dict | None) -> dict | None:
+    """What visible reflectance (Sentinel-2, before and after the radar dates) says about the hypothesis."""
+    if not o:
+        return None
+    db, dg = o["d_brightness"], o["d_greenness"]
+    when = f"between {o['before_date']} and {o['after_date']} (Sentinel-2)"
+    # Snow, cloud or a volcanic plume (bright and colourless) in either image: the ground itself is not seen there.
+    # Snow is bright and colourless; cloud, haze and plumes are mid-grey and colourless; dark lava is colourless but dark.
+    white = lambda b, c: b is not None and ((b >= 0.5 and (c if c is not None else 1) <= 0.15) or (b >= 0.33 and (c if c is not None else 1) <= 0.06))  # noqa: E731
+    before_white, after_white = white(o.get("brightness_before"), o.get("colour_before")), white(o.get("brightness_after"), o.get("colour_after"))
+    if before_white or after_white:
+        which = "earlier" if before_white else "later"; date = o["before_date"] if before_white else o["after_date"]
+        alternative = None
+        if before_white and not after_white and hypothesis in ("brighter", "roughening", "structure"):
+            alternative = f"snowmelt: snow in the {date} image and bare ground after; wet snow lowers L-band return, so its loss brightens the radar"
+        elif after_white and not before_white and hypothesis in ("darker", "smoothing", "water"):
+            alternative = f"snow, cloud or a plume in the {date} image; wet snow darkens L-band return"
+        return {"verdict": "inconclusive", "reasons": [f"snow, cloud or a plume covers the {which} Sentinel-2 image ({date}) here, so visible change cannot be read"],
+                "alternative": alternative}
+    visible = abs(db) >= 0.06 or abs(dg) >= 0.05
+    if hypothesis == "water":
+        if db <= -0.08 and o["brightness_after"] <= 0.22:
+            return {"verdict": "supports", "reasons": [f"visible reflectance fell to a dark, water-like {o['brightness_after']:.2f} {when}"]}
+        if db >= 0.05:
+            return {"verdict": "contradicts", "reasons": [f"the ground got brighter in visible light {when} ({db:+.2f}); new water darkens it"]}
+    elif hypothesis == "vegetation_loss":
+        if dg <= -0.05:
+            return {"verdict": "supports", "reasons": [f"greenness fell {when} ({dg:+.2f})"]}
+        if dg >= 0.04:
+            return {"verdict": "contradicts", "reasons": [f"greenness rose {when} ({dg:+.2f})"]}
+    elif hypothesis == "vegetation_gain":
+        if dg >= 0.05:
+            return {"verdict": "supports", "reasons": [f"greenness rose {when} ({dg:+.2f})"]}
+        if dg <= -0.04:
+            return {"verdict": "contradicts", "reasons": [f"greenness fell {when} ({dg:+.2f})"]}
+    elif visible:  # structures, roughening, smoothing, single-polarization brighter/darker: did the surface visibly change?
+        return {"verdict": "supports", "reasons": [f"the surface visibly changed too {when}: brightness {db:+.2f}, greenness {dg:+.2f}"]}
+    if abs(db) < 0.02 and abs(dg) < 0.02:
+        return {"verdict": "inconclusive", "reasons": [f"no visible change {when}: a radar-only change (moisture, roughness or geometry) is possible"]}
+    return {"verdict": "inconclusive", "reasons": [f"a small visible change {when} (brightness {db:+.2f}, greenness {dg:+.2f})"]}
+
+
+def _judge_static(hypothesis: str, observed: dict, context: dict | None = None) -> dict:
     """Whether a drone's measured observation supports a patch's hypothesis: supports, contradicts or inconclusive.
 
     `observed` is a field-note observation (land cover from ESA WorldCover 2021, i.e. before the change,
@@ -212,6 +268,18 @@ def judge(hypothesis: str, observed: dict, context: dict | None = None) -> dict:
             verdict, reasons = "supports", ["WorldCover maps built-up land here"]
         elif cover in ("Herbaceous wetland", "Mangroves"):
             verdict, reasons = "supports", [f"WorldCover maps {cover.lower()}: water under vegetation can raise co-polarized return (double bounce)"]
+    elif hypothesis == "brighter":  # single polarization: rougher or wetter ground, structures or debris
+        if cover == "Built-up":
+            verdict, reasons = "supports", ["WorldCover maps built-up land here: structures raise radar return"]
+        elif p95 is not None and temp is not None and temp >= p95:
+            verdict, reasons = "supports", [f"surface {temp:.0f} °C is among the warmest 5% of the area: consistent with fresh deposits or disturbed ground"]
+        elif cover in ("Permanent water bodies",):
+            verdict, reasons = "contradicts", ["WorldCover maps open water here, which returns little to the radar"]
+    elif hypothesis == "darker":  # single polarization: smoother or drier ground, water, vegetation loss
+        if cover in ("Permanent water bodies", "Herbaceous wetland"):
+            verdict, reasons = "supports", [f"WorldCover maps {cover.lower()} here: smooth water returns little to the radar"]
+        elif cool:
+            verdict, reasons = "supports", [f"surface {temp:.0f} °C is cooler than the area's median {median:.0f} °C, as wet ground or water is by day"]
     elif hypothesis in ("roughening", "smoothing"):
         if p95 is not None and temp is not None and temp >= p95:
             verdict, reasons = "supports", [f"surface {temp:.0f} °C is among the warmest 5% of the area: consistent with disturbed or newly deposited ground"]

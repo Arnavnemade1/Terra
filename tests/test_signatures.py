@@ -79,3 +79,31 @@ def test_unchanged_ground_is_modelled_as_speckle_when_the_looks_are_known():
     assert 0 < up < 0.2 and abs(up - down) < 0.02  # symmetric for equal looks
     change = np.concatenate([speckle, db(9_000) + 6 - db(9_000)])
     assert change_thresholds(change, None, (L, L))["increase_source"] == "automatic"
+
+
+def test_single_polarization_patches_can_still_be_checked():
+    ctx = {"surface_median_c": 25.0}
+    assert judge("brighter", {"cover": "Built-up"}, ctx)["verdict"] == "supports"
+    assert judge("brighter", {"cover": "Bare / sparse vegetation", "surface_c": 44.0, "surface_p95_c": 40.0}, ctx)["verdict"] == "supports"
+    assert judge("darker", {"cover": "Grassland", "surface_c": 20.0}, ctx)["verdict"] == "supports"
+    assert judge("darker", {"cover": "Grassland", "surface_c": 26.0}, ctx)["verdict"] == "inconclusive"
+
+
+def test_optical_change_is_independent_evidence():
+    opt = lambda db, dg, after=0.4: {"optical": {"before_date": "2026-06-10", "after_date": "2026-10-15", "d_brightness": db, "d_greenness": dg,  # noqa: E731
+                                                 "brightness_before": after - db, "brightness_after": after, "greenness_before": 0.1, "greenness_after": 0.1 + dg}}
+    j = judge("vegetation_loss", opt(0.05, -0.12)); assert j["verdict"] == "supports" and j["evidence"] == "optical" and "greenness fell" in j["reasons"][0]
+    assert judge("vegetation_loss", opt(0.0, 0.08))["verdict"] == "contradicts"
+    assert judge("water", opt(-0.15, -0.02, after=0.1))["verdict"] == "supports"
+    assert judge("brighter", opt(-0.1, 0.0))["verdict"] == "supports"
+    flat = judge("brighter", opt(0.005, 0.004))
+    assert flat["verdict"] == "inconclusive" and "radar-only change" in flat["reasons"][0]
+
+
+def test_snow_or_cloud_in_an_image_is_named_not_counted_as_change():
+    snowy = {"optical": {"before_date": "2026-06-10", "after_date": "2026-10-15", "brightness_before": 0.82, "brightness_after": 0.12,
+                         "colour_before": 0.08, "colour_after": 0.07, "d_brightness": -0.70, "d_greenness": -0.07, "greenness_before": 0.02, "greenness_after": -0.05}}
+    j = judge("brighter", snowy)
+    assert j["verdict"] == "inconclusive" and "snowmelt" in j["alternative"] and "Sentinel-2" in j["reasons"][0]
+    plume = {"optical": {**snowy["optical"], "brightness_before": 0.3, "colour_before": 0.1, "brightness_after": 0.42, "colour_after": 0.03}}
+    assert judge("darker", {**plume, "optical": {**plume["optical"], "brightness_after": 0.6}})["verdict"] == "inconclusive"
