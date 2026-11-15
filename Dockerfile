@@ -12,11 +12,13 @@ ENV PYTHONUNBUFFERED=1 \
     TERRA_TILE_WARM=0
 
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 tini \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libexpat1 libgomp1 tini \
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
 COPY backend ./backend
-RUN pip install --no-cache-dir . && mkdir -p /data
+RUN pip install --no-cache-dir . \
+    && python -c "import rasterio, h5py, numpy, scipy, pyproj; import terra.science" \
+    && mkdir -p /data
 
 EXPOSE 8000
 ENTRYPOINT ["/usr/bin/tini", "--"]
