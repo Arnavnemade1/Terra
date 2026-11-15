@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable, Writable } from 'node:stream';
-import handler from '../api/[...path].js';
+import handler from '../api/proxy.js';
 
 class ResponseSink extends Writable {
   constructor() { super(); this.headers = {}; this.chunks = []; this.statusCode = 200; this.headersSent = false; }
@@ -46,6 +46,23 @@ test('Vercel-parsed investigation bodies and idempotency keys reach the backend 
   });
   const req = request('POST', '/api/investigations', { question: 'What changed?' }); req.headers['idempotency-key'] = 'test-run';
   const res = new ResponseSink(); await handler(req, res); assert.equal(res.statusCode, 201); assert.equal(JSON.parse(res.text).id, 'job');
+});
+test('rewritten nested API routes retain their path and provider query parameters', async t => {
+  configure(t, async url => {
+    assert.equal(url.href, 'https://backend.example/api/investigations/job/artifacts/before.png?download=1');
+    return new Response('image');
+  });
+  const res = new ResponseSink();
+  await handler(request('GET', '/api/proxy?download=1&__terra_route=investigations%2Fjob%2Fartifacts%2Fbefore.png'), res);
+  assert.equal(res.statusCode, 200); assert.equal(res.text, 'image');
+});
+test('invalid rewritten routes cannot escape the API prefix', async t => {
+  configure(t, () => assert.fail('must not fetch'));
+  for (const route of ['../private', 'connector/../private', '%2e%2e/private', '//external.example', 'connector\\private']) {
+    const res = new ResponseSink();
+    await handler(request('GET', '/api/proxy?__terra_route=' + encodeURIComponent(route)), res);
+    assert.equal(res.statusCode, 400);
+  }
 });
 test('invalid configuration and backend failures do not disclose private error content', async t => {
   configure(t, async () => { throw new Error('sensitive upstream details'); });

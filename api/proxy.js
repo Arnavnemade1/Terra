@@ -18,7 +18,18 @@ export default async function handler(req, res) {
   }
   const incoming = new URL(req.url, 'https://terra.invalid');
   if (!incoming.pathname.startsWith('/api/')) return res.status(404).json({ detail: 'API route not found.' });
-  upstream.pathname = incoming.pathname;
+  // Vite deployments need an explicit rewrite to match multiple path segments.
+  // Vercel may expose the destination URL to the function, so carry the route
+  // separately from provider query parameters and remove it before forwarding.
+  const route = incoming.searchParams.get('__terra_route');
+  if (route !== null) {
+    if (!route || route.split('/').some(part => !part || part === '.' || part === '..') || /[\\?#]/.test(route)) return res.status(400).json({ detail: 'Invalid API route.' });
+    upstream.pathname = `/api/${route}`;
+    incoming.searchParams.delete('__terra_route');
+  } else {
+    upstream.pathname = incoming.pathname;
+  }
+  if (!upstream.pathname.startsWith('/api/')) return res.status(400).json({ detail: 'Invalid API route.' });
   upstream.search = incoming.search;
   const headers = new Headers();
   for (const name of requestHeaders) if (req.headers[name]) headers.set(name, req.headers[name]);
