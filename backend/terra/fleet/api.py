@@ -18,6 +18,7 @@ another machine always need the token, and an aircraft's own token never grants 
   POST /api/fleet/drones/{id}/control  manual flight setpoints for a virtual aircraft (never a real one)
   POST /api/fleet/drones/{id}/release  hand a manually flown aircraft back to the coordinator
   GET  /api/fleet/operations           reserved airspace as operational intents (ASTM F3548-shaped)
+  POST /api/fleet/command              fleet-wide: hold (every airborne aircraft holds), recall (all return), resume
   POST /api/fleet/enroll               a per-aircraft token and the command that connects it (this machine only)
   GET  /api/fleet/enrollments          issued aircraft tokens (never the tokens themselves)
   POST /api/fleet/enrollments/{id}/revoke   stop accepting an aircraft's token
@@ -130,6 +131,8 @@ class Area(BaseModel):
     # What the fleet is for: watching measured change, watching the warmest ground (Landsat thermal), or searching.
     profile: Literal["change", "thermal", "search"] = "change"
     investigation_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,80}$")
+    # Where the crew sets up (a deployment anywhere); the area's centre when omitted.
+    launch: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
     @field_validator("bbox")
     @classmethod
@@ -137,6 +140,17 @@ class Area(BaseModel):
         w, s, e, n = v
         if not (-180 <= w < e <= 180 and -90 <= s < n <= 90 and e - w <= 2 and n - s <= 2):
             raise ValueError("Use an area up to 2 degrees across.")
+        return v
+
+    @field_validator("launch")
+    @classmethod
+    def near_the_area(cls, v: list[float] | None, info) -> list[float] | None:
+        box = info.data.get("bbox")
+        if v is None or not box:
+            return v
+        lon, lat = v
+        if not (box[0] - 0.25 <= lon <= box[2] + 0.25 and box[1] - 0.25 <= lat <= box[3] + 0.25):
+            raise ValueError("Launch from inside the area or close to it.")
         return v
 
 
@@ -160,6 +174,11 @@ class OperatorTask(BaseModel):
         if not (-180 <= w < e <= 180 and -90 <= s < n <= 90 and e - w <= 1 and n - s <= 1):
             raise ValueError("Use a west, south, east, north box on Earth up to 1 degree across.")
         return v
+
+
+class Command(BaseModel):
+    action: Literal["hold", "recall", "resume"]
+    reason: str = Field(default="", max_length=120)
 
 
 class Setpoint(BaseModel):
@@ -219,6 +238,16 @@ def _workspace_origin(origin: str, request: Request) -> bool:
     return parts.scheme in ("http", "https") and (host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost"))
 
 
+async def wake_agent(drone_id: str, reason: str) -> None:
+    """Cut an aircraft's agent's wait short (its next round runs now). Quietly does nothing if it is not running."""
+    try:
+        client = _client["value"]
+        if client is not None:
+            await client.get_workflow_handle(f"drone-agent-{drone_id}").signal("wake", reason)
+    except Exception:
+        pass
+
+
 async def _db(fn, *args):
     return await asyncio.to_thread(fn, *args)
 
@@ -256,6 +285,8 @@ async def register(body: Register, authorization: str | None = Header(default=No
     await _db(_token, authorization, body.id)
     db = fleet_db()
     await _db(db.register, body.model_dump())
+    asyncio.create_task(ensure_coordinator(f"{body.id} joined"))
+    asyncio.create_task(wake_agent(body.id, "registered"))
     return {"registered": body.id, "server_time": time.time(), "area": await _db(db.area)}
 
 
@@ -285,6 +316,7 @@ async def acknowledge(task_id: str, body: Ack, authorization: str | None = Heade
         raise HTTPException(404, "Unknown task for this aircraft.")
     if body.status in ("completed", "failed", "rejected"):
         asyncio.create_task(ensure_coordinator(f"{body.id} reported {body.status}"))
+    asyncio.create_task(wake_agent(body.id, f"task {body.status}"))
     return {"task": _task_view(task)}
 
 
@@ -298,8 +330,8 @@ async def area_for_ground_stations(authorization: str | None = Header(default=No
 @router.get("", dependencies=[Depends(operator)])
 async def fleet_state():
     db = fleet_db()
-    drones, tasks, operations, agents, messages, area, targets, jobs, notes = await asyncio.gather(
-        _db(db.drones), _db(db.tasks), _db(db.operations), _db(db.agents), _db(db.messages, 60), _db(db.area), _db(db.targets), _db(db.jobs), _db(db.notes, 80))
+    drones, tasks, operations, agents, messages, area, targets, jobs, notes, mode = await asyncio.gather(
+        _db(db.drones), _db(db.tasks), _db(db.operations), _db(db.agents), _db(db.messages, 60), _db(db.area), _db(db.targets), _db(db.jobs), _db(db.notes, 80), _db(db.mode))
     by_drone = {t["drone_id"]: t for t in tasks}
     ops = {o["drone_id"]: o for o in operations}
     tracks = await asyncio.gather(*[_db(db.track, d["id"], 20) for d in drones])
@@ -317,6 +349,9 @@ async def fleet_state():
                    for d, tr in zip(drones, tracks)],
         "messages": messages,
         "notes": [{k: n[k] for k in ("id", "t", "drone_id", "task_id", "kind", "lon", "lat", "text", "data")} for n in notes],
+        "mode": mode,
+        "agents": [{"id": a["id"], "kind": a["kind"], "workflow_id": a["workflow_id"], "status": a["status"], "age_s": a["age_s"],
+                    "next_s": a["summary"].get("next_s"), "round": a["summary"].get("round"), "text": a["summary"].get("text")} for a in agents],
     }
 
 
@@ -354,9 +389,22 @@ async def set_area(body: Area):
         targets = (await thermal_targets(body.bbox)) + [t for t in targets if t["kind"] == "summit"][:2]
     elif body.profile == "search":
         targets = search_sectors(body.bbox)
-    area = await _db(db.set_area, body.name, body.bbox, targets, body.investigation_id, body.profile)
+    area = await _db(db.set_area, body.name, body.bbox, targets, body.investigation_id, body.profile, body.launch)
     running = await ensure_coordinator("monitoring area updated")
     return {"area": area, "coordinator": running, "targets": len(targets)}
+
+
+@router.post("/command", dependencies=[Depends(operator)])
+async def fleet_command(body: Command):
+    """Fleet-wide orders, applied by the coordinator at its next round (it is woken at once)."""
+    db = fleet_db()
+    mode = {"hold": "hold", "recall": "recall", "resume": "normal"}[body.action]
+    reason = body.reason.strip() or {"hold": "Every airborne aircraft holds its position.", "recall": "Every aircraft returns to launch.",
+                                     "resume": "The auction assigns jobs again."}[body.action]
+    state = await _db(db.set_mode, mode, reason)
+    await _db(db.message, "operator", "all", "command", {"text": f"Fleet {body.action}: {reason}"})
+    running = await ensure_coordinator(f"fleet {body.action}")
+    return {"mode": state, "coordinator": running}
 
 
 @router.post("/tasks", status_code=201, dependencies=[Depends(operator)])
