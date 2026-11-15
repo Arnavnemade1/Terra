@@ -318,6 +318,11 @@ async def register(body: Register, authorization: str | None = Header(default=No
     return {"registered": body.id, "server_time": time.time(), "area": await _db(db.area)}
 
 
+# When the workspace last polled GET /fleet. Only the map page does, so this says whether anyone is looking.
+_viewer = {"seen": 0.0}
+VIEWER_TTL_S = 20.0
+
+
 @router.post("/telemetry", status_code=202)
 async def telemetry(body: Telemetry, authorization: str | None = Header(default=None)):
     await _db(_token, authorization, body.id)
@@ -330,7 +335,8 @@ async def telemetry(body: Telemetry, authorization: str | None = Header(default=
     drones = await _db(db.drones)
     me = next((d for d in drones if d["id"] == body.id), None)
     control = (await _db(db.control, body.id)).get(body.id) if me and me["origin"] in ("virtual", "sitl") else None
-    return {"accepted": accepted, "server_time": time.time(), "task": _task_view(task), "control": control, "area": await _db(db.area)}
+    return {"accepted": accepted, "server_time": time.time(), "task": _task_view(task), "control": control, "area": await _db(db.area),
+            "watched": time.time() - _viewer["seen"] < VIEWER_TTL_S}
 
 
 @router.post("/tasks/{task_id}/ack")
@@ -357,6 +363,7 @@ async def area_for_ground_stations(authorization: str | None = Header(default=No
 # ---------------------------------------------------------------- workspace
 @router.get("", dependencies=[Depends(operator)])
 async def fleet_state(request: Request):
+    _viewer["seen"] = time.time()
     db = fleet_db()
     drones, tasks, operations, agents, messages, area, targets, jobs, notes, mode = await asyncio.gather(
         _db(db.drones), _db(db.tasks), _db(db.operations), _db(db.agents), _db(db.messages, 60), _db(db.area), _db(db.targets), _db(db.jobs), _db(db.notes, 80), _db(db.mode))

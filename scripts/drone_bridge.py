@@ -218,6 +218,9 @@ class Virtual:
                 "gimbal": {"heading_deg": round(gimbal["heading_deg"] % 360, 1), "pitch_deg": round(max(-90, min(30, gimbal["pitch_deg"])), 1)}}
 
 
+IDLE_CHECK_S = 8.0  # how often a paused virtual fleet asks whether the map is open again
+
+
 def run_virtual(terra: Terra, count: int, launch: tuple[float, float] | None, rate: float) -> None:
     area = None
     while area is None:
@@ -235,12 +238,14 @@ def run_virtual(terra: Terra, count: int, launch: tuple[float, float] | None, ra
     last = time.monotonic()
     while True:
         now = time.monotonic(); dt = min(1.0, now - last); last = now
+        watched = False
         for v in fleet:
             control = getattr(v, "control", None)
             telemetry, acks = v.step(dt, control)
             reply = terra.call("POST", "/api/fleet/telemetry", telemetry)
             if not reply:
                 continue
+            watched = watched or bool(reply.get("watched", True))
             if reply.get("register"):
                 terra.call("POST", "/api/fleet/register", {"id": v.id, "name": v.name, "origin": "virtual", "aircraft": v.aircraft, "capabilities": v.caps}); continue
             v.control = reply.get("control")
@@ -258,6 +263,9 @@ def run_virtual(terra: Terra, count: int, launch: tuple[float, float] | None, ra
             for task_id, status, detail in acks:
                 if v.acked.get(task_id) != status:
                     terra.call("POST", f"/api/fleet/tasks/{task_id}/ack", {"id": v.id, "status": status, "detail": detail}); v.acked[task_id] = status
+        if fleet and not watched:
+            # Nobody has the map open: the simulation pauses and only checks back, so an idle server stays quiet.
+            time.sleep(IDLE_CHECK_S); last = time.monotonic(); continue
         time.sleep(max(0.0, 1 / rate - (time.monotonic() - now)))
 
 
