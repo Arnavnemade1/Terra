@@ -8,6 +8,7 @@ import { Relief, type Grid, type ReliefOptions, type TerrainFeature, type Terrai
 import { DroneLayer } from './droneLayer';
 import { droneStore } from './drones';
 import { imagery as tileSource, terrainUrl, googleTilesUrl } from './tiles';
+import { installSmoothCamera } from './smoothCamera';
 
 export type GlobeHandle = {
   home: () => void; flyTo: (b: Bounds) => void; flyToPoint: (lon: number, lat: number, heightM?: number) => void;
@@ -73,6 +74,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const credits = useRef<HTMLDivElement>(null);
   const viewer = useRef<C.Viewer | null>(null);
   const latest = useRef(props); latest.current = props;
+  const baseError = useRef(2);
   const [error, setError] = useState('');
   const [ready, setReady] = useState(false);
   const [notice, setNotice] = useState('');
@@ -189,7 +191,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   useEffect(() => {
     let disposed = false; let v: C.Viewer | undefined; let handler: C.ScreenSpaceEventHandler | undefined;
     let telemetryTimer: ReturnType<typeof setInterval> | undefined; let clockTimer: ReturnType<typeof setInterval> | undefined;
-    let terrainReady = false; let imagery = 'CONNECTING'; let frames = 0; let last = performance.now();
+    let terrainReady = false; let imagery = 'CONNECTING'; let frames = 0; let last = performance.now(); let smoothOff: (() => void) | null = null;
     try {
       C.Ion.defaultAccessToken = '';
       v = new C.Viewer(mount.current!, {
@@ -221,7 +223,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       v.resolutionScale = Math.min(window.devicePixelRatio, 1.5);
       const controller = scene.screenSpaceCameraController;
       controller.minimumZoomDistance = 40; controller.maximumZoomDistance = 45_000_000; controller.enableCollisionDetection = true;
-      controller.inertiaSpin = 0.9; controller.inertiaTranslate = 0.88; controller.inertiaZoom = 0.8;
+      // Eased wheel zoom toward the cursor, softer inertia, coarser tiles while moving (smoothCamera.ts).
+      smoothOff = installSmoothCamera(v, { baseError: () => baseError.current });
       // Trackpad pinch arrives as ctrl+wheel; let it zoom like the wheel.
       controller.zoomEventTypes = [C.CameraEventType.WHEEL, C.CameraEventType.PINCH, { eventType: C.CameraEventType.WHEEL, modifier: C.KeyboardEventModifier.CTRL }];
 
@@ -394,7 +397,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       void providers();
     } catch (err) { setError(err instanceof Error ? err.message : 'WebGL could not initialize.'); }
     return () => {
-      disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy();
+      disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy(); smoothOff?.();
       live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); drones.current?.destroy(); live.current = null; modes.current = null; relief.current = null; drones.current = null;
       droneStore.groundAt = null;
       if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tilesLoading.current = false; tilesHaveView.current=false;
@@ -464,7 +467,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     retune.current();
     v.terrainProvider = props.terrain && terrainProvider.current ? terrainProvider.current : new C.EllipsoidTerrainProvider();
     v.resolutionScale = props.quality === 'high' ? Math.min(window.devicePixelRatio, 2) : props.quality === 'low' ? 0.8 : Math.min(window.devicePixelRatio, 1.5);
-    v.scene.globe.maximumScreenSpaceError = props.quality === 'high' ? 1.3 : props.quality === 'low' ? 4 : 2;
+    baseError.current = props.quality === 'high' ? 1.3 : props.quality === 'low' ? 4 : 2;
+    v.scene.globe.maximumScreenSpaceError = baseError.current;
     v.scene.requestRender();
   }, [ready, props.terrain, props.lighting, props.quality, props.photoreal]);
   useEffect(() => { const v = viewer.current; if (v && labelLayer.current) { labelLayer.current.show = props.labels; v.scene.requestRender(); } }, [ready, props.labels]);
