@@ -7,7 +7,7 @@ import { createStarSky } from './sky';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature, type TerrainReading } from './relief';
 import { DroneLayer } from './droneLayer';
 import { droneStore } from './drones';
-import { imagery as tileSource, terrainUrl } from './tiles';
+import { imagery as tileSource, terrainUrl, googleTilesUrl } from './tiles';
 
 export type GlobeHandle = {
   home: () => void; flyTo: (b: Bounds) => void; flyToPoint: (lon: number, lat: number, heightM?: number) => void;
@@ -15,7 +15,7 @@ export type GlobeHandle = {
   /** Frame the area of interest, magnified `factor` times relative to a full view of it. */
   frame: (factor: number) => void;
   /** Bring a drone into view from behind and above. */
-  followDrone: (id: string) => void;
+  followDrone: (id: string) => void; stopFollowing: () => void; following: () => string | null;
   /** The exact ground point under an open drone camera's crosshair (for its line of sight on the map). */
   droneSight: (p: { id: string; lon: number; lat: number } | null) => void;
 };
@@ -32,7 +32,8 @@ type Props = {
   labels: boolean; photoreal: boolean; quality: string; picking: boolean; overlays: Overlay[]; imageryAlpha: number; labelAlpha: number; exaggeration: number;
   mode: DisplayMode; layers: Record<LayerKey, boolean>; satTime?: number | null; satFocus?: number | null;
   marks?: Mark[]; flat:boolean; profiling:boolean; profileVertices:[number,number][]; onPathPoint:(lon:number,lat:number)=>void;
-  deploying?: boolean; onDeployPoint?: (lon: number, lat: number) => void;  // deploy the fleet: the next click on the ground
+  deploy?: { stage: 'draw' | 'confirm'; area: Bounds | null; pad: [number, number] | null } | null;  // drawing a deployment
+  onDeployArea?: (b: Bounds) => void; onDeployPad?: (lon: number, lat: number) => void;
   /** The stylised relief map (3D only) and the land cover and named features that dress it. */
   relief: boolean; reliefOptions: ReliefOptions; terrainContext: { grid: Grid | null; features: TerrainFeature[] } | null;
   onHover?: (h: Hover | null) => void;
@@ -57,7 +58,6 @@ const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce
 const css = (value: string, alpha = 1) => C.Color.fromCssColorString(value).withAlpha(alpha);
 const PHOTOREAL_BELOW = 300_000; // metres: Google 3D tiles take over from the imagery globe below this altitude
 /** Served by the server connector (backend/terra/google_tiles.py), which attaches the key; none enters this bundle. */
-const GOOGLE_TILESET = '/api/connector/google3d/root.json';
 // Google Maps attribution: the logo on a busy background, 16–19 px tall, never shrunk or faded (Map Tiles API policies).
 const googleCredit = () => new C.Credit('<img class="google-logo" alt="Google" src="/attribution/google-on-dark.png" width="98" height="18">', true);
 const tileError = (q: string) => q === 'high' ? 8 : q === 'low' ? 24 : 16;
@@ -94,8 +94,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const metresPerPixel = useRef(30);
 
   const homeDestination = () => { const b = latest.current.region.bbox; return C.Cartesian3.fromDegrees((b[0] + b[2]) / 2, (b[1] + b[3]) / 2 * 0.5, HOME_HEIGHT); };
-  const home = () => { const v = viewer.current; if (v) v.camera.flyTo({ destination: homeDestination(), orientation: { heading: 0, pitch: -C.Math.PI_OVER_TWO, roll: 0 }, duration: reducedMotion() ? 0 : 2.2, easingFunction: C.EasingFunction.QUADRATIC_IN_OUT }); };
-  const flyTo = (b: Bounds) => {
+  const home = () => { drones.current?.follow(null); const v = viewer.current; if (v) v.camera.flyTo({ destination: homeDestination(), orientation: { heading: 0, pitch: -C.Math.PI_OVER_TWO, roll: 0 }, duration: reducedMotion() ? 0 : 2.2, easingFunction: C.EasingFunction.QUADRATIC_IN_OUT }); };
+  const flyTo = (b: Bounds) => { drones.current?.follow(null);
     const v = viewer.current; if (!v) return; const { sphere, offset } = obliqueView(b);
     v.camera.flyToBoundingSphere(sphere, { offset, duration: reducedMotion() ? 0 : 2.8, easingFunction: C.EasingFunction.CUBIC_IN_OUT, maximumHeight: Math.min(Math.max(v.camera.positionCartographic.height, sphere.radius * 6), 9_000_000) });
   };
@@ -103,37 +103,79 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   useImperativeHandle(ref, () => ({
     home, flyTo,
     frame: (factor) => {
-      const v = viewer.current; if (!v) return; const { sphere, offset } = obliqueView(latest.current.region.bbox);
+      drones.current?.follow(null); const v = viewer.current; if (!v) return; const { sphere, offset } = obliqueView(latest.current.region.bbox);
       const flat = v.scene.mode === C.SceneMode.SCENE2D;
       v.camera.flyToBoundingSphere(sphere, { offset: new C.HeadingPitchRange(flat || !Number.isFinite(v.camera.heading) ? 0 : v.camera.heading, flat ? -C.Math.PI_OVER_TWO : offset.pitch, offset.range / Math.max(0.25, factor)), duration: reducedMotion() ? 0 : 1.2 });
     },
-    flyToPoint: (lon, lat, height = 900_000) => { const v = viewer.current; if (v) v.camera.flyTo({ destination: C.Cartesian3.fromDegrees(lon, lat, height), duration: reducedMotion() ? 0 : 2.4, easingFunction: C.EasingFunction.CUBIC_IN_OUT }); },
+    flyToPoint: (lon, lat, height = 900_000) => { drones.current?.follow(null); const v = viewer.current; if (v) v.camera.flyTo({ destination: C.Cartesian3.fromDegrees(lon, lat, height), duration: reducedMotion() ? 0 : 2.4, easingFunction: C.EasingFunction.CUBIC_IN_OUT }); },
     zoom: (d) => { const v = viewer.current; if (!v) return; v.camera.zoomIn(d * v.camera.positionCartographic.height * 0.4); v.scene.requestRender(); },
-    north: () => { const v = viewer.current; if (v) v.camera.flyTo({ destination: v.camera.position, orientation: { heading: 0, pitch: v.camera.pitch, roll: 0 }, duration: 0.7 }); },
+    north: () => { drones.current?.follow(null); const v = viewer.current; if (v) v.camera.flyTo({ destination: v.camera.position, orientation: { heading: 0, pitch: v.camera.pitch, roll: 0 }, duration: 0.7 }); },
     tilt: () => {
-      const v = viewer.current; if (!v) return;
+      drones.current?.follow(null); const v = viewer.current; if (!v) return;
       const ray = v.camera.getPickRay(new C.Cartesian2(v.canvas.clientWidth / 2, v.canvas.clientHeight / 2)); const target = ray && v.scene.globe.pick(ray, v.scene);
       if (!target) return; const range = C.Cartesian3.distance(v.camera.position, target);
       const straight = v.camera.pitch < -1.35;
       v.camera.flyToBoundingSphere(new C.BoundingSphere(target, 1), { offset: new C.HeadingPitchRange(v.camera.heading, straight ? C.Math.toRadians(-38) : -C.Math.PI_OVER_TWO, range), duration: 1.1 });
     },
-    followDrone: (id) => {
-      const v = viewer.current; const st = droneStore.state(id); if (!v || !st) return;
-      const ex = v.scene.verticalExaggeration || 1; const carto = C.Cartographic.fromDegrees(st.lon, st.lat);
-      const go = (ground: number) => {
-        const target = C.Cartesian3.fromDegrees(st.lon, st.lat, ground + st.aglM);
-        // Keep the context view above nearby ridges, including exaggerated terrain.
-        v.camera.flyToBoundingSphere(new C.BoundingSphere(target, 1), { offset: new C.HeadingPitchRange((st.headingDeg + 30) * Math.PI / 180, C.Math.toRadians(-38), Math.max(1500, st.aglM * 5)), duration: reducedMotion() ? 0 : 1.6 });
-      };
-      // Never aim from a coarse ground height (distant terrain tiles can be hundreds of metres off on a volcano):
-      // sample the most detailed terrain first, so the camera cannot end up inside a mountain.
-      const provider = terrainProvider.current;
-      if (provider) void C.sampleTerrainMostDetailed(provider, [carto]).then(([c]) => go(Math.max((c.height ?? 0) * ex, v.scene.globe.getHeight(carto) ?? -Infinity))).catch(() => go(v.scene.globe.getHeight(carto) ?? 0));
-      else go(v.scene.globe.getHeight(carto) ?? 0);
-    },
+    // Fly with the aircraft: a chase camera that follows its drawn position every frame (DroneLayer.follow).
+    followDrone: (id) => { drones.current?.follow(id); },
+    stopFollowing: () => { drones.current?.follow(null); },
+    following: () => drones.current?.following() ?? null,
     droneSight: (p) => { if (drones.current) drones.current.sightOverride = p; },
     screenshot: () => { const v = viewer.current; if (!v) return; v.render(); const a = document.createElement('a'); a.download = `terra-${Date.now()}.png`; a.href = v.canvas.toDataURL('image/png'); a.click(); },
   }));
+
+  // Deploying the fleet: drag (or click two corners) to draw the perimeter, then click to place the launch pad.
+  const deployStage = props.deploy?.stage ?? null;
+  useEffect(() => {
+    const v = viewer.current; if (!v || !ready || !deployStage) return;
+    const scene = v.scene; const ctrl = scene.screenSpaceCameraController;
+    const ground = (p: C.Cartesian2) => { const ray = v.camera.getPickRay(p); const hit = ray && (scene.globe.pick(ray, scene) ?? v.camera.pickEllipsoid(p)); return hit ? C.Cartographic.fromCartesian(hit) : undefined; };
+    const deg = (c: C.Cartographic): [number, number] => [C.Math.toDegrees(c.longitude), C.Math.toDegrees(c.latitude)];
+    const handler = new C.ScreenSpaceEventHandler(v.canvas);
+    let start: { at: [number, number]; screen: C.Cartesian2 } | null = null; let now: [number, number] | null = null;
+    const box = (a: [number, number], b: [number, number]): Bounds => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])];
+    const preview = v.entities.add({ id: 'deploy-draft', rectangle: { coordinates: new C.CallbackProperty(() => start && now ? C.Rectangle.fromDegrees(...box(start.at, now)) : C.Rectangle.fromDegrees(0, 0, 0, 0), false),
+      material: C.Color.fromCssColorString(ACCENT).withAlpha(0.14), outline: false, show: new C.CallbackProperty(() => Boolean(start && now), false) } as unknown as C.RectangleGraphics.ConstructorOptions });
+    const edge = v.entities.add({ id: 'deploy-draft-edge', polyline: { positions: new C.CallbackProperty(() => { if (!start || !now) return []; const [w, s2, e, n] = box(start.at, now); return C.Cartesian3.fromDegreesArray([w, s2, e, s2, e, n, w, n, w, s2]); }, false),
+      width: 2, clampToGround: true, material: C.Color.fromCssColorString(ACCENT) } });
+    if (deployStage === 'draw') {
+      ctrl.enableInputs = false; v.canvas.style.cursor = 'crosshair';
+      handler.setInputAction((e: { position: C.Cartesian2 }) => { const c = ground(e.position); if (!c) return; if (!start) start = { at: deg(c), screen: C.Cartesian2.clone(e.position) }; now = deg(c); scene.requestRender(); }, C.ScreenSpaceEventType.LEFT_DOWN);
+      handler.setInputAction((e: { endPosition: C.Cartesian2 }) => { if (!start) return; const c = ground(e.endPosition); if (c) { now = deg(c); scene.requestRender(); } }, C.ScreenSpaceEventType.MOUSE_MOVE);
+      handler.setInputAction((e: { position: C.Cartesian2 }) => {
+        if (!start) return; const c = ground(e.position); if (c) now = deg(c);
+        const dragged = C.Cartesian2.distance(start.screen, e.position) > 8;
+        if (!dragged && (!now || (now[0] === start.at[0] && now[1] === start.at[1]))) return;  // first corner of a two-click box: keep drawing
+        const b = box(start.at, now!); start = null; now = null;
+        const wM = (b[2] - b[0]) * 111_320 * Math.cos((b[1] + b[3]) / 2 * Math.PI / 180), hM = (b[3] - b[1]) * 110_574;
+        if (wM > 150 && hM > 150) latest.current.onDeployArea?.(b);
+        scene.requestRender();
+      }, C.ScreenSpaceEventType.LEFT_UP);
+    } else {
+      handler.setInputAction((e: { position: C.Cartesian2 }) => { const c = ground(e.position); if (c) latest.current.onDeployPad?.(...deg(c)); }, C.ScreenSpaceEventType.LEFT_CLICK);
+    }
+    return () => { handler.destroy(); v.entities.remove(preview); v.entities.remove(edge); if (!v.isDestroyed()) { ctrl.enableInputs = true; v.canvas.style.cursor = ''; scene.requestRender(); } };
+  }, [ready, deployStage]);
+
+  // The drawn perimeter and launch pad while a deployment is being confirmed.
+  const deployArea = props.deploy?.area?.join(','); const deployPad = props.deploy?.pad?.join(',');
+  useEffect(() => {
+    const v = viewer.current; if (!v || !ready) return;
+    const area = props.deploy?.area, pad = props.deploy?.pad; const made: C.Entity[] = [];
+    if (area) {
+      const [w, s2, e, n] = area;
+      made.push(v.entities.add({ rectangle: { coordinates: C.Rectangle.fromDegrees(w, s2, e, n), material: C.Color.fromCssColorString(ACCENT).withAlpha(0.1) } }));
+      made.push(v.entities.add({ polyline: { positions: C.Cartesian3.fromDegreesArray([w, s2, e, s2, e, n, w, n, w, s2]), width: 2.5, clampToGround: true,
+        material: new C.PolylineDashMaterialProperty({ color: C.Color.fromCssColorString(ACCENT), dashLength: 16 }) } }));
+    }
+    if (pad) made.push(v.entities.add({ position: C.Cartesian3.fromDegrees(pad[0], pad[1]), point: { pixelSize: 14, color: C.Color.fromCssColorString('#f4f1e8'), outlineColor: C.Color.fromCssColorString(ACCENT), outlineWidth: 3,
+      heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY }, label: { text: 'LAUNCH', font: '600 11px "IBM Plex Mono", monospace', pixelOffset: new C.Cartesian2(0, -20),
+      fillColor: C.Color.fromCssColorString('#f4f1e8'), showBackground: true, backgroundColor: C.Color.fromCssColorString('#15161399'), heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY } }));
+    v.scene.requestRender();
+    return () => { if (!v.isDestroyed()) { made.forEach(e => v.entities.remove(e)); v.scene.requestRender(); } };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, deployArea, deployPad]);
 
   // Keep the map controls above the attribution strip, however many lines the credits wrap to: attribution
   // (Google's logo in particular) must never be covered.
@@ -169,7 +211,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       globe.showGroundAtmosphere = true;
       // Cesium's own default error budget, and no sibling preloading: about half the tiles for the same view.
       globe.maximumScreenSpaceError = 2;
-      globe.tileCacheSize = 600;
+      globe.tileCacheSize = 200;
+      globe.loadingDescendantLimit = 8;
       globe.preloadAncestors = true; globe.preloadSiblings = false;
       globe.lightingFadeOutDistance = 6_500_000; globe.lightingFadeInDistance = 14_000_000;
       globe.nightFadeOutDistance = 6_500_000; globe.nightFadeInDistance = 14_000_000;
@@ -230,7 +273,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       };
       handler.setInputAction((ev: { position: C.Cartesian2 }) => {
         const vv = viewer.current; if (!vv) return;
-        if (latest.current.deploying) { const p = pickGround(ev.position); if (p) latest.current.onDeployPoint?.(C.Math.toDegrees(p.longitude), C.Math.toDegrees(p.latitude)); return; }
+        if (latest.current.deploy) return;  // drawing a deployment: its own handler owns the clicks
         if(latest.current.profiling){const p=pickGround(ev.position);if(p)latest.current.onPathPoint(C.Math.toDegrees(p.longitude),C.Math.toDegrees(p.latitude));return;}
         if (latest.current.picking) {
           const cart = pickGround(ev.position); if (!cart) return;
@@ -272,7 +315,8 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       handler.setInputAction((ev: { endPosition: C.Cartesian2 }) => {
         const vv = viewer.current; const now = performance.now(); if (!vv || now - hoverAt < 80) return; hoverAt = now;
         const picked = vv.scene.pick(ev.endPosition);
-        vv.canvas.style.cursor = latest.current.deploying || latest.current.profiling || latest.current.picking || latest.current.overlays.some(o => o.show) ? 'crosshair' : picked && (picked as { id?: { kind?: string } }).id?.kind ? 'pointer' : '';
+        if (latest.current.deploy) return;
+        vv.canvas.style.cursor = latest.current.profiling || latest.current.picking || latest.current.overlays.some(o => o.show) ? 'crosshair' : picked && (picked as { id?: { kind?: string } }).id?.kind ? 'pointer' : '';
         const onHover = latest.current.onHover; if (!onHover) return;
         // Height, slope and land cover come from Terra's own terrain; nothing is measured from Google's 3D tiles.
         const cart = scene.mode === C.SceneMode.SCENE3D && globe.show && camera.positionCartographic.height < 400_000 ? pickGround(ev.endPosition) : undefined;
@@ -430,9 +474,9 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     const v = viewer.current; if (!v || !ready || !props.photoreal || tiles.current || tilesLoading.current) return;
     tilesLoading.current = true;setGoogleLoading(true);tilesHaveView.current=false;let failures=0;
     // Resource accepts `credits` at runtime (Cesium's own Google loader uses it); the published typings omit it.
-    const resource = new C.Resource({ url: GOOGLE_TILESET, credits: [googleCredit()] } as unknown as C.Resource.ConstructorOptions);
+    const resource = new C.Resource({ url: googleTilesUrl(), credits: [googleCredit()] } as unknown as C.Resource.ConstructorOptions);
     C.Cesium3DTileset.fromUrl(resource, { showCreditsOnScreen: true, enableCollision: true, maximumScreenSpaceError: tileError(latest.current.quality),
-      cacheBytes: 768 * 1024 * 1024, maximumCacheOverflowBytes: 512 * 1024 * 1024, preloadWhenHidden: false, foveatedScreenSpaceError: true })
+      cacheBytes: 128 * 1024 * 1024, maximumCacheOverflowBytes: 32 * 1024 * 1024, preloadWhenHidden: false, foveatedScreenSpaceError: true })
       .then(t => {
         tilesLoading.current = false;
         if (v.isDestroyed() || viewer.current !== v) { t.destroy(); return; }

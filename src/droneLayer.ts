@@ -76,6 +76,9 @@ export class DroneLayer {
   private marks: C.BillboardCollection; private marksKey = ''; private pad: C.Billboard | null = null;
   private visible = false; private selected: string | null = null; private routeKey = '';
   private raf = 0; private off: (() => void)[] = [];
+  /** Flying with an aircraft: the main camera chases it every frame (see follow()). */
+  private chase: { id: string; h: number; p: number; r: number; rel: number; set: [number, number, number] | null; last: number } | null = null;
+  onFollowEnd: (() => void) | null = null;
   /** The ground point under the camera's crosshair in an open camera view, when it is known exactly. */
   sightOverride: { id: string; lon: number; lat: number } | null = null;
 
@@ -95,7 +98,7 @@ export class DroneLayer {
     for (const c of this.crafts.values()) if (c.model) c.model.show = on;
     cancelAnimationFrame(this.raf);
     // The scene renders on demand; keep frames coming while aircraft are moving.
-    if (on) { let odd = false; const loop = () => { odd = !odd; if (odd && !this.v.isDestroyed()) this.v.scene.requestRender(); this.raf = requestAnimationFrame(loop); }; loop(); }
+    if (on) { let odd = false; const loop = () => { odd = !odd; if ((odd || this.chase) && !this.v.isDestroyed()) this.v.scene.requestRender(); this.raf = requestAnimationFrame(loop); }; loop(); }
     this.drawRoutes(); this.drawMarks(); this.v.scene.requestRender();
   }
   setSelected(id: string | null) { this.selected = id; this.routeKey = ''; this.drawRoutes(); }
@@ -160,6 +163,64 @@ export class DroneLayer {
       if (c.model) scene.primitives.remove(c.model); this.pills.remove(c.pill); this.lines.remove(c.tether); this.lines.remove(c.sight); this.lines.remove(c.link); this.crafts.delete(id);
     }
     this.links(states, g, ex);
+    this.chaseCamera(scene);
+  }
+
+  /**
+   * Fly with an aircraft: the camera sits behind it and follows its turns smoothly, from the aircraft's drawn
+   * position each frame. Dragging orbits around it (the chosen angle is kept relative to its heading), the wheel
+   * zooms and tilting is kept; it never goes below the terrain. null stops following.
+   */
+  follow(id: string | null) {
+    const cam = this.v.camera;
+    if (!id) { if (this.chase) { this.chase = null; cam.lookAtTransform(C.Matrix4.IDENTITY); } return; }
+    const s = this.store.state(id); if (!s) return;
+    const c = this.crafts.get(id);
+    // Start from wherever the camera is now, measured from the aircraft, and ease into the chase position.
+    let h = s.headingDeg * DEG, p = -0.35, r = 2500;
+    if (c?.pos) {
+      const enu = C.Transforms.eastNorthUpToFixedFrame(c.pos); const inv = C.Matrix4.inverseTransformation(enu, new C.Matrix4());
+      const v = C.Matrix4.multiplyByPoint(inv, cam.positionWC, new C.Cartesian3()); r = Math.max(60, C.Cartesian3.magnitude(v));
+      h = Math.atan2(-v.x, -v.y); p = -Math.asin(Math.min(1, Math.max(-1, v.z / r)));
+    }
+    this.chase = { id, h, p, r, rel: 0, set: null, last: performance.now() };
+    this.v.scene.requestRender();
+  }
+  following() { return this.chase?.id ?? null; }
+
+  private chaseCamera(scene: C.Scene) {
+    const f = this.chase; if (!f) return;
+    const s = this.store.state(f.id); const c = this.crafts.get(f.id);
+    if (!s || !c?.pos) return;
+    const cam = this.v.camera; const now = performance.now(); const dt = Math.min(0.1, (now - f.last) / 1000); f.last = now;
+    // What the person did since the last frame (orbit, tilt, zoom), measured in the aircraft's local frame.
+    if (f.set) {
+      const v = cam.position; const r = C.Cartesian3.magnitude(v);
+      if (r > 1) {
+        const h = Math.atan2(-v.x, -v.y), p = -Math.asin(Math.min(1, Math.max(-1, v.z / r)));
+        const dh = Math.atan2(Math.sin(h - f.set[0]), Math.cos(h - f.set[0]));
+        if (Math.abs(dh) > 0.002) f.rel += dh;
+        if (Math.abs(p - f.set[1]) > 0.002) f.p = p;
+        if (Math.abs(r - f.set[2]) > 0.5) f.r = r;
+      }
+    }
+    // Behind the aircraft (plus any angle chosen by dragging), a little above, at a range that suits its height.
+    const target = { h: s.headingDeg * DEG + f.rel, p: f.set ? f.p : -0.3, r: f.set ? f.r : Math.min(1200, Math.max(220, s.aglM * 1.6 + 160)) };
+    const k = 1 - Math.exp(-dt / 0.6);
+    f.h += Math.atan2(Math.sin(target.h - f.h), Math.cos(target.h - f.h)) * k;
+    if (!f.set) { f.p += (target.p - f.p) * k; f.r = Math.exp(Math.log(f.r) + (Math.log(target.r) - Math.log(f.r)) * k); if (Math.abs(Math.log(f.r / target.r)) < 0.02) f.set = [f.h, f.p, f.r]; }
+    else { f.p = target.p; f.r = target.r; }
+    // Keep the camera above the drawn ground.
+    let pitch = f.p;
+    for (let i = 0; i < 12; i++) {
+      const offset = new C.HeadingPitchRange(f.h, pitch, f.r);
+      cam.lookAt(c.pos, offset);
+      const at = cam.positionCartographic; const ground = scene.globe.getHeight(at);
+      if (ground === undefined || at.height > ground + 25) break;
+      pitch = Math.max(-1.45, pitch - 0.08);
+    }
+    if (f.set) f.set = [f.h, pitch, f.r];
+    scene.requestRender();
   }
 
   /** Radio links: each airborne aircraft to the launch site, or, beyond direct range, through the nearest relay aircraft. */
