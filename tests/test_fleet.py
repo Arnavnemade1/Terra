@@ -373,3 +373,63 @@ def test_the_workspace_behind_the_dev_proxy_is_accepted(client):
         assert proxied.get("/api/fleet", headers={"origin": page}).status_code == 200, page
         assert proxied.post("/api/fleet/area", json=AREA, headers={"origin": page}).status_code == 200, page
     assert proxied.get("/api/fleet", headers={"origin": "http://evil.example:5173"}).status_code == 403
+
+
+# ---------------------------------------------------------------- orchestration: fleet commands, cadence, supervision, deployments
+def test_fleet_commands_hold_recall_and_resume(client, tmp_path):
+    client.post("/api/fleet/area", json=AREA)
+    for i, (lon, lat) in enumerate([(15.05, 37.74), (15.0, 37.75)]):
+        _register(client, f"d{i}"); _fly(client, f"d{i}", 1, lon=lon, lat=lat, agl=120)
+    _register(client, "pad"); _fly(client, "pad", 1, landed=True, agl=0)  # on the ground: not held, not recalled
+    db = FleetDB(tmp_path / "terra.db")
+    activities.run_coordination_round({"round": 1})
+    assert client.post("/api/fleet/command", json={"action": "hold"}).json()["mode"]["mode"] == "hold"
+    result = activities.run_coordination_round({"round": 2})
+    held = {t["drone_id"]: t for t in db.tasks()}
+    assert {d for d, t in held.items() if t["kind"] == "hold" and t["created_by"] == "fleet-command"} == {"d0", "d1"}
+    assert held["d0"]["params"]["lon"] == 15.05 and sorted(result["wake"]) == ["d0", "d1"] and result["next_s"] == 2.0
+    activities.run_coordination_round({"round": 3})  # holding again changes nothing
+    assert {t["id"] for t in db.tasks()} == {t["id"] for t in held.values()}
+    client.post("/api/fleet/command", json={"action": "recall"})
+    activities.run_coordination_round({"round": 4})
+    assert {t["drone_id"] for t in db.tasks() if t["kind"] == "return"} == {"d0", "d1"}
+    client.post("/api/fleet/command", json={"action": "resume"})
+    activities.run_coordination_round({"round": 5})
+    assert not [t for t in db.tasks() if t["created_by"] == "fleet-command"]
+    assert any(m["body"].get("text", "").startswith("The fleet resumed") for m in db.messages())
+    assert client.get("/api/fleet").json()["mode"]["mode"] == "normal"
+    assert client.post("/api/fleet/command", json={"action": "dance"}).status_code == 422
+
+
+def test_agents_and_coordinator_pace_themselves():
+    busy = {"link_state": "online", "state": {"landed": False}}
+    assert activities.cadence_for_agent(busy, {"status": "assigned"}, False) == 2.0
+    assert activities.cadence_for_agent(busy, {"status": "active"}, False) == 3.0
+    assert activities.cadence_for_agent({"link_state": "online", "state": {"landed": True}}, None, False) == 10.0
+    assert activities.cadence_for_agent({"link_state": "lost", "state": {}}, None, False) == 20.0
+    assert activities.cadence_for_agent({"link_state": "lost", "state": {}}, None, True) == 2.0  # urgent wins
+    assert activities.cadence_for_coordinator(True, 0, 3, "normal") == 2.0
+    assert activities.cadence_for_coordinator(False, 0, 3, "normal") == 6.0
+    assert activities.cadence_for_coordinator(False, 0, 0, "normal") == 15.0
+    assert activities.AGENT_STALE_S >= 2 * 20  # never restarts an agent that is merely pacing itself
+
+
+def test_the_coordinator_supervises_agents(client, tmp_path):
+    client.post("/api/fleet/area", json=AREA)
+    _register(client, "d0"); _fly(client, "d0", 1)
+    db = FleetDB(tmp_path / "terra.db")
+    db.heartbeat("agent:gone", "drone", "drone-agent-gone", "lost", {})  # an aircraft that left the fleet
+    result = activities.run_coordination_round({"round": 1})
+    assert result["need_agents"] == ["d0"]  # no agent yet: started
+    assert "agent:gone" not in {a["id"] for a in db.agents()}
+    activities.run_drone_agent_round({"drone_id": "d0", "round": 0})
+    assert activities.run_coordination_round({"round": 2})["need_agents"] == []
+
+
+def test_the_fleet_deploys_anywhere_with_its_own_launch_site(client, tmp_path):
+    box = [-122.3, 46.1, -122.1, 46.25]
+    reply = client.post("/api/fleet/area", json={"name": "Deployment at Mount St. Helens", "bbox": box, "launch": [-122.18, 46.2]})
+    assert reply.status_code == 200 and reply.json()["area"]["launch"] == [-122.18, 46.2]
+    assert client.post("/api/fleet/area", json={"name": "Too far", "bbox": box, "launch": [-120.0, 46.2]}).status_code == 422
+    centre = client.post("/api/fleet/area", json={"name": "Centre", "bbox": box}).json()["area"]["launch"]
+    assert centre == [pytest.approx(-122.2), pytest.approx(46.175)]
