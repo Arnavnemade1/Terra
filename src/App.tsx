@@ -638,7 +638,7 @@ export default function App() {
             if (id === 'hazards' && mode !== 'hazards') globe.current?.home();
             else if (id === 'satellites' && mode !== 'satellites') globe.current?.flyToPoint(aoiCentre.lon, aoiCentre.lat, 9_000_000);
             else if ((id === 'investigation' || id === 'drones') && (mode === 'hazards' || mode === 'satellites')) globe.current?.flyTo(region.bbox);
-            if (id === 'drones' && !selectedDrone) setSelectedDrone(droneStore.ids()[0] ?? null); }} aria-current={mode === id ? 'page' : undefined}>
+            }} aria-current={mode === id ? 'page' : undefined}>
             {id === 'investigation' ? <BarChart3 size={14} /> : id === 'drones' ? <Plane size={14} /> : id === 'hazards' ? <Info size={14} /> : <Navigation size={14} />}{label}{badge && <span className="badge">{badge}</span>}</button>)}
       </nav>
       <div className="menus">
@@ -693,7 +693,7 @@ export default function App() {
           eo={job && afterOptical ? { url: artifactUrl(job, afterOptical.artifact_name), bounds: afterOptical.bounds as Bounds, date: afterOptical.date } : undefined}
           sar={job && afterRadar ? { url: url(afterRadar), bounds: afterRadar.bounds, date: String(afterRadar.date) } : undefined}
           change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} />; })()}
-      {cameraId && <DroneFeed id={cameraId} visible={Boolean(feed)} store={droneStore} terrain={terrainContext} relief={mapStyle === 'relief'} reliefOptions={reliefOptions}
+      {cameraId && <DroneFeed id={cameraId} visible={Boolean(feed)} store={droneStore} terrain={terrainContext}
         change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={Boolean(feed?.expanded)}
         onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
       {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}

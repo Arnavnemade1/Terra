@@ -7,8 +7,8 @@
 .ops-mode { padding: 1px 7px; border-radius: 9px; font: 600 10.5px var(--mono); letter-spacing: 0.05em; color: #8fd16a; background: rgba(143, 209, 106, 0.12); }
 .ops-mode.hold { color: var(--warn); background: rgba(232, 176, 74, 0.14); }
 .ops-mode.recall { color: #ff8a5c; background: rgba(255, 138, 92, 0.14); }
-.ops-deploy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.ops-deploy > button { flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 38px; white-space: nowrap; }
+.ops-deploy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.ops-deploy > button { width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding-inline: 8px; min-height: 38px; white-space: nowrap; font-size: 12px; }
 .ops-deploy > button:disabled { opacity: .5; cursor: not-allowed; }
 .ops-location { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--fg-2); font-size: 12px; }
 .ops-location span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

@@ -79,6 +79,8 @@
 .dp-empty { display: grid; justify-items: center; gap: 10px; padding: 24px 16px; text-align: center; color: var(--fg-3); border: 1px dashed var(--rule-2); border-radius: var(--r); }
 .dp-empty strong { color: var(--fg-2); font-size: 14px; font-weight: 550; }
 .dp-empty p { max-width: 30ch; margin: 0; font-size: 12px; line-height: 1.6; }
+.dp.view-fleet .fleet-ops.connected > .ops-note:not(.warn),
+.dp.view-fleet .fleet-ops.connected > .ops-agents { display: none; }
 @media (max-width: 420px) {
   .dp-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dp-instruments { grid-template-columns: repeat(2, minmax(0, 1fr)); }

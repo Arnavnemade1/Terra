@@ -149,7 +149,7 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
   const linkBars = (dbm: number) => !Number.isFinite(dbm) ? 0 : dbm > -70 ? 4 : dbm > -80 ? 3 : dbm > -90 ? 2 : 1;
   const tone = (d: DroneState) => d.status === 'lost' ? 'bad' : d.status === 'stale' || (Number.isFinite(d.batteryPct) && d.batteryPct < 25) ? 'warn' : d.status === 'landed' ? 'idle' : 'ok';
 
-  return <div className="drones-panel dp">
+  return <div className={`drones-panel dp view-${tab}`}>
     <header className="dp-head">
       <div className="dp-title"><b>Drone fleet</b><span>{info.area?.name ?? 'No operating area'}</span></div>
       <div className="dp-chips">

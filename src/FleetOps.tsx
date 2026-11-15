@@ -35,7 +35,7 @@ export default function FleetOps({ store, deploying, onDeploy, regionName, onLau
     finally { setBusy(''); }
   }
 
-  return <section className="fleet-ops">
+  return <section className={`fleet-ops ${online ? 'connected' : ''}`}>
     <header><b>Flight controls</b><span className={`ops-mode ${mode}`}>{info.area ? MODE[mode] : 'Ready to plan'}</span><span className="grow" />
       <small>{online ? `${online} connected` : info.simulation.managed ? `${info.simulation.aircraft_count} simulated aircraft` : 'Simulation / connected aircraft'}</small></header>
 
