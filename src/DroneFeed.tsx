@@ -4,7 +4,8 @@ import { Crosshair, Eye, EyeOff, HelpCircle, Gamepad2, Maximize2, Minimize2, Min
 import { ft, kt, type DroneState, type DroneStore } from './drones';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature } from './relief';
 import { imagery, terrainUrl } from './tiles';
-import { colorizeThermal, type ThermalPalette as Palette } from './thermalPalette';
+import type { ThermalPalette as Palette } from './thermalPalette';
+import { ModelledThermalProvider, THERMAL_SHADER, celsiusAt, greyRange, viewRange } from './thermalCamera';
 import type { Bounds } from './types';
 
 export type Thermal = { png: string; bounds: Bounds; minC: number; maxC: number; date: string; source: string };
@@ -72,6 +73,10 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const world = useRef<Relief | null>(null);
   const layers = useRef<{ base?: C.ImageryLayer; change?: C.ImageryLayer; thermal?: C.ImageryLayer; thermalKey?: string; changeKey?: string }>({});
   const eoStage = useRef<C.PostProcessStage | null>(null);
+  const irStage = useRef<C.PostProcessStage | null>(null);
+  const [gain, setGain] = useState<[number, number] | null>(null);
+  const [win, setWin] = useState<{ x: number; y: number; w: number } | null>(() => { try { return JSON.parse(localStorage.getItem('terra.cameraWindow') || 'null'); } catch { return null; } });
+  const box = useRef<HTMLDivElement>(null);
   const hot = useRef<Hot[]>([]);
   const [marks, setMarks] = useState<{ x: number; y: number; c: number; key: string }[]>([]);
   const thermalPixels = useRef<{ data: Uint8ClampedArray; w: number; h: number } | null>(null);
@@ -117,9 +122,9 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     if (scene.skyAtmosphere) { scene.skyAtmosphere.show = true; scene.skyAtmosphere.saturationShift = -0.25; scene.skyAtmosphere.brightnessShift = 0.05; }
     // Sharper rendering without overloading the GPU: up to 1.5× pixels, finer terrain detail, FXAA on top of MSAA.
     v.resolutionScale = Math.min(window.devicePixelRatio, 1.5); scene.globe.maximumScreenSpaceError = 1.25; scene.postProcessStages.fxaa.enabled = true;
-    // Retain close-range detail across turns, instead of discarding it just outside the view.
-    scene.globe.tileCacheSize = 400;
-    scene.globe.loadingDescendantLimit = 64;
+    // Keep a bounded working set; the provider cache handles revisits without retaining a whole flight on the GPU.
+    scene.globe.tileCacheSize = 128;
+    scene.globe.loadingDescendantLimit = 8;
     scene.globe.preloadAncestors = true;
     scene.globe.preloadSiblings = false;
     const base = v.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...imagery('maps/imagery/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery') }));
@@ -128,6 +133,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     const stopQueue=scene.globe.tileLoadProgressEvent.addEventListener((n:number)=>setTileQueue(n));
     const stopError=scene.renderError.addEventListener(()=>setCameraError('The rendered camera could not continue. Close and reopen the drone workspace.'));
     const eo = new C.PostProcessStage({ fragmentShader: EO_SHADER }); scene.postProcessStages.add(eo); eoStage.current = eo;
+    const ir = new C.PostProcessStage({ fragmentShader: THERMAL_SHADER, uniforms: { palette: 0, lo: 0.2, hi: 0.8 } }); ir.enabled = false; scene.postProcessStages.add(ir); irStage.current = ir;
     void C.ArcGISTiledElevationTerrainProvider.fromUrl(terrainUrl()).then(t => { if (!disposed && !v.isDestroyed()) v.terrainProvider = t; }).catch(() => {});
     // Manual flight reads the ground from this view, which has the finest terrain around the aircraft.
     store.feedGroundAt = (lon, lat) => { if (v.isDestroyed()) return undefined; return scene.globe.getHeight(C.Cartographic.fromDegrees(lon, lat)); };
@@ -163,7 +169,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       setMarks(out);
     };
     const ui = setInterval(() => { setS(store.state(idRef.current)); project(); }, 120);
-    return () => { disposed = true; tick(); stopQueue(); stopError(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; eoStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
+    return () => { disposed = true; tick(); stopQueue(); stopError(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; eoStage.current = null; irStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
   }, [store]);
 
   // Shown: full frame rate. Parked: two frames a second at the detail the small view will show, so the tiles it
@@ -173,8 +179,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     const dpr = window.devicePixelRatio || 1;
     v.targetFrameRate = 30;
     v.useDefaultRenderLoop = visible;
-    v.resolutionScale = Math.min(dpr, expanded && visible ? 1.5 : 1.25);
-    v.scene.globe.maximumScreenSpaceError = expanded && visible ? 1.25 : 1.6;
+    v.resolutionScale = Math.min(dpr, visible ? 1.25 : 0.75);
+    v.scene.globe.maximumScreenSpaceError = visible ? 1.6 : 3;
     if (visible) return;
     const slow = setInterval(() => { if (!v.isDestroyed()) v.render(); }, 500);
     return () => clearInterval(slow);
@@ -217,6 +223,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     if (v.scene.skyAtmosphere) v.scene.skyAtmosphere.show = mode !== 'ir';
     v.scene.fog.enabled = mode !== 'ir';
     if (eoStage.current) eoStage.current.enabled = mode === 'eo';
+    if (irStage.current) { irStage.current.enabled = mode === 'ir'; irStage.current.uniforms.palette = palette === 'ironbow' ? 0 : palette === 'white' ? 1 : 2; }
+    if (mode === 'ir') v.scene.backgroundColor = C.Color.BLACK; else v.scene.backgroundColor = C.Color.fromCssColorString('#8fa2aa');
   }, [mode, palette, relief, reliefOptions]);
 
   // Replace radar layers when investigations change; never retain a previous area's overlay.
@@ -243,16 +251,26 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     return()=>{cancelled=true;};
   },[thermal]);
 
-  useEffect(()=>{
-    const v=viewer.current,px=thermalPixels.current;if(!v||!px||!thermal)return;let cancelled=false;
-    const cv=document.createElement('canvas');cv.width=px.w;cv.height=px.h;const ctx=cv.getContext('2d');if(!ctx)return;
-    const coloured=ctx.createImageData(px.w,px.h);coloured.data.set(colorizeThermal(px.data,palette));ctx.putImageData(coloured,0,0);
-    if(layers.current.thermal){v.imageryLayers.remove(layers.current.thermal,true);layers.current.thermal=undefined;}
-    void C.SingleTileImageryProvider.fromUrl(cv.toDataURL(),{rectangle:C.Rectangle.fromDegrees(...thermal.bounds),credit:new C.Credit(`${thermal.source}, ${thermal.date} · USGS/NASA`)}).then(p=>{
-      if(cancelled||v.isDestroyed())return;const l=v.imageryLayers.addImageryProvider(p);l.show=modeRef.current==='ir';l.alpha=1;layers.current.thermal=l;v.scene.requestRender();
-    }).catch(()=>{});
-    return()=>{cancelled=true;};
-  },[thermalRevision,palette,thermal]);
+  // The thermal camera's ground: measured Landsat temperature with modelled fine detail (thermalCamera.ts).
+  useEffect(() => {
+    const v = viewer.current, px = thermalPixels.current; if (!v || !px || !thermal) return;
+    if (layers.current.thermal) { v.imageryLayers.remove(layers.current.thermal, true); layers.current.thermal = undefined; }
+    const l = v.imageryLayers.addImageryProvider(new ModelledThermalProvider(px, thermal) as unknown as C.ImageryProvider);
+    l.show = modeRef.current === 'ir'; layers.current.thermal = l; v.scene.requestRender();
+  }, [thermalRevision, thermal]);
+
+  // Automatic gain: stretch the palette over the temperatures in view, as a thermal camera does.
+  useEffect(() => {
+    if (mode !== 'ir' || !visible || !thermal) { setGain(null); return; }
+    const [g0, g1] = greyRange(thermal); let cur: [number, number] | null = null;
+    const step = () => {
+      const v = viewer.current, px = thermalPixels.current, st = irStage.current; if (!v || !px || !st) return;
+      const r = viewRange(v, px, thermal); if (!r) return;
+      cur = cur ? [cur[0] + (r[0] - cur[0]) * 0.35, cur[1] + (r[1] - cur[1]) * 0.35] : r;
+      st.uniforms.lo = (cur[0] - g0) / (g1 - g0); st.uniforms.hi = (cur[1] - g0) / (g1 - g0); setGain(cur);
+    };
+    step(); const t = setInterval(step, 500); return () => clearInterval(t);
+  }, [mode, visible, thermal, thermalRevision]);
 
   useEffect(()=>{if((mode==='ir'&&!thermal)||(mode==='change'&&!change))setMode('eo');},[thermal,change,mode]);
 
@@ -266,10 +284,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       const hit = ray && v.scene.globe.pick(ray, v.scene); if (!hit) { setSpi(null); onSight(null); return; }
       const c = C.Cartographic.fromCartesian(hit); const lon = c.longitude / DEG, lat = c.latitude / DEG;
       let temp: number | null = null; const t = thermal, px = thermalPixels.current;
-      if (t && px && lon >= t.bounds[0] && lon <= t.bounds[2] && lat >= t.bounds[1] && lat <= t.bounds[3]) {
-        const x = Math.min(px.w - 1, Math.floor((lon - t.bounds[0]) / (t.bounds[2] - t.bounds[0]) * px.w)), y = Math.min(px.h - 1, Math.floor((t.bounds[3] - lat) / (t.bounds[3] - t.bounds[1]) * px.h));
-        const i = (y * px.w + x) * 4; if (px.data[i + 3] > 0) temp = t.minC + px.data[i] / 255 * (t.maxC - t.minC);
-      }
+      if (t && px) temp = celsiusAt(px, t, lon, lat);
       setSpi(prev => ({ lon, lat, h: v.scene.globe.getHeight(c) ?? null, range: C.Cartesian3.distance(v.camera.position, hit), temp, delta: prev?.delta }));
       onSight({ id, lon, lat });
       const key = `${lon.toFixed(4)},${lat.toFixed(4)}`;
@@ -294,9 +309,33 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     return () => { window.removeEventListener('keydown', down, true); window.removeEventListener('keyup', up, true); window.removeEventListener('blur', blur); keys.current.clear(); store.releaseControl(id); };
   }, [flying, id, store]);
 
+  // The window: drag its title bar to move it, its corner to resize it (kept inside the map; remembered).
+  const frame = (el: HTMLElement) => (el.offsetParent as HTMLElement | null)?.getBoundingClientRect() ?? document.body.getBoundingClientRect();
+  const keep = (x: number, y: number, w: number, area: DOMRect, h: number) => ({ w: Math.max(320, Math.min(w, area.width - 16)), x: Math.max(8, Math.min(x, area.width - Math.min(w, area.width - 16) - 8)), y: Math.max(8, Math.min(y, area.height - Math.min(h, 120))) });
+  const save = (v: { x: number; y: number; w: number }) => { setWin(v); try { localStorage.setItem('terra.cameraWindow', JSON.stringify(v)); } catch { /* per-viewer convenience only */ } };
+  const startMove = (e: React.PointerEvent) => {
+    const el = box.current; if (!el || expanded || (e.target as HTMLElement).closest('button')) return;
+    e.preventDefault(); const r = el.getBoundingClientRect(), area = frame(el); const dx = e.clientX - r.left, dy = e.clientY - r.top;
+    const move = (ev: PointerEvent) => save(keep(ev.clientX - area.left - dx, ev.clientY - area.top - dy, r.width, area, r.height));
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+  const startResize = (e: React.PointerEvent) => {
+    const el = box.current; if (!el) return; e.preventDefault(); e.stopPropagation();
+    const r = el.getBoundingClientRect(), area = frame(el); const x = r.left - area.left, y = r.top - area.top;
+    const move = (ev: PointerEvent) => save(keep(x, y, ev.clientX - r.left, area, r.height));
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+  useEffect(() => {
+    if (!visible) return;
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape' && !live.current.flying && !(e.target instanceof HTMLInputElement)) onClose(); };
+    window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key);
+  }, [visible, onClose]);
+
   // Drag slews the gimbal; the wheel zooms.
   const drag = useRef<{ x: number; y: number; az: number; el: number } | null>(null);
-  const onDown = (e: React.PointerEvent) => { if(video)return;setNadir(false); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, az: aim.az, el: aim.el }; };
+  const onDown = (e: React.PointerEvent) => { if ((e.target as HTMLElement).closest('button, a, input, select, .camera-head')) return; if(video)return;setNadir(false); (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); drag.current = { x: e.clientX, y: e.clientY, az: aim.az, el: aim.el }; };
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current; const el = mount.current; if (!d || !el) return; const k = FOV / zoom / el.clientWidth;
     setAim({ az: C.Math.clamp(d.az - (e.clientX - d.x) * k, -170, 170), el: C.Math.clamp(d.el + (e.clientY - d.y) * k, -60, 60) });
@@ -317,10 +356,11 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const note = store.info.notes.find(n => n.drone_id === id);
   const recText = `${Math.floor(rec / 3600)}:${String(Math.floor(rec / 60) % 60).padStart(2, '0')}:${String(rec % 60).padStart(2, '0')}`;
 
-  return <div className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'} ${hudDetail?'':'minimal-hud'} ${isLiveVideo?'video-mode':''}`} role="region" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible} inert={!visible}>
+  const place = !expanded && visible && win ? { left: win.x, top: win.y, right: 'auto', width: win.w } as React.CSSProperties : undefined;
+  return <div ref={box} style={place} className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'} ${hudDetail?'':'minimal-hud'} ${isLiveVideo?'video-mode':''} ${win && !expanded ? 'floating' : ''}`} role="dialog" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible} inert={!visible}>
+    <div className="camera-head" onPointerDown={startMove} title={expanded ? undefined : "Drag to move"}><div><strong>{s.callsign}</strong><span>{s.name||'Observation camera'}{store.info.area?.name?` · ${store.info.area.name}`:''}</span><em className={s.source}>{s.source==='real'?'Connected aircraft':s.source==='sitl'?'SITL simulation':'Virtual simulation'}</em></div><div><button onClick={()=>setHudDetail(v=>!v)} aria-label={hudDetail?'Simplify camera HUD':'Show full camera HUD'} aria-pressed={!hudDetail}>{hudDetail?<Eye size={14}/>:<EyeOff size={14}/>}</button><button onClick={onExpand} aria-label={expanded?'Return to map':'Expand camera'}>{expanded?<Minimize2 size={14}/>:<Maximize2 size={14}/>}</button><button onClick={onClose} aria-label="Close camera"><X size={15}/></button></div></div>
     <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onPointerCancel={()=>{drag.current=null;}} onWheel={onWheel}>
       <div ref={mount} className="sensor-canvas" />
-      <div className="camera-head"><div><strong>{s.callsign}</strong><span>{s.name||'Observation camera'}{store.info.area?.name?` · ${store.info.area.name}`:''}</span><em className={s.source}>{s.source==='real'?'Connected aircraft':s.source==='sitl'?'SITL simulation':'Virtual simulation'}</em></div><div><button onClick={()=>setHudDetail(v=>!v)} aria-label={hudDetail?'Simplify camera HUD':'Show full camera HUD'} aria-pressed={!hudDetail}>{hudDetail?<Eye size={14}/>:<EyeOff size={14}/>}</button><button onClick={onExpand} aria-label={expanded?'Return to map':'Expand camera'}>{expanded?<Minimize2 size={14}/>:<Maximize2 size={14}/>}</button><button onClick={onClose} aria-label="Close camera"><X size={15}/></button></div></div>
       {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" onLoad={()=>setVideoState('ready')} onError={()=>setVideoState('error')} />}
       {cameraError&&<div className="camera-state error" role="alert">{cameraError}</div>}
       {isLiveVideo&&videoState!=='ready'&&<div className="camera-state" role="status">{videoState==='error'?'The aircraft video stream is unavailable.':'Connecting to aircraft video…'}{videoState==='error'&&<button onClick={()=>setVideo(false)}>Use rendered view</button>}</div>}
@@ -339,8 +379,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
         <div className="hud-pitch"><span className="pitch-label">GMB</span><div className="pitch-scale"><i style={{ top: `${C.Math.clamp(-gimbalPitch / 90, 0, 1) * 100}%` }}><em>{Math.round(gimbalPitch)}°</em></i></div></div>
         <div className="hud-cross"><i /><i /></div>
         {mode === 'ir' && marks.map(m => <div key={m.key} className="hot-mark" style={{ left: m.x, top: m.y }}><i /><span>HOT {thermal && m.c >= thermal.maxC - 0.2 ? '≥' : ''}{m.c.toFixed(0)}°C</span></div>)}
-        {mode === 'ir' && thermal && <div className="ir-scale"><b>{thermal.maxC.toFixed(0)}°C</b><i style={{ background: SCALE[palette] }} /><b>{thermal.minC.toFixed(0)}°C</b>
-          <small>LANDSAT LST {thermal.date}</small></div>}
+        {mode === 'ir' && thermal && <div className="ir-scale"><b>{(gain?.[1] ?? thermal.maxC).toFixed(0)}°C</b><i style={{ background: SCALE[palette] }} /><b>{(gain?.[0] ?? thermal.minC).toFixed(0)}°C</b>
+          <small>{gain ? 'AUTO GAIN · ' : ''}LANDSAT LST {thermal.date}</small></div>}
         {note && <div className={`hud-note ${note.kind}`}><b>NOTE · {NOTE_LABEL[note.kind] ?? note.kind.toUpperCase()}</b><span>{note.text}</span></div>}
         <div className="hud-bl"><span>ALT {fmt(Math.round(ft(s.aglM) / 10) * 10)} FT AGL</span><span>GS {String(Math.round(kt(s.speedMps))).padStart(3, ' ')} KT</span><span>HDG {String(Math.round(s.headingDeg) % 360).padStart(3, '0')}°</span></div>
         <div className="hud-bc">
@@ -371,7 +411,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       <button className="icon-btn" onClick={() => { setNadir(false);setAim({ az: 0, el: 0 }); setZoom(1); }} aria-label="Point the camera back at the mission target" title="Re-centre"><Crosshair size={14} /></button>
 <button className="icon-btn" onClick={()=>setHelp(h=>!h)} aria-label="Camera controls help" aria-expanded={help}><HelpCircle size={14}/></button>
     </div>
-    <div className="camera-context"><span><i className={stale?'warn':'ok'}/>{isLiveVideo?'Aircraft video':mode==='ir'?`Landsat surface temperature · ${thermal?.date} · ~100 m source`:mode==='change'?'NISAR change overlay · measured acquisition pair':`${relief?'Relief':'Satellite imagery'} · rendered from aircraft telemetry`}</span><span>{isLiveVideo?'':tileQueue>0?'Loading terrain and imagery…':'Drag to aim · scroll to zoom'}</span></div>
+    <div className="camera-context"><span><i className={stale?'warn':'ok'}/>{isLiveVideo?'Aircraft video':mode==='ir'?`Thermal · Landsat LST ${thermal?.date} (~100 m) + modelled fine detail · readouts measured only`:mode==='change'?'NISAR change overlay · measured acquisition pair':`${relief?'Relief':'Satellite imagery'} · rendered from aircraft telemetry`}</span><span>{isLiveVideo?'':tileQueue>0?'Loading terrain and imagery…':'Drag to aim · scroll to zoom'}</span></div>
+    {!expanded && <div className="camera-resize" onPointerDown={startResize} aria-hidden="true" title="Drag to resize" />}
     {help&&<div className="camera-help"><strong>Camera controls</strong><p>Drag the image to slew the gimbal. Scroll or use +/− to zoom. Mission target restores tracking; Look down gives a vertical view. The eye button simplifies telemetry.</p><p>IR shows a dated Landsat temperature layer; Δ shows the investigation’s radar change. Areas without a measurement show the base map.</p>{s.source!=='real'&&<p>Fly controls simulation: W/S forward, A/D sideways, Q/E yaw, R/F climb, arrows for gimbal, Shift for speed, Escape to hand back.</p>}</div>}
   </div>;
 }
