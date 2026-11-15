@@ -64,7 +64,8 @@ const hash = (a: number, b: number, c = 0) => { let h = (a * 374761393 + b * 668
  */
 export class Relief {
   private v: C.Viewer;
-  private base: C.ImageryLayer; private roads: C.ImageryLayer; private cover: C.ImageryLayer | null = null;
+  private base: C.ImageryLayer; private roads: C.ImageryLayer; private cover: C.ImageryLayer | null = null; private planet: C.ImageryLayer;
+  private far = -1; private sunNow = false;
   private material: C.Material;
   private plants: C.Primitive | null = null; private pending: C.Primitive | null = null;
   private labels: C.EntityCollection;
@@ -85,11 +86,16 @@ export class Relief {
     this.roads = new C.ImageryLayer(new C.UrlTemplateImageryProvider({ ...imagery('maps/transport/{z}/{y}/{x}'), tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 18, credit: new C.Credit('Esri World Transportation') }));
     // Roads as thin pale lines, as on a topographic sheet, rather than Esri's coloured road classes.
     this.roads.show = false; this.roads.alpha = 0.6; this.roads.saturation = 0; this.roads.brightness = 1.6; v.imageryLayers.add(this.roads, at + 1);
+    // From far out Esri's hillshade is blank (its lowest levels are nearly white) and the faceted GPU shading turns into
+    // blocks, so NASA's Blue Marble shaded relief and bathymetry takes over as the camera leaves the region (retune).
+    this.planet = new C.ImageryLayer(new C.UrlTemplateImageryProvider({ ...imagery('gibs/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg'),
+      maximumLevel: 8, credit: new C.Credit('NASA GIBS · Blue Marble shaded relief') }));
+    this.planet.show = false; this.planet.alpha = 0; this.planet.saturation = 0.82; this.planet.contrast = 1.06; v.imageryLayers.add(this.planet, at + 1);
     this.labels = new C.EntityCollection(); v.dataSources.add(new C.CustomDataSource('relief-labels')).then(ds => { if (this.v.isDestroyed()) return; this.labels = ds.entities; this.drawFeatures(); });
     this.material = new C.Material({
       fabric: {
         type: 'TerraRelief',
-        uniforms: { interval: 50, contourAlpha: 0.32 },
+        uniforms: { interval: 50, contourAlpha: 0.32, detail: 1 },
         source: `
           czm_material czm_getMaterial(czm_materialInput materialInput) {
             czm_material m = czm_getDefaultMaterial(materialInput);
@@ -122,7 +128,7 @@ export class Relief {
             float line = max(minor * 0.65, major) * contourAlpha * fade;
             colour = mix(colour, vec3(0.20, 0.14, 0.08), line / max(alpha + line, 1e-3));
             alpha = max(alpha, line);
-            m.diffuse = colour; m.alpha = alpha;
+            m.diffuse = colour; m.alpha = alpha * detail;  // detail fades the shading and contours out from orbit
             return m;
           }`,
       },
@@ -143,7 +149,7 @@ export class Relief {
     const changed = active !== this.active || JSON.stringify(opts) !== JSON.stringify(this.opts) || lighting !== this.lighting;
     this.active = active; this.opts = opts; this.lighting = lighting; if (!changed) return;
     const g = this.v.scene.globe;
-    this.base.show = active; this.roads.show = active && opts.roads;
+    this.base.show = active; this.roads.show = active && opts.roads; this.planet.show = active && this.planet.alpha > 0; this.far = -1;
     g.baseColor = active ? C.Color.fromCssColorString('#c9b48b') : this.ground;
     for (const l of this.hidden) l.show = !active;
     if (this.cover) this.cover.show = active && opts.cover;
@@ -195,8 +201,10 @@ export class Relief {
   // ---------------------------------------------------------------- internals
   private applyLight() {
     // A fixed light from the north-west (the cartographic convention), unless the live sun was asked for.
+    // The live sun lights the relief only from orbit, where the globe shows day and night; closer in the relief keeps its
+    // north-west lamp (the globe is not sun-shaded there), so trees and aircraft never go dark with the local night.
     const s = this.v.scene; const b = this.grid?.bounds;
-    if (!this.active || this.lighting || !b) { s.light = this.sun; return; }
+    if (!this.active || this.sunNow || !b) { s.light = this.sun; return; }
     const centre = C.Cartesian3.fromDegrees((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
     const enu = C.Transforms.eastNorthUpToFixedFrame(centre);
     const toward = C.Matrix4.multiplyByPointAsVector(enu, new C.Cartesian3(-0.54, 0.54, 0.64), new C.Cartesian3());
@@ -211,6 +219,12 @@ export class Relief {
     const ground = this.v.scene.globe.getHeight(cam) ?? 0; const above = Math.max(1, cam.height - ground) / ex;
     const interval = above < 400 ? 10 : above < 1200 ? 20 : above < 3000 ? 50 : above < 8000 ? 100 : above < 25000 ? 200 : 500;
     if (this.material.uniforms.interval !== interval) this.material.uniforms.interval = interval;
+    // 0 below 120 km (the relief is made for an area of interest), 1 from 450 km: the planet layer fades in as the relief
+    // detail fades out.
+    const far = Math.round(C.Math.clamp((cam.height - 120_000) / 330_000, 0, 1) * 40) / 40;
+    if (far !== this.far) { this.far = far; this.planet.alpha = far; this.planet.show = far > 0; this.material.uniforms.detail = 1 - far; this.v.scene.requestRender(); }
+    const sunNow = this.lighting && cam.height > 5_000_000;
+    if (sunNow !== this.sunNow) { this.sunNow = sunNow; this.applyLight(); this.v.scene.requestRender(); }
   }
 
   private drawFeatures() {

@@ -4,6 +4,8 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { ConditionsGrid, type Conditions } from './Panels';
 import Compare, { GeoFrame, type Box, type Frame } from './Compare';
+import FieldSection, { type FieldAircraft } from './FieldSection';
+import { useFieldEvidence, type FieldEvidence } from './fieldEvidence';
 import type { Bounds, Investigation, Layer } from './types';
 import { prettyDate, safeUrl } from './types';
 
@@ -24,11 +26,21 @@ const html = (value: string) => ({ __html: DOMPurify.sanitize(marked.parse(value
 export const artifactUrl = (job: Investigation, name: string) => `/api/investigations/${encodeURIComponent(job.id)}/artifacts/${encodeURIComponent(name)}`;
 const layerUrl = (job: Investigation, l: Layer) => artifactUrl(job, l.path.split('/').pop() || '');
 
+/** The drones in the report: field evidence, and the way from a patch to the aircraft looking at it. */
+export type FieldLinks = { canDispatch: boolean; dispatched: boolean; aircraftFor: (rank: number, observers: string[]) => FieldAircraft;
+  onDrone: (id: string) => void; onMap: (h: Hotspot) => void };
+
 /** Everything a reader needs to judge one investigation, starting with the images. */
-export default function Dossier({ job, onClose, onGlobe }: { job: Investigation; onClose: () => void; onGlobe: (layer: Layer) => void }) {
+export default function Dossier({ job, onClose, onGlobe, anchor, field }: { job: Investigation; onClose: () => void; onGlobe: (layer: Layer) => void;
+  /** Open scrolled to this element (a section or one patch's field verification, r-field-3). */ anchor?: string | null; field?: FieldLinks }) {
   const r = job.result as Full;
   const sheet = useRef<HTMLDivElement>(null);
   useEffect(() => { const prev = document.activeElement as HTMLElement | null; sheet.current?.focus({ preventScroll: true }); return () => prev?.focus(); }, []);
+  useEffect(() => {
+    if (!anchor) return;
+    const id = setTimeout(() => { const el = document.getElementById(anchor); if (!el) return; el.scrollIntoView({ block: 'start' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600); }, 80);
+    return () => clearTimeout(id);
+  }, [anchor]);
   const layers = r.layers || [];
   const radar = layers.filter(l => l.id.startsWith('backscatter-'));
   const delta = layers.find(l => l.id === 'change');
@@ -56,7 +68,14 @@ export default function Dossier({ job, onClose, onGlobe }: { job: Investigation;
   const radarFrame = (l: Layer, i: number): Frame => ({ src: layerUrl(job, l), bounds: l.bounds, label: i === 0 ? 'Before' : 'After', date: prettyDate(date(i)), alt: `Radar backscatter on ${prettyDate(date(i))}`, pixelated: true });
   const span = pair ? `${prettyDate(date(0))} → ${prettyDate(date(1))}` : radar[0] ? prettyDate(date(0)) : '';
   const verification = n?.verification;
-  const sections = useMemo(() => [['images', 'Before and after'], ['answer', 'Answer'], ...(hotspots.length ? [['where', 'Where it changed']] : []), ['numbers', 'Measurements'], ['sources', 'Sources'], ['method', 'Method and limits']], [hotspots.length]);
+  // The drones' evidence: live from the fleet while the report is open, else as the investigation kept it.
+  const liveField = useFieldEvidence(hotspots.length ? job.id : null);
+  const keptField = (job as Investigation & { field_verification?: FieldEvidence }).field_verification ?? null;
+  const fieldEvidence = liveField.value ?? keptField;
+  const fieldPatches = (fieldEvidence?.patches ?? []).filter(p => p.observations > 0);
+  const fieldLooks = fieldPatches.reduce((a, p) => a + p.observations, 0);
+  const fieldArtifact = liveField.value?.artifact ?? keptField?.artifact ?? null;
+  const sections = useMemo(() => [['images', 'Before and after'], ['answer', 'Answer'], ...(hotspots.length ? [['where', 'Where it changed'], ['field', 'Field check']] : []), ['numbers', 'Measurements'], ['sources', 'Sources'], ['method', 'Method and limits']], [hotspots.length]);
 
   return <div className="sheet" role="dialog" aria-modal="true" aria-label="Investigation report" ref={sheet} tabIndex={-1} onKeyDown={e => { if (e.key === 'Escape') onClose(); }}>
     <div className="sheet-bar">
@@ -78,6 +97,7 @@ export default function Dossier({ job, onClose, onGlobe }: { job: Investigation;
             NISAR L-band radar{meta0.track !== undefined ? `, track ${text(meta0.track)} ${text(meta0.direction).toLowerCase()}` : ''} · {text(meta0.maturity).toLowerCase()} products
             {verification ? ` · ${verification.unmatched.length ? `${verification.unmatched.length} numbers need review` : `all ${verification.numbers_checked} numbers traced to computed values`}` : ''}
             {typeof elapsed === 'number' ? ` · answered in ${elapsed.toFixed(1)} s` : ''}
+            {fieldLooks > 0 && <> · <button className="link" onClick={() => document.getElementById('r-field')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>field check: {fieldPatches.filter(p => p.overall === 'supported').length} of {fieldPatches.length} observed patches supported</button></>}
           </p>
         </header>
 
@@ -151,6 +171,12 @@ export default function Dossier({ job, onClose, onGlobe }: { job: Investigation;
           </table>
         </section>}
 
+        {hotspots.length > 0 && <FieldSection jobId={job.id} hotspots={hotspots} evidence={fieldEvidence} live={Boolean(liveField.value)} error={liveField.error}
+          canDispatch={Boolean(field?.canDispatch)} dispatched={Boolean(field?.dispatched)} aircraftFor={field?.aircraftFor} onDrone={field?.onDrone} onMap={field?.onMap}
+          change={delta ? { src: layerUrl(job, delta), bounds: delta.bounds, label: 'Radar change', date: span, alt: 'Backscatter change around the patch', pixelated: true } : undefined}
+          after={after ? { src: artifactUrl(job, after.artifact_name), bounds: after.bounds, label: 'True colour, after', date: prettyDate(after.date), alt: `Sentinel-2 true colour around the patch, ${prettyDate(after.date)}` } : undefined}
+          artifactHref={fieldArtifact ? artifactUrl(job, fieldArtifact) : undefined} />}
+
         <section className="report-section" id="r-numbers">
           <h2>Measurements</h2>
           <table className="table">
@@ -187,11 +213,14 @@ export default function Dossier({ job, onClose, onGlobe }: { job: Investigation;
 
         <section className="report-section" id="r-method">
           <h2>Method and limits</h2>
-          <p className="lede">{text((r.provenance as { formula?: string })?.formula)}. Measurements use the native radar grid after the product’s own quality masks. {r.validation?.independent_validation === 'not_performed' ? 'No independent field validation was performed.' : ''}</p>
+          <p className="lede">{text((r.provenance as { formula?: string })?.formula)}. Measurements use the native radar grid after the product’s own quality masks. {fieldLooks > 0
+            ? `The field check (${fieldLooks.toLocaleString('en')} looks by aircraft) samples measured satellite layers where each camera looked: a consistency check of the radar's hypotheses, not independent ground validation.`
+            : r.validation?.independent_validation === 'not_performed' ? 'No independent field validation was performed.' : ''}</p>
           <ul className="plain">{r.validation?.limitations?.map((x, i) => <li key={i}>{x}</li>)}</ul>
           <details><summary>Processing record ({job.events.length} steps)</summary><ol className="log">{job.events.map((x, i) => <li key={i}><time className="num">{new Date(x.at).toISOString().slice(11, 19)}</time>{x.message}</li>)}</ol></details>
-          <details><summary>Files ({(r.artifacts?.length || 0) + 1})</summary><ul className="files">{r.artifacts?.map(a => <li key={a.name}><a href={a.url} download>{a.name}</a><span>{a.name.endsWith('.tif') ? 'Georeferenced float raster' : a.name.endsWith('.png') ? 'Preview image' : 'Record'} · {(a.size_bytes / 1048576).toFixed(2)} MB</span></li>)}
-            <li><a href={artifactUrl(job, 'public-result.json')} download>public-result.json</a><span>Measurements, sources, checks and the written answer</span></li></ul></details>
+          <details><summary>Files ({(r.artifacts?.length || 0) + 1 + (fieldArtifact ? 1 : 0)})</summary><ul className="files">{r.artifacts?.map(a => <li key={a.name}><a href={a.url} download>{a.name}</a><span>{a.name.endsWith('.tif') ? 'Georeferenced float raster' : a.name.endsWith('.png') ? 'Preview image' : 'Record'} · {(a.size_bytes / 1048576).toFixed(2)} MB</span></li>)}
+            <li><a href={artifactUrl(job, 'public-result.json')} download>public-result.json</a><span>Measurements, sources, checks and the written answer</span></li>
+            {fieldArtifact && <li><a href={artifactUrl(job, fieldArtifact)} download>{fieldArtifact}</a><span>Patches and every drone observation, judged · GeoJSON</span></li>}</ul></details>
         </section>
         <footer className="report-foot">Terra investigation {job.id} · generated {prettyDate(job.updated_at || job.created_at)} from the products listed above.</footer>
       </article>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useState } from 'react';
-import { Copy, Maximize2, Plane, Plus, Video, X } from 'lucide-react';
+import { Copy, FileText, Maximize2, Plane, Plus, Video, X } from 'lucide-react';
+import { SHORT, patchOf, useFieldEvidence } from './fieldEvidence';
 import './dronesPanel.css';
 import { ft, kt, type DroneState, type DroneStore, type EnrollRequest, type Enrollment, type FieldNote, type FleetMessage, type Patch, type Place, type Profile, type Source } from './drones';
 import { dm } from './DroneFeed';
@@ -41,11 +42,14 @@ function sender(m: FleetMessage) {
 
 type Option = { key: string; label: string; task: (d: DroneState) => { kind: string; label: string; lon?: number; lat?: number; radius_m?: number; agl_m?: number; bbox?: Bounds; size_m?: number } };
 
-/** A field note: what an aircraft's camera was looking at, read from real data, where and when. */
-function Note({ n, callsign, onFocus }: { n: FieldNote; callsign: string; onFocus: (lon: number, lat: number) => void }) {
-  return <li className={`note ${n.kind}`}><button onClick={() => onFocus(n.lon, n.lat)} title="Show this place on the map">
-    <i aria-hidden="true" /><span className="note-head"><b>{callsign}</b><em>{NOTE_LABEL[n.kind] ?? n.kind}</em><time>{ago(n.t)}</time></span>
-    <span className="note-text">{n.text}</span></button></li>;
+/** A field note: what an aircraft's camera was looking at, read from real data, where and when. A check of a changed
+ * patch carries its verdict and leads to that patch in the investigation report. */
+function Note({ n, callsign, onFocus, onReport }: { n: FieldNote; callsign: string; onFocus: (lon: number, lat: number) => void; onReport?: (rank: number) => void }) {
+  const verdict = (n.data as { verdict?: string }).verdict; const rank = n.kind === 'verify' ? Number(/patch (\d+)/i.exec(n.text)?.[1]) || null : null;
+  return <li className={`note ${n.kind} ${verdict ?? ''}`}><button onClick={() => onFocus(n.lon, n.lat)} title="Show this place on the map">
+    <i aria-hidden="true" /><span className="note-head"><b>{callsign}</b><em>{NOTE_LABEL[n.kind] ?? n.kind}{verdict ? ` · ${verdict}` : ''}</em><time>{ago(n.t)}</time></span>
+    <span className="note-text">{n.text}</span></button>
+    {rank && onReport && <button className="note-report" onClick={() => onReport(rank)} title={`Patch ${rank} in the investigation report`}><FileText size={11} />Report</button>}</li>;
 }
 
 /** Add an aircraft: a token for that aircraft alone and the one command that connects it. */
@@ -101,10 +105,12 @@ function AddDrone({ store, count }: { store: DroneStore; count: number }) {
 }
 
 /** The fleet, the selected aircraft, its task and airspace, people's tasks, and the agents' shared log. */
-export default function DronesPanel({ store, selected, onSelect, onCamera, onFull, patches, places, regionName, regionBox, onMonitorHere, onProfile, onFocus, ops }: {
+export default function DronesPanel({ store, selected, onSelect, onCamera, onFull, patches, places, regionName, regionBox, onMonitorHere, onProfile, onFocus, ops, onReport }: {
   store: DroneStore; selected: string | null; onSelect: (id: string) => void; onCamera: (id: string) => void; onFull: (id: string) => void; patches: Patch[]; places: Place[];
   regionName: string; regionBox: Bounds; onMonitorHere: () => Promise<void>; onProfile: (p: Profile) => void; onFocus: (lon: number, lat: number) => void;
   ops?: React.ReactNode;  // orchestration: deployment, fleet commands and the durable agents (FleetOps)
+  /** Open an investigation's report, at one patch's field verification when a rank is given. */
+  onReport?: (investigationId: string, rank?: number) => void;
 }) {
   const [, tick] = useReducer((x: number) => x + 1, 0);
   const [sent, setSent] = useState('');
@@ -142,6 +148,13 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
     } catch (e) { setSent(e instanceof Error ? e.message : 'The task could not be sent.'); }
   }
   const op = s?.operation; const t = s?.task;
+  // A verification flight: the investigation whose patches the fleet is checking, and its field evidence so far.
+  const investigation = info.area?.investigation_id ?? null;
+  const field = useFieldEvidence(investigation, 8000).value;
+  const fieldRows = field?.patches ?? [];
+  const looked = fieldRows.filter(p => p.observations > 0);
+  const report = investigation && onReport ? (rank?: number) => onReport(investigation, rank) : undefined;
+  const patchRow = (d: DroneState) => { const r = investigation ? patchOf(d.task?.job_key) : null; return r ? { rank: r, row: fieldRows.find(p => p.target_id === `patch-${r}`) ?? null } : null; };
 
   const [tab, setTab] = useState<'fleet' | 'mission' | 'notes' | 'log'>(() => { try { return (localStorage.getItem('terra.dronesTab') as 'fleet') || 'fleet'; } catch { return 'fleet'; } });
   const go = (t: typeof tab) => { setTab(t); try { localStorage.setItem('terra.dronesTab', t); } catch { /* convenience only */ } };
@@ -161,6 +174,12 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
     <div className={`dp-coord ${c.running ? 'on' : ''} ${mode}`} title="The durable coordinator (a Temporal workflow) and one agent per aircraft">
       <i />{mode !== 'normal' ? <b>{mode === 'hold' ? 'Fleet held' : 'Fleet recalled'}</b> : null}
       <span>{c.running ? c.summary.text : info.area ? 'Coordinator starting…' : 'Deploy the fleet to start'}</span></div>
+    {investigation && <div className="dp-field">
+      <FileText size={15} aria-hidden="true" />
+      <span><b>Field check · {(info.area?.name ?? 'investigation').split(' · ')[0]}</b>
+        <small>{fieldRows.length ? `${looked.length} of ${fieldRows.length} patches observed${looked.length ? ` · ${looked.filter(p => p.overall === 'supported').length} supported` : ''}${looked.some(p => p.overall === 'contradicted') ? ` · ${looked.filter(p => p.overall === 'contradicted').length} contradicted` : ''}` : 'Verifying the radar change patch by patch'}</small></span>
+      {report && <button className="mini-btn" onClick={() => report()}>Report</button>}
+    </div>}
     <nav className="dp-tabs" role="tablist" aria-label="Drone workspace">{([['fleet', 'Fleet', states.length], ['mission', 'Mission', null], ['notes', 'Notes', info.notes.length || null], ['log', 'Log', null]] as const).map(([k, label, n]) =>
       <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? 'on' : ''} onClick={() => go(k)}>{label}{n ? <em>{n}</em> : null}</button>)}</nav>
 
@@ -201,6 +220,10 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
             <button className="secondary" onClick={() => onFull(d.id)}><Maximize2 size={13} /> Full view</button>
           </div>
           {t && <p className="dp-why"><em className={`task-status ${t.status}`}>{t.status}</em> {t.label}{t.reason ? ` · ${t.reason}` : ''}</p>}
+          {(() => { const pr = patchRow(d); if (!pr) return null; return <div className={`dp-verify ${pr.row?.overall.replace(/ /g, '-') ?? ''}`}>
+            <span><b>Verifying patch {pr.rank}</b><small>{pr.row?.brief.question ?? 'Checking what the radar change is consistent with.'}</small>
+              <em>{pr.row ? (pr.row.observations ? `${SHORT[pr.row.overall] ?? pr.row.overall} · ${pr.row.observations} look${pr.row.observations === 1 ? '' : 's'}` : 'No look yet') : ''}</em></span>
+            {report && <button className="mini-btn" onClick={() => report(pr.rank)}>Report</button>}</div>; })()}
           <div className="dp-tasks" role="group" aria-label={`Give ${d.callsign} a task`}>{options.map(o => <button key={o.key} onClick={() => { void assign(d, o.key); }}>{o.label}</button>)}</div>
           {sent && <p className="card-note">{sent}</p>}
           <details className="dp-more"><summary>Aircraft details</summary><KeyValues rows={[
@@ -232,7 +255,7 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
 
     {tab === 'notes' && <div className="dp-body" role="tabpanel"><section className="fleet-notes">
       <header><b>Field notes</b><small>{s ? `${s.callsign}'s` : 'every aircraft'}, from what the cameras look at</small></header>
-      {notes.length ? <ol>{notes.slice(0, allNotes ? 40 : 8).map(n => <Note key={n.id} n={n} callsign={callsign(n.drone_id)} onFocus={onFocus} />)}</ol>
+      {notes.length ? <ol>{notes.slice(0, allNotes ? 40 : 8).map(n => <Note key={n.id} n={n} callsign={callsign(n.drone_id)} onFocus={onFocus} onReport={report} />)}</ol>
         : <p className="card-note">On station and every two minutes after, each aircraft's agent notes the ground its camera is on: Landsat surface temperature, radar change, land cover, height and the weather.</p>}
       {notes.length > 8 && <button className="mini-btn" onClick={() => setAllNotes(a => !a)}>{allNotes ? 'Fewer' : `All ${Math.min(40, notes.length)} notes`}</button>}
     </section></div>}

@@ -89,3 +89,26 @@
 
 .fleet-log .who.agent.verification { color: #7be36b; }
 .note.verify i { border-color: #7be36b; background: rgba(123, 227, 107, 0.3); } .note.verify .note-head em { color: #7be36b; }
+
+/* Verification flights: the field check banner, the patch an aircraft is verifying, and checks in the notes, each
+   leading to the investigation report. */
+.dp-field { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 0 14px 10px; padding: 8px 10px;
+  border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--rule); color: var(--accent); }
+.dp-field span { display: grid; min-width: 0; color: var(--fg); }
+.dp-field b { font-size: 12.5px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dp-field small { font-size: 11px; color: var(--fg-3); }
+.dp-verify { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; margin-top: 8px; padding: 7px 9px;
+  border-radius: var(--r-sm); background: var(--surface-2); border-left: 3px solid var(--rule-2); }
+.dp-verify.supported { border-left-color: var(--ok); } .dp-verify.contradicted { border-left-color: var(--bad); } .dp-verify.mixed { border-left-color: var(--warn); }
+.dp-verify span { display: grid; gap: 1px; min-width: 0; }
+.dp-verify b { font-size: 12px; font-weight: 650; }
+.dp-verify small { font-size: 11.5px; line-height: 1.35; color: var(--fg-2); }
+.dp-verify em { font-style: normal; font: 600 10.5px var(--mono); color: var(--fg-3); text-transform: uppercase; letter-spacing: 0.04em; }
+.dp-verify.supported em { color: var(--ok); } .dp-verify.contradicted em { color: var(--bad); }
+.note { position: relative; }
+.note button.note-report { position: absolute; right: 6px; bottom: 6px; width: auto; display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px;
+  border-radius: 4px; background: var(--surface-2); border: 1px solid var(--rule-2); font-size: 10.5px; font-weight: 600; color: var(--fg-2); }
+.note button.note-report:hover { color: var(--fg); background: var(--surface-3); }
+.note.verify:has(.note-report) .note-text { padding-right: 64px; }
+.note.verify.contradicts i { border-color: var(--bad); background: rgba(239, 106, 91, 0.3); } .note.verify.contradicts .note-head em { color: var(--bad); }
+.note.verify.inconclusive i { border-color: #cfc9bb; background: transparent; } .note.verify.inconclusive .note-head em { color: var(--fg-2); }

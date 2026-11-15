@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import * as C from 'cesium';
-import { Crosshair, Eye, EyeOff, HelpCircle, Gamepad2, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
+import { Crosshair, Eye, EyeOff, FileText, HelpCircle, Gamepad2, Maximize2, Minimize2, Minus, Plus, X } from 'lucide-react';
 import { ft, kt, type DroneState, type DroneStore } from './drones';
+import { SHORT, patchOf, useFieldEvidence } from './fieldEvidence';
 import type { Grid, TerrainFeature } from './relief';
 import { imagery, terrainUrl } from './tiles';
 import type { ThermalPalette as Palette } from './thermalPalette';
@@ -63,10 +64,12 @@ export function dm(lat: number, lon: number) {
  * and imagery, not footage; IR shows measured land-surface temperature where a thermal scene exists.
  * A real drone's own video, when its ground station provides a stream, is shown instead of the rendering.
  */
-export default function DroneFeed({ id, store, terrain, change, thermal, expanded, visible, onExpand, onClose, onSight, onSample }: {
+export default function DroneFeed({ id, store, terrain, change, thermal, expanded, visible, onExpand, onClose, onSight, onSample, onReport }: {
   id: string; store: DroneStore; terrain: { grid: Grid | null; features: TerrainFeature[] } | null;
   change?: { url: string; bounds: Bounds }; thermal?: Thermal | null; expanded: boolean; visible: boolean; onExpand: () => void; onClose: () => void;
   onSight: (p: { id: string; lon: number; lat: number } | null) => void; onSample?: (lon: number, lat: number) => Promise<number | null>;
+  /** Open the investigation report at the patch this aircraft is verifying. */
+  onReport?: (investigationId: string, rank: number) => void;
 }) {
   const mount = useRef<HTMLDivElement>(null);
   const credits = useRef<HTMLDivElement>(null);
@@ -365,6 +368,13 @@ export default function DroneFeed({ id, store, terrain, change, thermal, expande
   };
   const onWheel = (e: React.WheelEvent) => !video && setZoom(z => C.Math.clamp(z * (e.deltaY < 0 ? 1.12 : 1 / 1.12), 1, 16));
 
+  // The patch this aircraft is verifying (its task comes from a dispatched investigation), the question it is there to
+  // answer, and the field verdict so far: the camera and the report are about the same patch.
+  const investigationId = store.info.area?.investigation_id ?? null;
+  const rank = investigationId ? patchOf(s?.task?.job_key) : null;
+  const field = useFieldEvidence(visible && rank ? investigationId : null, 8000).value?.patches.find(p => p.target_id === `patch-${rank}`) ?? null;
+  const target = rank ? store.info.targets.find(t => t.id === `patch-${rank}`) : undefined;
+
   if (!s) return <div className="sensor drone-feed parked" aria-hidden="true"><div className="sensor-screen"><div ref={mount} className="sensor-canvas" /></div><div ref={credits} className="sensor-credits" /></div>;
   const gimbalHeading = ((s.gimbal.headingDeg + aim.az) % 360 + 360) % 360;
   const gimbalPitch = nadir ? -90 : C.Math.clamp(s.gimbal.pitchDeg + aim.el, -90, 20);
@@ -382,6 +392,12 @@ export default function DroneFeed({ id, store, terrain, change, thermal, expande
   const place = !expanded && visible && win ? { left: win.x, top: win.y, right: 'auto', width: win.w } as React.CSSProperties : undefined;
   return <div ref={box} style={place} className={`sensor drone-feed ${expanded ? 'expanded' : ''} ${visible ? '' : 'parked'} ${hudDetail?'':'minimal-hud'} ${isLiveVideo?'video-mode':''} ${win && !expanded ? 'floating' : ''}`} role="dialog" aria-label={`Camera on ${s.callsign} ${s.name}`} aria-hidden={!visible} inert={!visible}>
     <div className="camera-head" onPointerDown={startMove} title={expanded ? undefined : "Drag to move"}><div><strong>{s.callsign}</strong><span>{s.name||'Observation camera'}{store.info.area?.name?` · ${store.info.area.name}`:''}</span><em className={s.source}>{s.source==='real'?'Connected aircraft':s.source==='sitl'?'SITL simulation':'Virtual simulation'}</em></div><div><button onClick={()=>setHudDetail(v=>!v)} aria-label={hudDetail?'Simplify camera HUD':'Show full camera HUD'} aria-pressed={!hudDetail}>{hudDetail?<Eye size={14}/>:<EyeOff size={14}/>}</button><button onClick={onExpand} aria-label={expanded?'Return to map':'Expand camera'}>{expanded?<Minimize2 size={14}/>:<Maximize2 size={14}/>}</button><button onClick={onClose} aria-label="Close camera"><X size={15}/></button></div></div>
+    {rank && investigationId && <div className={`feed-brief ${field?.overall.replace(/ /g, '-') ?? ''}`}>
+      <span className="feed-brief-tag">PATCH {rank}</span>
+      <span className="feed-brief-text"><b>{field?.brief.question ?? target?.label ?? `Change patch ${rank}`}</b>
+        <small>{field ? (field.observations ? `${SHORT[field.overall] ?? field.overall} · ${field.counts.supports} support, ${field.counts.contradicts} contradict, ${field.counts.inconclusive} inconclusive` : 'No look at this patch yet') : 'Field verification'}</small></span>
+      {onReport && <button onClick={() => onReport(investigationId, rank)} title="Open the investigation report at this patch's field verification"><FileText size={13} />Report</button>}
+    </div>}
     <div className="sensor-screen" onPointerDown={onDown} onPointerMove={onMove} onPointerUp={() => { drag.current = null; }} onPointerCancel={()=>{drag.current=null;}} onWheel={onWheel}>
       <div ref={mount} className="sensor-canvas" />
       {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" onLoad={()=>setVideoState('ready')} onError={()=>setVideoState('error')} />}

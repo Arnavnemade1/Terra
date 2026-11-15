@@ -19,6 +19,7 @@ import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
 import FleetOps, { DeployCard } from './FleetOps';
 import Verification, { type SignedSpot } from './Verification';
+import { patchOf } from './fieldEvidence';
 import Watch from './Watch';
 import AgentOperations from './AgentOperations';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
@@ -108,13 +109,18 @@ export default function App() {
   const [ls, setLs] = useState<Record<LayerId, Setting>>(() => ({ ...DEFAULT_LAYERS, ...readJSON<Partial<Record<LayerId, Setting>>>('terra.layers', {}) }));
   const [display, setDisplay] = useState<DisplayMode>('normal');
   const [quality, setQuality] = useState('balanced');
-  const [lighting, setLighting] = useState(false);
+  // The real sun from orbit (day and night, with NASA's night lights); closer in the area stays evenly lit.
+  const [lighting, setLighting] = useState<boolean>(() => readJSON('terra.daynight', true));
   const [footprints, setFootprints] = useState(true);
   const [feeds, setFeeds] = useState<Record<string, FeedState>>({});
   const [selection, setSelection] = useState<Selection | null>(null);
   const [menu, setMenu] = useState<'area' | 'view' | 'analysis' | 'share' | 'more' | 'sources' | 'about' | null>(null);
   const [detail, setDetail] = useState(false);
   const [dossier, setDossier] = useState(false);
+  // Where the report opens (one patch's field verification, from a drone or the investigation panel), and an
+  // investigation whose report should open as soon as it has loaded.
+  const [reportAnchor, setReportAnchor] = useState<string | null>(null);
+  const pendingReport = useRef<string | null>(null);
   const [refresh, setRefresh] = useState(0);
   const [context, setContext] = useState<Context | null>(null);
   const [probe, setProbe] = useState<Probe>(null);
@@ -212,6 +218,7 @@ export default function App() {
   const mapStyle: Exclude<MapStyle, 'photoreal'> | 'photoreal' = style === 'photoreal' && !photorealReady ? 'photo' : style;
   const onPhotorealError = useCallback((message: string) => { setPhotorealState({ available: false, reason: message }); }, []);
   useEffect(() => { writeJSON('terra.dock', dockOpen); }, [dockOpen]);
+  useEffect(() => { writeJSON('terra.daynight', lighting); }, [lighting]);
   // Land cover and named features for the relief map and the pointer readout (areas up to 2 degrees across).
   useEffect(() => {
     setTerrain(null); const b = region.bbox;
@@ -243,6 +250,7 @@ export default function App() {
   const linked = useRef(INITIAL.get('investigation'));
   useEffect(() => { const id = linked.current; if (id && /^[\w-]{8,64}$/.test(id)) void openJob({ id } as Investigation); }, []);
   useEffect(() => { if (job?.result && job.id === linked.current && INITIAL.get('dossier') === '1') setDossier(true); }, [job?.id, Boolean(job?.result)]);
+  useEffect(() => { if (job?.result && job.id === pendingReport.current) { pendingReport.current = null; setDossier(true); } }, [job?.id, Boolean(job?.result)]);
   useEffect(() => {
     if (!job && linked.current) return;
     const url = new URL(location.href); const current = url.searchParams.get('investigation');
@@ -409,6 +417,17 @@ export default function App() {
   const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
   useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
   const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); globe.current?.followDrone(id); }, []);
+  // The drones and the report, both ways. From a drone (camera, panel, field note) or the investigation panel, open the
+  // report at a patch's field verification, loading that investigation first if another is on screen; from the report,
+  // fly with the aircraft looking at a patch, its camera open.
+  const openReport = (investigationId: string | null | undefined, rank?: number | null) => {
+    if (!investigationId) return;
+    setReportAnchor(rank ? `r-field-${rank}` : 'r-field');
+    if (job?.id === investigationId && job.result) { setDossier(true); return; }
+    pendingReport.current = investigationId; void openJob({ id: investigationId } as Investigation);
+  };
+  const closeReport = () => { setDossier(false); setReportAnchor(null); };
+  const watchDrone = (id: string) => { closeReport(); setMode('drones'); setSelectedDrone(id); followDrone(id); setSensor(null); setFeed({ id, expanded: false }); };
   // Release the second WebGL scene and its decoded imagery as soon as the camera closes.
   const cameraId = feed?.id ?? null;
   const onDroneSight = useCallback((p: { id: string; lon: number; lat: number } | null) => globe.current?.droneSight(p), []);
@@ -641,7 +660,7 @@ export default function App() {
             }} aria-current={mode === id ? 'page' : undefined}>
             {id === 'investigation' ? <BarChart3 size={14} /> : id === 'drones' ? <Plane size={14} /> : id === 'hazards' ? <Info size={14} /> : <Navigation size={14} />}{label}{badge && <span className="badge">{badge}</span>}</button>)}
       </nav>
-      <AgentOperations />
+      <AgentOperations onStartWorkflow={newQuestion} />
       <div className="menus">
         <MenuButton id="view" label="View" icon={<Eye size={14} />} menu={menu} setMenu={setMenu}>
           {viewItems}
@@ -696,7 +715,8 @@ export default function App() {
           change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} />; })()}
       {cameraId && <DroneFeed id={cameraId} visible={Boolean(feed)} store={droneStore} terrain={terrainContext}
         change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={Boolean(feed?.expanded)}
-        onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
+        onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined}
+        onReport={(id, rank) => { setFeed(f => f && { ...f, expanded: false }); openReport(id, rank); }} />}
       {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}
       {following && !deploy && <div className="follow-chip" role="status"><i aria-hidden="true" />Flying with <b>{droneStore.state(following)?.callsign ?? following}</b>
         <span>drag to orbit · scroll to zoom</span><button onClick={stopFollowing}>Stop</button></div>}
@@ -781,9 +801,9 @@ export default function App() {
                 onRewritten={(nv: Narrative) => setJob(j => j && j.result ? { ...j, result: { ...j.result, narrative: nv, narrative_status: 'ready', narrative_note: null } as Investigation['result'] } : j)}
                 onSpot={(h: Hotspot) => { setFocusSpot(h.rank); set('hotspots', { on: true }); const [w, s, e, n] = h.bounds; const pad = Math.max(e - w, n - s) * 1.5 + 0.01; globe.current?.flyTo([w - pad, s - pad, e + pad, n + pad]); setProfileVertices([[region.bbox[0], h.centre[0]], [region.bbox[2], h.centre[0]]]); }}
                 onReport={() => setDossier(true)} />}
-              {result && job && hotspots.length > 0 && <Verification jobId={job.id} spots={hotspots as unknown as SignedSpot[]} fleetArea={fleetAreaInvestigation}
+              {result && job && hotspots.length > 0 && <Verification jobId={job.id} spots={hotspots as unknown as SignedSpot[]} fleetArea={fleetAreaInvestigation} onReport={rank => openReport(job.id, rank)}
                 onSpot={h => { setFocusSpot(h.rank); set('hotspots', { on: true }); const [w, s2, e, n] = h.bounds; const pad = Math.max(e - w, n - s2) * 1.5 + 0.01; globe.current?.flyTo([w - pad, s2 - pad, e + pad, n + pad]); }}
-                onWatch={() => { setMode('drones'); const first = droneStore.states().find(d => d.task?.params && String((d.task as { job_key?: string }).job_key ?? '').startsWith('orbit:patch')) ?? droneStore.states()[0]; if (first) { setSelectedDrone(first.id); followDrone(first.id); } }} />}
+                onWatch={() => { setMode('drones'); const first = droneStore.states().find(d => d.status === 'airborne' && patchOf(d.task?.job_key)) ?? droneStore.states()[0]; if (first) { setSelectedDrone(first.id); followDrone(first.id); } }} />}
               {result && job && <Watch jobId={job.id} name={region.name} bbox={job.bbox} onOpen={id => { void openJob({ id } as Investigation); }} />}
             </section>}
           </>}
@@ -816,7 +836,8 @@ export default function App() {
         ops={<FleetOps store={droneStore} regionName={region.name} onLaunchHere={monitorHere} deploying={Boolean(deploy)} onDeploy={() => { setDeploy(d => d ? null : { stage: 'draw', area: null, pad: null }); setPicking(false); setDrawingProfile(false); stopFollowing(); }} />}
         onSelect={id => { setSelectedDrone(id); followDrone(id); }}
         onCamera={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: false }); }}
-        onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }} />}
+        onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }}
+        onReport={openReport} />}
     </aside>
 
     {/* ------------------------------------------------ dock */}
@@ -835,7 +856,18 @@ export default function App() {
       <KeyValues rows={[['Acquired', activeObservation.date?.replace('T', ' ').replace('Z', ' UTC')], ['Maturity', activeObservation.maturity], ['Polarisation', activeObservation.polarizations?.join(', ')], ['Track / frame', `${activeObservation.track ?? '—'} / ${activeObservation.frame ?? '—'}`], ['Direction', activeObservation.direction || '—'], ['Granule', <span className="num break" key="g">{activeObservation.id}</span>]]} />
       {safeUrl(activeObservation.download_url) && <a className="link" href={safeUrl(activeObservation.download_url)} target="_blank" rel="noreferrer">Original product at ASF <ArrowUpRight size={12} /></a>}
     </Modal>}
-    {dossier && job?.result && <Dossier job={job} onClose={() => setDossier(false)} onGlobe={(l: Layer) => { set(l.id === 'change' ? 'change' : 'radar', { on: true }); setDossier(false); globe.current?.flyTo(l.bounds); }} />}
+    {dossier && job?.result && <Dossier job={job} anchor={reportAnchor} onClose={closeReport} onGlobe={(l: Layer) => { set(l.id === 'change' ? 'change' : 'radar', { on: true }); closeReport(); globe.current?.flyTo(l.bounds); }}
+      field={{ canDispatch: droneStore.info.operatorAccess, dispatched: fleetAreaInvestigation === job.id,
+        aircraftFor: (rank, observers) => {
+          const st = droneStore.states();
+          // Only while the fleet is verifying this investigation: otherwise its aircraft are somewhere else.
+          if (fleetAreaInvestigation !== job.id) return null;
+          const on = st.find(d => d.status === 'airborne' && patchOf(d.task?.job_key) === rank);
+          const seen = on ?? st.find(d => d.status === 'airborne' && observers.includes(d.id));
+          return seen ? { id: seen.id, callsign: seen.callsign, live: Boolean(on) } : null;
+        },
+        onDrone: watchDrone,
+        onMap: h => { closeReport(); setMode('investigation'); setTab('analysis'); setFocusSpot(h.rank); set('hotspots', { on: true }); const [w, s2, e, n] = h.bounds; const pad = Math.max(e - w, n - s2) * 1.5 + 0.01; globe.current?.flyTo([w - pad, s2 - pad, e + pad, n + pad]); } }} />}
   </div>;
 
   /** Open the simulated sensor view for a satellite's next pass over the area (searching ahead up to 13 days). */

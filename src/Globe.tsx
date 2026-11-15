@@ -264,6 +264,9 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         if (layer) layer.alpha = C.Math.clamp((9_000_000 - h) / 5_000_000, 0, 0.9) * (overlaid ? 0.5 : 1) * latest.current.labelAlpha;
         const sunlit = latest.current.lighting && h > 5_000_000;
         if (nightLayer.current) nightLayer.current.show = sunlit;
+        // With the live sun, the ground atmosphere paints the whole night side black and hides the city lights; from orbit
+        // the sky atmosphere's limb glow carries the look instead.
+        if (globe.showGroundAtmosphere === sunlit) { globe.showGroundAtmosphere = !sunlit; scene.requestRender(); }
         if (globe.enableLighting === sunlit) return;
         globe.enableLighting = sunlit; globe.dynamicAtmosphereLighting = sunlit;
         scene.atmosphere.dynamicLighting = sunlit ? C.DynamicAtmosphereLightingType.SUNLIGHT : C.DynamicAtmosphereLightingType.NONE;

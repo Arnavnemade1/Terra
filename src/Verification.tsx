@@ -1,37 +1,30 @@
-import { useEffect, useState } from 'react';
-import { CheckCircle2, CircleDashed, Plane, XCircle } from 'lucide-react';
-import { api, type Bounds } from './types';
+import { useState } from 'react';
+import { CheckCircle2, CircleDashed, FileText, Plane, XCircle } from 'lucide-react';
+import type { Bounds } from './types';
+import { OVERALL, ago, dispatchFleet, useFieldEvidence } from './fieldEvidence';
 import './verification.css';
 
 export type Signature = { hypothesis: string; mechanism: string; consistent_with: string[]; question: string; needs: string[]; confidence: 'strong' | 'moderate' | 'weak'; basis: string };
 export type SignedSpot = { rank: number; direction: 'increase' | 'decrease'; area_km2: number | null; mean_change_db: number | null; centre: [number, number]; bounds: Bounds; signature?: Signature; leading_polarization?: string | null };
-type Judged = { note_id: number; t: number; drone_id: string; verdict: 'supports' | 'contradicts' | 'inconclusive'; reasons: string[]; surface_c?: number | null; cover?: string | null };
-type Row = { target_id: string; observations: number; aircraft: string[]; counts: Record<string, number>; overall: string; latest: Judged[]; alternatives?: string[] };
-
-const ago = (t: number) => { const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? `${Math.round(s)} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
-const OVERALL: Record<string, string> = { supported: 'Supported in the field', contradicted: 'Contradicted in the field', mixed: 'Mixed field evidence', inconclusive: 'Observed, inconclusive', 'alternative explanation': 'Another explanation fits better', 'not yet observed': 'Not yet observed' };
 
 /**
  * Radar to drones and back. Every changed patch shows what its polarimetric change is consistent with and the
  * question that would settle it; one button sends the fleet to verify them all, and each drone's measured
  * observations come back as supporting, contradicting or inconclusive evidence, per patch, as they arrive.
  */
-export default function Verification({ jobId, spots, fleetArea, onSpot, onWatch }: {
+export default function Verification({ jobId, spots, fleetArea, onSpot, onWatch, onReport }: {
   jobId: string; spots: SignedSpot[]; fleetArea: string | null | undefined; onSpot: (s: SignedSpot) => void; onWatch: () => void;
+  /** Open the investigation report at this patch's field verification. */
+  onReport?: (rank: number) => void;
 }) {
-  const [rows, setRows] = useState<Row[]>([]);
+  const rows = useFieldEvidence(jobId).value?.patches ?? [];
   const [busy, setBusy] = useState(false); const [msg, setMsg] = useState('');
   const dispatched = fleetArea === jobId;
-  useEffect(() => {
-    let alive = true;
-    const load = () => api<{ patches: Row[] }>(`/fleet/evidence/${encodeURIComponent(jobId)}`).then(v => { if (alive) setRows(v.patches); }).catch(() => {});
-    void load(); const t = setInterval(load, 5000); return () => { alive = false; clearInterval(t); };
-  }, [jobId]);
   async function send() {
     setBusy(true); setMsg('');
     try {
-      const r = await api<{ targets: unknown[] }>('/fleet/dispatch', { method: 'POST', body: JSON.stringify({ investigation_id: jobId }) });
-      setMsg(`The fleet is on its way to ${r.targets.length} patch${r.targets.length === 1 ? '' : 'es'}. Verdicts appear here as the drones report.`);
+      const n = await dispatchFleet(jobId);
+      setMsg(`The fleet is on its way to ${n} patch${n === 1 ? '' : 'es'}. Verdicts appear here and in the report as the drones report.`);
     } catch (e) { setMsg(e instanceof Error ? e.message : 'The fleet could not be dispatched.'); }
     finally { setBusy(false); }
   }
@@ -53,6 +46,7 @@ export default function Verification({ jobId, spots, fleetArea, onSpot, onWatch 
           {row.observations > 0 && <small>{row.counts.supports} support · {row.counts.contradicts} contradict · {row.counts.inconclusive} inconclusive · {row.aircraft.join(', ')}</small>}
           {row.alternatives?.map(a => <p key={a} className="verify-alt">Alternative: {a}.</p>)}
           {row.latest[0] && <p>{row.latest[0].drone_id}, {ago(row.latest[0].t)}: {row.latest[0].reasons[0]}.</p>}
+          {row.observations > 0 && onReport && <button className="verify-report" onClick={() => onReport(s.rank)}><FileText size={12} />Field evidence in the report</button>}
         </div>}
       </li>; })}</ol>
     <div className="verify-actions">

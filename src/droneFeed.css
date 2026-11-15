@@ -37,3 +37,18 @@
   .sensor.drone-feed .camera-context { font-size: 9px; }
   .sensor.drone-feed .hud-tl, .sensor.drone-feed .hud-tr { top: 10px; }
 }
+
+/* The patch this aircraft is verifying: the question it is there to answer, the field verdict, a way to the report. */
+.sensor.drone-feed .feed-brief { flex: none; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  padding: 7px 10px 7px 12px; background: var(--bg); border-bottom: 1px solid var(--rule); border-left: 3px solid var(--rule-2); }
+.sensor.drone-feed .feed-brief.supported { border-left-color: var(--ok); } .sensor.drone-feed .feed-brief.contradicted { border-left-color: var(--bad); }
+.sensor.drone-feed .feed-brief.mixed { border-left-color: var(--warn); } .sensor.drone-feed .feed-brief.alternative-explanation { border-left-color: #8fc8ff; }
+.feed-brief-tag { font: 600 10.5px var(--mono); letter-spacing: 0.06em; padding: 2px 6px; border-radius: 4px; background: var(--surface-2); color: var(--accent); }
+.feed-brief-text { display: grid; min-width: 0; }
+.feed-brief-text b { font-size: 12.5px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed-brief-text small { font-size: 11px; color: var(--fg-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.feed-brief.supported .feed-brief-text small { color: var(--ok); } .feed-brief.contradicted .feed-brief-text small { color: var(--bad); }
+.sensor.drone-feed .feed-brief button { display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--rule-2); background: var(--surface-2); color: var(--fg); font-size: 12px; font-weight: 600; }
+.sensor.drone-feed .feed-brief button:hover { background: var(--surface-3); }
+@media (max-width: 760px) { .sensor.drone-feed .feed-brief { padding: 5px 8px; gap: 8px; } .feed-brief-text small { display: none; } }

@@ -174,7 +174,8 @@ export class DroneLayer {
     const key = `${this.store.notesVersion}:${info.area?.launch?.join(',')}:${hot.map(t => t.id + t.label).join(',')}:${this.visible}`;
     if (key === this.marksKey) return; this.marksKey = key;
     this.marks.removeAll(); this.pad = null; if (!this.visible) return;
-    const ground = { heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY, scale: 0.5 };
+    // Drawn over the terrain (no depth test), so they stop at regional distances rather than show through the planet.
+    const ground = { heightReference: C.HeightReference.CLAMP_TO_GROUND, disableDepthTestDistance: Number.POSITIVE_INFINITY, scale: 0.5, distanceDisplayCondition: new C.DistanceDisplayCondition(0, 1_200_000) };
     const launch = info.area?.launch;
     if (launch) this.pad = this.marks.add({ ...ground, position: C.Cartesian3.fromDegrees(launch[0], launch[1]), image: padImage() as unknown as string, id: { kind: 'launch' } });
     for (const t of hot) {
@@ -212,9 +213,13 @@ export class DroneLayer {
   /** Keep nearby callsigns readable while retaining every aircraft's map marker. */
   private declutterLabels(states: DroneState[]) {
     const occupied: { x: number; y: number; w: number; h: number }[] = [];
+    // From orbit the tags would only stack into one blot (and they are drawn without depth testing, so an aircraft on
+    // the far side of the planet would show through it): the fleet keeps its markers, the tags return closer in.
+    const far = this.v.camera.positionCartographic.height > 1_200_000;
     const priority = (s: DroneState) => s.id === this.selected ? 0 : s.status === 'airborne' ? 1 : 2;
     for (const s of [...states].sort((a, b) => priority(a) - priority(b) || a.id.localeCompare(b.id))) {
       const craft = this.crafts.get(s.id); if (!craft?.pos) continue;
+      if (far) { craft.pill.show = false; continue; }
       const p = C.SceneTransforms.worldToWindowCoordinates(this.v.scene, craft.pos);
       if (!p || p.x < 0 || p.y < 0 || p.x > this.v.canvas.clientWidth || p.y > this.v.canvas.clientHeight) { craft.pill.show = false; continue; }
       const w = (craft.pill.width ?? 320) * craft.pill.scale, h = (craft.pill.height ?? 56) * craft.pill.scale;
