@@ -17,6 +17,7 @@ import { crossTrack, predictPasses, swathPass, SWATH, trackSeries, useFleet, typ
 import SensorView from './SensorView';
 import DroneFeed, { type Thermal } from './DroneFeed';
 import DronesPanel from './DronesPanel';
+import FleetOps from './FleetOps';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
 
@@ -249,7 +250,7 @@ export default function App() {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
-      if (e.key === 'Escape') { setMenu(null); setDetail(false); setPicking(false); setDrawingProfile(false); setSelection(null); }
+      if (e.key === 'Escape') { setMenu(null); setDetail(false); setPicking(false); setDrawingProfile(false); setSelection(null); setDeploying(false); }
       if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === '/') { e.preventDefault(); setMenu('area'); }
       if (e.key === ' ') { e.preventDefault(); setPlaying(p => !p); }
@@ -381,6 +382,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [region, patches, places, fleetInvestigation]);
   const onFleetFocus = useCallback((lon: number, lat: number) => globe.current?.flyToPoint(lon, lat, 3500), []);
+  // Deploy the fleet anywhere: the next click on the map is the launch site, with a square area around it.
+  const [deploying, setDeploying] = useState(false);
+  const [deployKm, setDeployKm] = useState(5);
+  const onDeployPoint = useCallback((lon: number, lat: number) => {
+    setDeploying(false);
+    void droneStore.deploy(lon, lat, deployKm).then(bbox => globe.current?.flyTo(bbox)).catch(() => setError('The fleet could not be deployed there.'));
+  }, [deployKm]);
   const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
   useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
   const onSelectDrone = useCallback((id: string) => { setSelectedDrone(id); setMode('drones'); }, []);
@@ -655,6 +663,7 @@ export default function App() {
       <Globe ref={globe} region={region} observations={observations} selected={activeObservation} footprints={footprints && !job} terrain={ls.terrain.on} lighting={lighting}
         labels={ls.labels.on} photoreal={mapStyle === 'photoreal'} onPhotorealError={onPhotorealError} quality={quality} picking={picking} overlays={overlays} imageryAlpha={ls.imagery.on ? ls.imagery.value : 0} labelAlpha={ls.labels.value}
         exaggeration={ls.terrain.on ? Math.max(0.01, ls.terrain.value) : 1} mode={display} layers={liveLayers} marks={marks} flat={flat} profiling={drawingProfile} profileVertices={profileVertices}
+        deploying={deploying} onDeployPoint={onDeployPoint}
         satTime={satTime} satFocus={mode === 'satellites' ? selectedSat : null} onPathPoint={onPathPoint}
         relief={mapStyle === 'relief'} reliefOptions={reliefOptions} terrainContext={terrainContext} onHover={onHover}
         drones={ls.drones.on || mode === 'drones'} selectedDrone={selectedDrone} onSelectDrone={onSelectDrone}
@@ -672,6 +681,7 @@ export default function App() {
         change={job && delta ? { url: url(delta), bounds: delta.bounds } : undefined} thermal={thermal} expanded={Boolean(feed?.expanded)}
         onExpand={() => setFeed(f => f && { ...f, expanded: !f.expanded })} onClose={() => setFeed(null)} onSight={onDroneSight} onSample={job && result ? sampleChange : undefined} />}
       {!dockOpen && <button className="dock-toggle" aria-expanded={false} aria-controls="timeline-drawer" onClick={() => setDockOpen(true)} title="Timeline and charts (T)"><ChevronUp size={14} />Timeline</button>}
+      {deploying && <div className="map-hint">Click anywhere on Earth to launch the fleet there ({deployKm} km around it).<button onClick={() => setDeploying(false)}>Cancel</button></div>}
       {(picking || drawingProfile) && <div className="map-hint">{picking ? 'Click two opposite corners of the new area. Right-click anywhere marks a 30 km area.' : 'Click the start and end of the profile path.'}<button onClick={() => { setPicking(false); setDrawingProfile(false); }}>Cancel</button></div>}
       {(ls.change.on && delta || ls.radar.on && radarNow) && mode === 'investigation' && <div className="map-legend">
         <b>{ls.change.on && delta ? 'Backscatter change' : `Radar · ${prettyDate(String(radarNow?.date))}`}</b>
@@ -778,6 +788,7 @@ export default function App() {
         onFly={flyToSat} onSensor={openSensor} />}
       {mode === 'drones' && <DronesPanel store={droneStore} selected={selectedDrone} patches={patches} places={places} regionName={region.name} regionBox={region.bbox} onMonitorHere={monitorHere}
         onProfile={onFleetProfile} onFocus={onFleetFocus}
+        ops={<FleetOps store={droneStore} deploying={deploying} onDeploy={() => { setDeploying(d => !d); setPicking(false); setDrawingProfile(false); }} radiusKm={deployKm} onRadius={setDeployKm} />}
         onSelect={id => { setSelectedDrone(id); globe.current?.followDrone(id); }}
         onCamera={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: false }); }}
         onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }} />}

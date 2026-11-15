@@ -32,6 +32,7 @@ type Props = {
   labels: boolean; photoreal: boolean; quality: string; picking: boolean; overlays: Overlay[]; imageryAlpha: number; labelAlpha: number; exaggeration: number;
   mode: DisplayMode; layers: Record<LayerKey, boolean>; satTime?: number | null; satFocus?: number | null;
   marks?: Mark[]; flat:boolean; profiling:boolean; profileVertices:[number,number][]; onPathPoint:(lon:number,lat:number)=>void;
+  deploying?: boolean; onDeployPoint?: (lon: number, lat: number) => void;  // deploy the fleet: the next click on the ground
   /** The stylised relief map (3D only) and the land cover and named features that dress it. */
   relief: boolean; reliefOptions: ReliefOptions; terrainContext: { grid: Grid | null; features: TerrainFeature[] } | null;
   onHover?: (h: Hover | null) => void;
@@ -228,6 +229,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       };
       handler.setInputAction((ev: { position: C.Cartesian2 }) => {
         const vv = viewer.current; if (!vv) return;
+        if (latest.current.deploying) { const p = pickGround(ev.position); if (p) latest.current.onDeployPoint?.(C.Math.toDegrees(p.longitude), C.Math.toDegrees(p.latitude)); return; }
         if(latest.current.profiling){const p=pickGround(ev.position);if(p)latest.current.onPathPoint(C.Math.toDegrees(p.longitude),C.Math.toDegrees(p.latitude));return;}
         if (latest.current.picking) {
           const cart = pickGround(ev.position); if (!cart) return;
@@ -269,7 +271,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       handler.setInputAction((ev: { endPosition: C.Cartesian2 }) => {
         const vv = viewer.current; const now = performance.now(); if (!vv || now - hoverAt < 80) return; hoverAt = now;
         const picked = vv.scene.pick(ev.endPosition);
-        vv.canvas.style.cursor = latest.current.profiling || latest.current.picking || latest.current.overlays.some(o => o.show) ? 'crosshair' : picked && (picked as { id?: { kind?: string } }).id?.kind ? 'pointer' : '';
+        vv.canvas.style.cursor = latest.current.deploying || latest.current.profiling || latest.current.picking || latest.current.overlays.some(o => o.show) ? 'crosshair' : picked && (picked as { id?: { kind?: string } }).id?.kind ? 'pointer' : '';
         const onHover = latest.current.onHover; if (!onHover) return;
         // Height, slope and land cover come from Terra's own terrain; nothing is measured from Google's 3D tiles.
         const cart = scene.mode === C.SceneMode.SCENE3D && globe.show && camera.positionCartographic.height < 400_000 ? pickGround(ev.endPosition) : undefined;

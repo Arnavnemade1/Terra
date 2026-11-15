@@ -100,9 +100,10 @@ function AddDrone({ store, count }: { store: DroneStore; count: number }) {
 }
 
 /** The fleet, the selected aircraft, its task and airspace, people's tasks, and the agents' shared log. */
-export default function DronesPanel({ store, selected, onSelect, onCamera, onFull, patches, places, regionName, regionBox, onMonitorHere, onProfile, onFocus }: {
+export default function DronesPanel({ store, selected, onSelect, onCamera, onFull, patches, places, regionName, regionBox, onMonitorHere, onProfile, onFocus, ops }: {
   store: DroneStore; selected: string | null; onSelect: (id: string) => void; onCamera: (id: string) => void; onFull: (id: string) => void; patches: Patch[]; places: Place[];
   regionName: string; regionBox: Bounds; onMonitorHere: () => void; onProfile: (p: Profile) => void; onFocus: (lon: number, lat: number) => void;
+  ops?: React.ReactNode;  // orchestration: deployment, fleet commands and the durable agents (FleetOps)
 }) {
   const [, tick] = useReducer((x: number) => x + 1, 0);
   const [sent, setSent] = useState('');
@@ -197,6 +198,7 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
         : <p className="card-note">On station and every two minutes after, each aircraft's agent notes the ground its camera is on: Landsat surface temperature, radar change, land cover, height and the weather.</p>}
       {notes.length > 4 && <button className="mini-btn" onClick={() => setAllNotes(a => !a)}>{allNotes ? 'Fewer' : `All ${Math.min(40, notes.length)} notes`}</button>}
     </section>
+    {ops}
     <section className="fleet-log">
       <header><b>Coordination log</b><small>agents, aircraft and people, newest first</small></header>
       {info.messages.length ? <ol>{info.messages.slice(0, 30).map(m => { const w = sender(m); return <li key={m.id}>
