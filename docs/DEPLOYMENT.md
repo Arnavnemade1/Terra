@@ -28,6 +28,8 @@ The current public API is `https://terra-production-b426438a.up.railway.app`. Bo
 
 The deployment readiness path is `/api/ready`. It returns 200 only when Temporal responds and the worker has a recent heartbeat from the same container boot. Startup retries the worker while Temporal initializes; SIGTERM stops both child processes. Worker concurrency is bounded to three activities and four workflow tasks in the image, with single-threaded native-library defaults.
 
+Original HDF5 reads temporarily suspend cyclic garbage collection inside a serialized reader region to avoid h5py's documented service-thread deadlock. HTTP chunk prefetch remains parallel; garbage collection is restored after each reader closes, including failures. A subprocess regression test reproduces the deadlock without the guard.
+
 Add provider credentials through Railway's secret-variable interface or `railway variable set KEY --stdin --skip-deploys`, never as build arguments or command-line values. Set `TERRA_ALLOWED_ORIGINS` to both production Vercel origins. After the public Railway domain is ready, set Vercel's `TERRA_API_ORIGIN` to that HTTPS origin and redeploy both sites. `/api/health` should then report `temporal.connected: true` through the Vercel domain.
 
 Verify `/api/health` through Vercel: `temporal.connected` must be true for durable investigations. Verify `/api/connector/google3d/status` for Google imagery. The frontend loading successfully does not establish that these backend services are available.

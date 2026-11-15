@@ -7,6 +7,8 @@ values unchanged — only cropped. A provenance sidecar records exactly what was
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import gc
 import hashlib
 import json
 import math
@@ -40,6 +42,24 @@ class AcquisitionError(RuntimeError):
 MAX_LOOKS = 4
 HEAD_BYTES = 6 << 20
 TAIL_BYTES = 16 << 20
+_hdf5_read_lock = threading.Lock()
+
+
+@contextmanager
+def _hdf5_reader():
+    # h5py holds its global HDF5 lock while RangeFile calls its HTTP threads.
+    # Automatic cyclic GC on a service thread can then wait for that same lock.
+    # https://docs.h5py.org/en/stable/high/file.html#python-file-like-objects
+    # Serialize these regions so overlapping acquisitions cannot restore GC
+    # while another HDF5 file is still open. HTTP chunk prefetch stays parallel.
+    with _hdf5_read_lock:
+        collecting = gc.isenabled()
+        gc.disable()
+        try:
+            yield
+        finally:
+            if collecting:
+                gc.enable()
 
 
 def _prefetch_window(handle: RangeFile, datasets: list, r0: int, r1: int, c0: int, c1: int) -> None:
@@ -210,7 +230,7 @@ def _acquire_subset(observation: dict, bbox: list[float], frequency: str = "A") 
     root.mkdir(parents=True, exist_ok=True)
     target = root / f"{subset_key(granule, bbox)}.h5"
     temporary = target.with_suffix(".partial")
-    with h5py.File(handle, "r") as src:
+    with _hdf5_reader(), h5py.File(handle, "r") as src:
         group = f"{BASE}/GCOV/grids/frequency{frequency}"
         if group not in src or f"{BASE}/identification" not in src:
             raise AcquisitionError(f"Frequency {frequency} GCOV grid is missing from this granule.")
