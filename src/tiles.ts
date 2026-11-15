@@ -25,7 +25,8 @@ export const tilesReady: Promise<boolean> = (LOCAL
 
 /** Keep requests in Cesium's own priority queue (nearest tiles first, cancellable) instead of the browser's FIFO. */
 export function configureRequests() {
-  C.RequestScheduler.maximumRequestsPerServer = 6;
+  // Hosted Vercel delivery uses HTTP/2; six slots needlessly serialised imagery and terrain.
+  C.RequestScheduler.maximumRequestsPerServer = LOCAL ? 6 : 12;
   C.RequestScheduler.maximumRequests = 48;
 }
 

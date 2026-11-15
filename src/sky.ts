@@ -5,7 +5,7 @@ import * as C from 'cesium';
  * Cesium's default Tycho sky, whose upsampled texture reads as blocky blobs. The
  * star field is decoration behind the planet, not an astronomical catalogue.
  */
-export function createStarSky(size = 2048): C.SkyBox {
+export function createStarSky(size = 1024): C.SkyBox {
   const faces = ['positiveX', 'negativeX', 'positiveY', 'negativeY', 'positiveZ', 'negativeZ'] as const;
   let seed = 1337;
   const rand = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
@@ -20,7 +20,7 @@ export function createStarSky(size = 2048): C.SkyBox {
       band.addColorStop(0, 'rgba(0,0,0,0)'); band.addColorStop(0.5, 'rgba(70,90,120,0.07)'); band.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = band; g.fillRect(0, 0, size, size);
     }
-    const count = 2600;
+    const count = 1600;
     for (let i = 0; i < count; i++) {
       const x = rand() * size, y = rand() * size;
       // Magnitude-like distribution: many faint, few bright.

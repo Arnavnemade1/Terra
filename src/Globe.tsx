@@ -9,8 +9,9 @@ import { createStarSky } from './sky';
 import { Relief, type Grid, type ReliefOptions, type TerrainFeature, type TerrainReading } from './relief';
 import { DroneLayer } from './droneLayer';
 import { droneStore } from './drones';
-import { imagery as tileSource, terrainUrl, googleTilesUrl } from './tiles';
+import { imagery as tileSource, terrainUrl, googleTilesUrl, tilesReady } from './tiles';
 import { installSmoothCamera } from './smoothCamera';
+import { SceneBudget, type SceneMetrics } from './sceneBudget';
 
 export type GlobeHandle = {
   home: () => void; flyTo: (b: Bounds) => void; flyToPoint: (lon: number, lat: number, heightM?: number) => void;
@@ -76,7 +77,11 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   const credits = useRef<HTMLDivElement>(null);
   const viewer = useRef<C.Viewer | null>(null);
   const latest = useRef(props); latest.current = props;
-  const baseError = useRef(2);
+  const baseError = useRef(5);
+  const budget = useRef<SceneBudget | null>(null);
+  const [renderMetrics, setRenderMetrics] = useState<SceneMetrics | null>(null);
+  const [tileHostsReady, setTileHostsReady] = useState(false);
+  useEffect(() => { let alive = true; void tilesReady.then(() => { if (alive) setTileHostsReady(true); }); return () => { alive = false; }; }, []);
   const [error, setError] = useState('');
   const [ready, setReady] = useState(false);
   const [notice, setNotice] = useState('');
@@ -193,6 +198,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
   }, []);
 
   useEffect(() => {
+    if (!tileHostsReady) return;
     let disposed = false; let v: C.Viewer | undefined; let handler: C.ScreenSpaceEventHandler | undefined;
     let telemetryTimer: ReturnType<typeof setInterval> | undefined; let clockTimer: ReturnType<typeof setInterval> | undefined;
     let terrainReady = false; let imagery = 'CONNECTING'; let frames = 0; let last = performance.now(); let smoothOff: (() => void) | null = null;
@@ -202,7 +208,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         baseLayer: false, animation: false, timeline: false, baseLayerPicker: false, geocoder: false, homeButton: false, sceneModePicker: false,
         navigationHelpButton: false, fullscreenButton: false, selectionIndicator: false, infoBox: false, creditContainer: credits.current!,
         requestRenderMode: true, maximumRenderTimeChange: Infinity, skyBox: createStarSky(),
-        contextOptions: { webgl: { preserveDrawingBuffer: true, alpha: false, powerPreference: 'high-performance' } }, msaaSamples: 4,
+        contextOptions: { webgl: { preserveDrawingBuffer: false, alpha: false, powerPreference: 'high-performance' } }, msaaSamples: 2,
       });
       const viewerRef = v; viewer.current = v;
       if (import.meta.env.DEV) Object.assign(window, { __terraViewer: v, __terraCesium: C });
@@ -216,7 +222,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       globe.baseColor = css('#06121c');
       globe.showGroundAtmosphere = true;
       // Cesium's own default error budget, and no sibling preloading: about half the tiles for the same view.
-      globe.maximumScreenSpaceError = 2;
+      globe.maximumScreenSpaceError = 5;
       globe.tileCacheSize = 200;
       globe.loadingDescendantLimit = 8;
       globe.preloadAncestors = true; globe.preloadSiblings = false;
@@ -224,11 +230,12 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       globe.nightFadeOutDistance = 6_500_000; globe.nightFadeInDistance = 14_000_000;
       if (scene.skyAtmosphere) { scene.skyAtmosphere.show = true; scene.skyAtmosphere.atmosphereLightIntensity = 18; scene.skyAtmosphere.saturationShift = -0.12; scene.skyAtmosphere.brightnessShift = -0.06; }
       scene.fog.enabled = true; scene.fog.density = 1.4e-4; scene.fog.minimumBrightness = 0.06;
-      v.resolutionScale = Math.min(window.devicePixelRatio, 1.5);
+      budget.current = new SceneBudget(v, m => { if (!disposed) { setRenderMetrics(m); const label = labelLayer.current; if (label && m.phase !== 'loading' && label.show !== latest.current.labels) { label.show = latest.current.labels; scene.requestRender(); } } });
+      budget.current.configure(latest.current.quality);
       const controller = scene.screenSpaceCameraController;
       controller.minimumZoomDistance = 40; controller.maximumZoomDistance = 45_000_000; controller.enableCollisionDetection = true;
       // Eased wheel zoom toward the cursor, softer inertia, coarser tiles while moving (smoothCamera.ts).
-      smoothOff = installSmoothCamera(v, { baseError: () => baseError.current });
+      smoothOff = installSmoothCamera(v, { baseError: () => budget.current?.error() ?? baseError.current });
       // Trackpad pinch arrives as ctrl+wheel; let it zoom like the wheel.
       controller.zoomEventTypes = [C.CameraEventType.WHEEL, C.CameraEventType.PINCH, { eventType: C.CameraEventType.WHEEL, modifier: C.KeyboardEventModifier.CTRL }];
 
@@ -372,16 +379,16 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
       const providers = async () => {
         // Every provider request uses the same-origin server connector (spread over loopback names; see tiles.ts).
         // No credentials enter this bundle.
-        const fallback = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({
+        const fallback = new C.ImageryLayer(new C.UrlTemplateImageryProvider({
           ...tileSource('gibs/BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg'),
           maximumLevel: 8, credit: new C.Credit('NASA GIBS · Blue Marble'),
         }));
-        fallback.show = true;
+        fallback.show = false; viewerRef.imageryLayers.add(fallback);
         const provider = new C.UrlTemplateImageryProvider({...tileSource('maps/imagery/{z}/{y}/{x}'),
           tilingScheme: new C.WebMercatorTilingScheme(), maximumLevel: 19, credit: new C.Credit('Esri World Imagery · Esri and partners')});
         const base = viewerRef.imageryLayers.addImageryProvider(provider);
         base.nightAlpha = .18; imagery = 'Esri World Imagery'; baseLayer.current = base; base.alpha = latest.current.imageryAlpha;
-        relief.current = new Relief(viewerRef, base, [fallback]);
+        relief.current = new Relief(viewerRef, base, []);
         drones.current = new DroneLayer(viewerRef, droneStore);
         // True ground height for aircraft flying at a height above ground: sampled asynchronously and cached (from the
         // photoreal tiles while they are drawn, otherwise the terrain), never ray-cast per aircraft per frame.
@@ -396,35 +403,35 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
         tint.alpha = 0.55; flatLayers.current = [shaded, tint];
         for (const l of flatLayers.current) l.show = latest.current.flat;
         let errors = 0;
-        provider.errorEvent.addEventListener(() => { if (++errors > 5 && !disposed) {base.show=false;imagery='NASA Blue Marble';setNotice('High-resolution map imagery is unavailable. Showing NASA Blue Marble.');scene.requestRender();} });
+        provider.errorEvent.addEventListener(() => { if (++errors > 5 && !disposed) {base.show=false;fallback.show=true;imagery='NASA Blue Marble';setNotice('High-resolution map imagery is unavailable. Showing NASA Blue Marble.');scene.requestRender();} });
         const night = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({ ...tileSource('gibs/VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png'), maximumLevel: 8, credit: new C.Credit('NASA GIBS · VIIRS Black Marble') }));
         night.dayAlpha = 0; night.nightAlpha = 1; night.brightness = 2.2; night.show = false; nightLayer.current = night;
         labelLayer.current = viewerRef.imageryLayers.addImageryProvider(new C.UrlTemplateImageryProvider({...tileSource('maps/labels/{z}/{y}/{x}'), tilingScheme:new C.WebMercatorTilingScheme(),maximumLevel:19,credit:new C.Credit('Esri places and borders')}));
-        labelLayer.current.show = latest.current.labels;
+        labelLayer.current.show = false;
         if (disposed) return;
-        setReady(true); latest.current.onReady(); scene.requestRender();
+        budget.current?.baseReady(); setReady(true); latest.current.onReady(); scene.requestRender();
         // Open on the selected landscape, keeping map and investigation in the same place.
         if(!new URLSearchParams(location.search).has('investigation'))flyTo(latest.current.region.bbox);
         try {
           const t = await terrainLoad;
-          if (disposed) return; terrainProvider.current=t;terrainReady=true;if(latest.current.terrain)viewerRef.terrainProvider=t;scene.requestRender();
-        } catch { if(!disposed)setNotice('Terrain is unavailable; imagery is shown on the WGS84 ellipsoid.'); }
+          if (disposed) return; terrainProvider.current=t;terrainReady=true;budget.current?.terrainReady();if(latest.current.terrain)viewerRef.terrainProvider=t;scene.requestRender();
+        } catch { if(!disposed){budget.current?.terrainReady(false);setNotice('Terrain is unavailable; imagery is shown on the WGS84 ellipsoid.');} }
       };
       void providers();
     } catch (err) { setError(err instanceof Error ? err.message : 'WebGL could not initialize.'); }
     return () => {
-      disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy(); smoothOff?.();
+      disposed = true; clearInterval(telemetryTimer); clearInterval(clockTimer); handler?.destroy(); smoothOff?.(); budget.current?.destroy(); budget.current = null;
       live.current?.destroy(); modes.current?.destroy(); relief.current?.destroy(); drones.current?.destroy(); live.current = null; modes.current = null; relief.current = null; drones.current = null;
       droneStore.groundAt = null; groundHeights.current?.dispose(); groundHeights.current = null;
       if (v && !v.isDestroyed()) v.destroy(); viewer.current = null; labelLayer.current = null; nightLayer.current = null; tiles.current = null; tileOverlays.current.clear(); tilesLoading.current = false; tilesHaveView.current=false;
     };
-  }, []);
+  }, [tileHostsReady]);
 
   useEffect(() => {
     const v = viewer.current; if (!v || !ready) return;
     for (const l of flatLayers.current) l.show = props.flat;
     if (baseLayer.current) baseLayer.current.show = !props.flat && !props.relief;
-    if (labelLayer.current) labelLayer.current.show = props.labels;
+    if (labelLayer.current) labelLayer.current.show = props.labels && Boolean(budget.current?.isReady);
     if (props.flat && v.scene.mode !== C.SceneMode.SCENE2D) {
       // Frame the area once the morph has finished: a top-down map of the area of interest.
       const done = v.scene.morphComplete.addEventListener(() => {
@@ -482,26 +489,28 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     const v = viewer.current; if (!v || !ready) return;
     retune.current();
     v.terrainProvider = props.terrain && terrainProvider.current ? terrainProvider.current : new C.EllipsoidTerrainProvider();
-    v.resolutionScale = props.quality === 'high' ? Math.min(window.devicePixelRatio, 2) : props.quality === 'low' ? 0.8 : Math.min(window.devicePixelRatio, 1.5);
-    baseError.current = props.quality === 'high' ? 1.3 : props.quality === 'low' ? 4 : 2;
+    budget.current?.configure(props.quality);
+    baseError.current = budget.current?.error() ?? 5;
     v.scene.globe.maximumScreenSpaceError = baseError.current;
     v.scene.requestRender();
   }, [ready, props.terrain, props.lighting, props.quality, props.photoreal]);
-  useEffect(() => { const v = viewer.current; if (v && labelLayer.current) { labelLayer.current.show = props.labels; v.scene.requestRender(); } }, [ready, props.labels]);
+  useEffect(() => { const v = viewer.current; if (v && labelLayer.current) { labelLayer.current.show = props.labels && Boolean(budget.current?.isReady); v.scene.requestRender(); } }, [ready, props.labels]);
 
   // Google Photorealistic 3D Tiles, loaded the first time the style is chosen (each load starts a billed tileset session).
   useEffect(() => {
     const v = viewer.current; if (!v || !ready || !props.photoreal || tiles.current || tilesLoading.current) return;
     tilesLoading.current = true;setGoogleLoading(true);tilesHaveView.current=false;let failures=0;
+    performance.clearMarks('terra:photoreal-start'); performance.clearMarks('terra:photoreal-ready'); performance.mark('terra:photoreal-start');
     // Resource accepts `credits` at runtime (Cesium's own Google loader uses it); the published typings omit it.
     const resource = new C.Resource({ url: googleTilesUrl(), credits: [googleCredit()] } as unknown as C.Resource.ConstructorOptions);
-    C.Cesium3DTileset.fromUrl(resource, { showCreditsOnScreen: true, enableCollision: true, maximumScreenSpaceError: tileError(latest.current.quality),
-      cacheBytes: 128 * 1024 * 1024, maximumCacheOverflowBytes: 32 * 1024 * 1024, preloadWhenHidden: false, foveatedScreenSpaceError: true })
+    C.Cesium3DTileset.fromUrl(resource, { showCreditsOnScreen: true, enableCollision: true, maximumScreenSpaceError: tileError(latest.current.quality) * 2,
+      cacheBytes: 128 * 1024 * 1024, maximumCacheOverflowBytes: 32 * 1024 * 1024, preloadWhenHidden: false, foveatedScreenSpaceError: true, foveatedTimeDelay: .15, dynamicScreenSpaceError: true,
+      cullRequestsWhileMoving: true, progressiveResolutionHeightFraction: .3 })
       .then(t => {
         tilesLoading.current = false;
         if (v.isDestroyed() || viewer.current !== v) { t.destroy(); return; }
         t.show = false; v.scene.primitives.add(t); tiles.current = t; tileOverlays.current.clear(); drapeOnTiles();
-        t.initialTilesLoaded.addEventListener(()=>{if(v.isDestroyed()||viewer.current!==v)return;tilesHaveView.current=true;setGoogleLoading(false);retune.current();v.scene.requestRender();});
+        t.initialTilesLoaded.addEventListener(()=>{if(v.isDestroyed()||viewer.current!==v)return;tilesHaveView.current=true;setGoogleLoading(false);t.maximumScreenSpaceError=tileError(latest.current.quality);performance.mark('terra:photoreal-ready');performance.measure('terra:photoreal-load','terra:photoreal-start','terra:photoreal-ready');retune.current();v.scene.requestRender();});
         t.tileLoad.addEventListener(()=>{failures=0;v.scene.requestRender();});
         t.tileFailed.addEventListener(() => {
           if (++failures === 12) { setGoogleLoading(false); const m = 'Google 3D tiles stopped loading. Showing terrain and imagery instead.'; setNotice(m); latest.current.onPhotorealError?.(m); }
@@ -591,6 +600,7 @@ const Globe = forwardRef<GlobeHandle, Props>(function Globe(props, ref) {
     {error && <div className="globe-error"><strong>The 3D view stopped</strong><p>{error}</p><p>Turn on hardware acceleration in your browser, then reload.</p></div>}
     {googleLoading && props.photoreal && <div className="google-loading" role="status">Loading Google 3D · terrain preview</div>}
     {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Dismiss notice">×</button></div>}
+    {renderMetrics && <div className="render-status" title="Live scene performance. Detail adapts to protect frame rate."><i className={renderMetrics.phase}/><span>{renderMetrics.phase === 'loading' ? 'Loading terrain' : renderMetrics.phase === 'refining' ? 'Refining detail' : 'Scene ready'}</span>{renderMetrics.readyMs !== null && <b>{(renderMetrics.readyMs / 1000).toFixed(1)}s</b>}{renderMetrics.fps > 0 && <small>{renderMetrics.fps} fps{renderMetrics.adaptive ? ' · adaptive' : ''}</small>}</div>}
     <div className="map-credits" ref={credits} />
   </>;
 });

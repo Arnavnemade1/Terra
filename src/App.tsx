@@ -20,6 +20,7 @@ import DronesPanel from './DronesPanel';
 import FleetOps, { DeployCard } from './FleetOps';
 import Verification, { type SignedSpot } from './Verification';
 import Watch from './Watch';
+import AgentOperations from './AgentOperations';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
 
@@ -640,6 +641,7 @@ export default function App() {
             }} aria-current={mode === id ? 'page' : undefined}>
             {id === 'investigation' ? <BarChart3 size={14} /> : id === 'drones' ? <Plane size={14} /> : id === 'hazards' ? <Info size={14} /> : <Navigation size={14} />}{label}{badge && <span className="badge">{badge}</span>}</button>)}
       </nav>
+      <AgentOperations />
       <div className="menus">
         <MenuButton id="view" label="View" icon={<Eye size={14} />} menu={menu} setMenu={setMenu}>
           {viewItems}
