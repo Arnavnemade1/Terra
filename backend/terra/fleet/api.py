@@ -594,6 +594,16 @@ async def field_evidence(investigation_id: str):
         raise HTTPException(404, "Unknown investigation.")
     item = await _db(_investigation, investigation_id)
     notes = await _db(fleet_db().notes, 500)
+    # Notes taken before optical sampling existed: read the Sentinel-2 before/after at their ground points now.
+    if any("optical" not in (n.get("data") or {}) for n in notes) and item.get("bbox"):
+        from .observe import area_data, observe
+
+        def enrich() -> list[dict]:
+            data = area_data(item["bbox"], investigation_id)
+            if "optical" not in data:
+                return notes
+            return [n if "optical" in (n.get("data") or {}) else {**n, "data": {**(n.get("data") or {}), **{k: v for k, v in observe({"optical": data["optical"]}, n["lon"], n["lat"]).items() if k == "optical"}}} for n in notes]
+        notes = await asyncio.to_thread(enrich)
     rows = evidence(item.get("result") or {}, notes)
     totals = {k: sum(r["counts"][k] for r in rows) for k in ("supports", "contradicts", "inconclusive")}
     return {"investigation_id": investigation_id, "patches": rows, "totals": totals,

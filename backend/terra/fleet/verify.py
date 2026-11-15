@@ -59,13 +59,20 @@ def evidence(result: dict, notes: list[dict], context: dict | None = None) -> li
         for x in sorted(inside, key=lambda q: -q["t"]):
             data = x.get("data") or {}
             j = judge(b["hypothesis"] or "unclear", data, {**(context or {}), **({"surface_median_c": data["surface_median_c"]} if data.get("surface_median_c") is not None else {})})
-            judged.append({"note_id": x["id"], "t": x["t"], "drone_id": x["drone_id"], "lon": x["lon"], "lat": x["lat"], "verdict": j["verdict"],
+            judged.append({"note_id": x["id"], "t": x["t"], "drone_id": x["drone_id"], "lon": x["lon"], "lat": x["lat"], "verdict": j["verdict"], "alternative": j.get("alternative"),
                            "reasons": j["reasons"], "surface_c": (x.get("data") or {}).get("surface_c"), "cover": (x.get("data") or {}).get("cover")})
         counts = {v: sum(1 for j in judged if j["verdict"] == v) for v in ("supports", "contradicts", "inconclusive")}
         decided = counts["supports"] + counts["contradicts"]
-        sup, con = counts["supports"], counts["contradicts"]
-        overall = ("not yet observed" if not judged else "inconclusive" if not decided else
-                   "supported" if con == 0 or sup >= 2 * con else "contradicted" if sup == 0 or con >= 2 * sup else "mixed")
+        sup, con, total = counts["supports"], counts["contradicts"], len(judged)
+        alt = sum(1 for j in judged if j.get("alternative"))
+        # A verdict needs a real share of the observations, not one lucky look; an alternative explanation that keeps
+        # recurring is reported as such.
+        overall = ("not yet observed" if not judged else
+                   "alternative explanation" if alt >= max(2, 0.3 * total) and sup < 0.5 * total else
+                   "supported" if sup >= max(1, 0.3 * total) and sup >= 2 * con else
+                   "contradicted" if con >= max(1, 0.3 * total) and con >= 2 * sup else
+                   "mixed" if sup and con else "inconclusive")
         rows.append({"target_id": t["id"], "label": t["label"], "lon": t["lon"], "lat": t["lat"], "brief": b, "observations": len(judged),
-                     "aircraft": sorted({j["drone_id"] for j in judged}), "counts": counts, "overall": overall, "latest": judged[:5]})
+                     "aircraft": sorted({j["drone_id"] for j in judged}), "counts": counts, "overall": overall, "latest": judged[:5],
+                     "alternatives": sorted({j["alternative"] for j in judged if j.get("alternative")})})
     return rows

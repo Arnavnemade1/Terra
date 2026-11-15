@@ -76,6 +76,18 @@ def area_data(bbox: list[float], investigation_id: str | None) -> dict:
         path = get_settings().artifacts / investigation_id / "change.tif"
         if path.exists():
             data["change_path"] = str(path)
+        try:  # Sentinel-2 before/after images the investigation attached: an independent check of what changed
+            from ..store import Store
+            item = Store(get_settings().database).investigation(investigation_id) or {}
+            optical = {}
+            for o in (item.get("result") or {}).get("optical_evidence") or []:
+                f = get_settings().artifacts / investigation_id / o.get("artifact_name", "")
+                if o.get("kind") in ("before", "after") and f.is_file():
+                    optical[o["kind"]] = {"rgb": _grid(base64.b64encode(f.read_bytes()).decode(), "RGB").astype(np.float32), "bounds": o["bounds"], "date": o["date"][:10]}
+            if len(optical) == 2:
+                data["optical"] = optical
+        except Exception:
+            pass
     with _lock:
         _cache[key] = (time.time(), data)
     return data
@@ -125,6 +137,20 @@ def observe(data: dict, lon: float, lat: float, elevation: float | None = None) 
         db = _change_db(data["change_path"], lon, lat)
         if db is not None:
             out["change_db"] = db
+    opt = data.get("optical")
+    if opt:
+        def sample(img: dict):
+            w, s, e, n = img["bounds"]; h, wd = img["rgb"].shape[:2]
+            if not (w <= lon <= e and s <= lat <= n):
+                return None
+            r, c = int((n - lat) / (n - s) * h), int((lon - w) / (e - w) * wd)
+            patch = img["rgb"][max(0, r - 1):r + 2, max(0, c - 1):c + 2].reshape(-1, 3).mean(axis=0) / 255
+            return float(patch.mean()), float((patch[1] - patch[0]) / (patch[1] + patch[0] + 0.02)), float(patch.max() - patch.min())
+        b, a = sample(opt["before"]), sample(opt["after"])
+        if b and a:
+            out["optical"] = {"before_date": opt["before"]["date"], "after_date": opt["after"]["date"], "brightness_before": round(b[0], 3), "brightness_after": round(a[0], 3),
+                              "greenness_before": round(b[1], 3), "greenness_after": round(a[1], 3), "d_brightness": round(a[0] - b[0], 3), "d_greenness": round(a[1] - b[1], 3),
+                              "colour_before": round(b[2], 3), "colour_after": round(a[2], 3)}
     if elevation is not None:
         out["elevation_m"] = round(elevation)
     w = data.get("weather")
