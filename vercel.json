@@ -263,24 +263,6 @@
       ]
     },
     {
-      "source": "/api/connector/terrain/tilemap/:z(\\d{1,2})/:y(\\d{1,7})/:x(\\d{1,7})/:h(\\d{1,3})/:w(\\d{1,3})",
-      "destination": "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer/tilemap/:z/:y/:x/:h/:w",
-      "missing": [
-        {
-          "type": "query",
-          "key": "f"
-        },
-        {
-          "type": "query",
-          "key": "callback"
-        },
-        {
-          "type": "query",
-          "key": "format"
-        }
-      ]
-    },
-    {
       "source": "/api/:__terra_route*/",
       "destination": "/api/proxy"
     },

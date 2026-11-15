@@ -31,8 +31,14 @@ def test_edge_routes_only_reach_the_gateways_public_hosts():
 
 
 def test_metadata_and_format_or_jsonp_queries_stay_on_the_validated_backend():
-    """ArcGIS answers ?f=html with HTML and ?callback= with JSONP; neither may be served from Terra's origin."""
-    assert not any(r["source"] == "/api/connector/terrain" for r in EDGE)
+    """ArcGIS answers ?f=html with HTML and ?callback= with JSONP; neither may be served from Terra's origin.
+
+    Only pure tile endpoints reach the edge: checked 2026-11-15, Esri MapServer tiles, Terrain3D tiles and GIBS tiles
+    ignore f/callback in any letter case and always return image or binary data. Terrain metadata and the tilemap
+    (which honours Callback= case-insensitively) stay on the backend's allowlist. The missing-query guard below is
+    defence in depth, not the boundary.
+    """
+    assert not any(r["source"] == "/api/connector/terrain" or "/tilemap/" in r["source"] for r in EDGE)
     for r in EDGE:
         assert {m["key"] for m in r.get("missing", []) if m["type"] == "query"} >= {"f", "callback", "format"}
 
