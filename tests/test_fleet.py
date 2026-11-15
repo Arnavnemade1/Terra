@@ -433,3 +433,57 @@ def test_the_fleet_deploys_anywhere_with_its_own_launch_site(client, tmp_path):
     assert client.post("/api/fleet/area", json={"name": "Too far", "bbox": box, "launch": [-120.0, 46.2]}).status_code == 422
     centre = client.post("/api/fleet/area", json={"name": "Centre", "bbox": box}).json()["area"]["launch"]
     assert centre == [pytest.approx(-122.2), pytest.approx(46.175)]
+
+
+# ---------------------------------------------------------------- radar to drones and back
+def _investigation_with_patches():
+    from terra.signatures import signature
+    from terra.store import utc_now
+    spots = [{"rank": 1, "direction": "decrease", "pixels": 400, "area_km2": 0.9, "mean_change_db": -4.4, "centre": [37.75, 15.06],
+              "bounds": [15.05, 37.745, 15.07, 37.755], "by_polarization": {"HH": {"mean_change_db": -0.6, "standardized_change": -0.8}, "HV": {"mean_change_db": -4.2, "standardized_change": -5.1}}},
+             {"rank": 2, "direction": "decrease", "pixels": 120, "area_km2": 0.3, "mean_change_db": -6.0, "centre": [37.70, 15.10],
+              "bounds": [15.095, 37.697, 15.105, 37.703], "by_polarization": {"HH": {"mean_change_db": -6.0, "standardized_change": -7.0}, "HV": {"mean_change_db": -5.5, "standardized_change": -6.0}}}]
+    for s in spots:
+        s["signature"] = signature(s["by_polarization"], s["direction"])
+    now = utc_now()
+    api.get_store().save_investigation({"id": "inv-etna", "title": "Mount Etna · Backscatter change", "bbox": [14.9, 37.6, 15.2, 37.85], "created_at": now, "updated_at": now,
+                                        "result": {"measurements": {"change": {"hotspots": spots}}}})
+
+
+def test_dispatch_sends_the_fleet_to_verify_each_patch(client, tmp_path):
+    _investigation_with_patches()
+    _register(client, "d0", sensors=("eo", "ir")); _fly(client, "d0", 1)
+    reply = client.post("/api/fleet/dispatch", json={"investigation_id": "inv-etna"})
+    assert reply.status_code == 200
+    targets = {t["id"]: t for t in FleetDB(tmp_path / "terra.db").targets()}
+    assert set(targets) == {"patch-1", "patch-2"}
+    assert targets["patch-1"]["brief"]["hypothesis"] == "vegetation_loss" and "vegetation" in targets["patch-1"]["label"]
+    assert targets["patch-2"]["brief"]["hypothesis"] == "water" and targets["patch-2"]["needs"] == ["ir"]  # the fleet has IR, and it helps here
+    assert targets["patch-1"]["priority"] > targets["patch-2"]["priority"]  # strong evidence and the larger patch first
+    area = reply.json()["area"]
+    assert area["investigation_id"] == "inv-etna" and area["bbox"][0] < 15.05 and area["bbox"][2] > 15.105
+    assert client.post("/api/fleet/dispatch", json={"investigation_id": "nope"}).status_code == 404
+
+
+def test_agents_judge_what_they_see_against_the_patch(client, monkeypatch, tmp_path):
+    import numpy as np
+    _investigation_with_patches()
+    client.post("/api/fleet/dispatch", json={"investigation_id": "inv-etna"})
+    _register(client, "d0"); _fly(client, "d0", 1, lon=15.06, lat=37.75, agl=120, gimbal={"heading_deg": 0, "pitch_deg": -89})
+    codes = np.full((10, 10), 10, dtype=np.uint8)  # ESA WorldCover 10 = tree cover (before the change)
+    data = {"thermal": {"c": np.full((20, 20), 31.0), "bounds": [14.9, 37.6, 15.2, 37.85], "date": "2026-10-30", "platform": "Landsat 9", "p95": 40.0, "median": 25.0},
+            "cover": {"codes": codes, "bounds": [14.9, 37.6, 15.2, 37.85], "names": {10: "Tree cover"}}}
+    monkeypatch.setattr("terra.fleet.observe.area_data", lambda bbox, investigation: data)
+    monkeypatch.setattr(activities, "_elevation", lambda lon, lat: 1500.0)
+    db = FleetDB(tmp_path / "terra.db")
+    task = db.create_task("d0", "orbit", "Orbit Patch 1", {"lon": 15.06, "lat": 37.75, "radius_m": 200, "agl_m": 120}, "coordinator", "test", 0.9, "orbit:patch-1", None)
+    client.post(f"/api/fleet/tasks/{task['id']}/ack", json={"id": "d0", "status": "active"}, headers=AUTH)
+    activities.run_drone_agent_round({"drone_id": "d0", "round": 0})
+    [note] = db.notes()
+    assert note["data"]["verdict"] == "supports" and note["kind"] == "verify" and "Check of patch 1" in note["text"]
+    assert any(m["kind"] == "verification" and m["body"]["verdict"] == "supports" for m in db.messages())
+    ev = client.get("/api/fleet/evidence/inv-etna").json()
+    one = next(p for p in ev["patches"] if p["target_id"] == "patch-1")
+    assert one["observations"] == 1 and one["counts"]["supports"] == 1 and one["overall"] == "supported" and one["aircraft"] == ["d0"]
+    two = next(p for p in ev["patches"] if p["target_id"] == "patch-2")
+    assert two["overall"] == "not yet observed" and ev["totals"]["supports"] == 1

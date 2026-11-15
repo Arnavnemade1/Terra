@@ -19,6 +19,8 @@ another machine always need the token, and an aircraft's own token never grants 
   POST /api/fleet/drones/{id}/release  hand a manually flown aircraft back to the coordinator
   GET  /api/fleet/operations           reserved airspace as operational intents (ASTM F3548-shaped)
   POST /api/fleet/command              fleet-wide: hold (every airborne aircraft holds), recall (all return), resume
+  POST /api/fleet/dispatch             verify an investigation: each changed patch becomes a target with its question
+  GET  /api/fleet/evidence/{id}        the drones' field evidence for each patch of an investigation, judged
   POST /api/fleet/enroll               a per-aircraft token and the command that connects it (this machine only)
   GET  /api/fleet/enrollments          issued aircraft tokens (never the tokens themselves)
   POST /api/fleet/enrollments/{id}/revoke   stop accepting an aircraft's token
@@ -179,6 +181,11 @@ class OperatorTask(BaseModel):
 class Command(BaseModel):
     action: Literal["hold", "recall", "resume"]
     reason: str = Field(default="", max_length=120)
+
+
+class Dispatch(BaseModel):
+    investigation_id: str = Field(pattern=r"^[A-Za-z0-9-]{1,80}$")
+    launch: list[float] | None = Field(default=None, min_length=2, max_length=2)
 
 
 class Setpoint(BaseModel):
@@ -540,3 +547,55 @@ async def revoke(drone_id: str):
     if not re.fullmatch(ID, drone_id):
         raise HTTPException(404, "Unknown aircraft.")
     return {"revoked": await _db(fleet_db().revoke, drone_id)}
+
+
+# ---------------------------------------------------------------- radar to drones and back
+def _investigation(investigation_id: str) -> dict:
+    from ..config import get_settings
+    from ..store import Store
+    item = Store(get_settings().database).investigation(investigation_id)
+    if not item:
+        raise HTTPException(404, "Unknown investigation.")
+    return item
+
+
+@router.post("/dispatch", dependencies=[Depends(operator)])
+async def dispatch(body: Dispatch):
+    """Send the fleet to verify an investigation: every changed patch becomes a target carrying its polarimetric
+    hypothesis, the question to answer and the sensors that help; the area is the patches' extent."""
+    from .verify import change_of, targets_from
+    item = await _db(_investigation, body.investigation_id)
+    spots = change_of(item.get("result") or {}).get("hotspots") or []
+    if not spots:
+        raise HTTPException(422, "This investigation found no changed patches to verify.")
+    db = fleet_db()
+    sensors = {x for d in await _db(db.drones) for x in d["capabilities"].get("sensors", [])}
+    targets = targets_from(item["result"], sensors)
+    w = min(x["bounds"][0] for x in spots); s = min(x["bounds"][1] for x in spots); e = max(x["bounds"][2] for x in spots); n = max(x["bounds"][3] for x in spots)
+    pad = max(0.015, 0.25 * max(e - w, n - s))
+    bbox = [max(-180.0, w - pad), max(-90.0, s - pad), min(180.0, e + pad), min(90.0, n + pad)]
+    if bbox[2] - bbox[0] > 2 or bbox[3] - bbox[1] > 2:
+        raise HTTPException(422, "The changed patches span more than 2 degrees; verify a smaller investigation.")
+    if body.launch and not (bbox[0] - 0.25 <= body.launch[0] <= bbox[2] + 0.25 and bbox[1] - 0.25 <= body.launch[1] <= bbox[3] + 0.25):
+        raise HTTPException(422, "Launch from inside the patches' area or close to it.")
+    title = (item.get("title") or "Investigation").split(" · ")[0]
+    area = await _db(db.set_area, f"{title} · field verification", bbox, targets, body.investigation_id, "change", body.launch)
+    await _db(db.message, "operator", "all", "dispatch", {"text": f"Verifying {len(targets)} radar patches from {title}: " +
+                                                          "; ".join(f"{t['label']}" for t in targets[:4]) + ("…" if len(targets) > 4 else "")})
+    running = await ensure_coordinator("verification dispatch")
+    return {"area": area, "targets": targets, "coordinator": running}
+
+
+@router.get("/evidence/{investigation_id}", dependencies=[Depends(operator)])
+async def field_evidence(investigation_id: str):
+    """For each patch of an investigation: the field notes that looked inside it, judged against its hypothesis."""
+    from .verify import evidence
+    if not re.fullmatch(r"[A-Za-z0-9-]{1,80}", investigation_id):
+        raise HTTPException(404, "Unknown investigation.")
+    item = await _db(_investigation, investigation_id)
+    notes = await _db(fleet_db().notes, 500)
+    rows = evidence(item.get("result") or {}, notes)
+    totals = {k: sum(r["counts"][k] for r in rows) for k in ("supports", "contradicts", "inconclusive")}
+    return {"investigation_id": investigation_id, "patches": rows, "totals": totals,
+            "method": "Each field note inside a patch is judged against the patch's polarimetric hypothesis using only measured values "
+                      "(ESA WorldCover 2021, Landsat surface temperature). Evidence to weigh, not a classification."}
