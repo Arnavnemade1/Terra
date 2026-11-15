@@ -198,3 +198,66 @@ def test_surface_classes_and_hotspots_locate_patches():
     lat, lon = spots[0]["centre"]
     w, s, e, n = spots[0]["bounds"]
     assert w < lon < e and s < lat < n
+
+
+def _speckled(rng, mean, looks, shape=(64, 64)):
+    return rng.gamma(looks, mean / looks, shape).astype(np.float32)
+
+
+def _add_pol(path: Path, name: str, values: np.ndarray) -> None:
+    with h5py.File(path, "r+") as f:
+        f["/science/LSAR/GCOV/grids/frequencyA"][name] = values
+
+
+def test_enl_estimate_recovers_looks_and_ignores_texture():
+    from terra.science import estimate_enl, speckle_sd_db
+    rng = np.random.default_rng(1)
+    flat = _speckled(rng, 0.05, 10)
+    textured = flat * np.where(np.arange(64)[None, :] // 16 % 2, 0.2, 5.0)  # 16-pixel blocks: windows that straddle a block edge are heterogeneous and excluded
+    for field in (flat, textured):
+        enl = estimate_enl(10 * np.log10(field))
+        assert 8 <= enl <= 16
+    assert estimate_enl(np.full((5, 5), -10.0, dtype=np.float32)) is None
+    assert speckle_sd_db(1) == pytest.approx(5.57, abs=0.01)  # single-look gamma power, in dB
+    assert speckle_sd_db(10) < speckle_sd_db(2)
+
+
+def test_every_polarization_is_measured_and_the_clearer_one_is_named(tmp_path):
+    rng = np.random.default_rng(2)
+    hh0, hv0 = _speckled(rng, 0.1, 10), _speckled(rng, 0.02, 10)
+    hh1, hv1 = _speckled(rng, 0.1, 10), _speckled(rng, 0.02, 10)
+    hh1[10:40, 10:40] = _speckled(rng, 0.4, 10, (30, 30))  # +6 dB in HH only
+    first = make_gcov(tmp_path / "a.h5", hh0)
+    second = make_gcov(tmp_path / "b.h5", hh1, date="2026-02-01T00:00:00Z")
+    _add_pol(first, "HVHV", hv0)
+    _add_pol(second, "HVHV", hv1)
+    change = run_analysis(manifest(tmp_path, first, second), tmp_path / "out")["measurements"]["change"]
+    rows = {r["polarization"]: r for r in change["polarizations"]}
+    assert set(rows) == {"HHHH", "HVHV"}
+    assert all(8 <= r["enl_before"] <= 16 for r in rows.values())
+    assert rows["HHHH"]["mean_abs_standardized_change"] > 1.4 * rows["HVHV"]["mean_abs_standardized_change"]
+    assert rows["HVHV"]["standardized_exceedance_pct"] < rows["HHHH"]["standardized_exceedance_pct"] / 2
+    assert change["leading_polarization"] == "HHHH"
+    spot = change["hotspots"][0]
+    assert spot["leading_polarization"] == "HHHH"
+    assert spot["by_polarization"]["HHHH"]["mean_change_db"] == pytest.approx(6, abs=1)
+    assert abs(spot["by_polarization"]["HVHV"]["mean_change_db"]) < 3
+
+
+def test_single_polarization_pair_names_no_leader(tmp_path):
+    rng = np.random.default_rng(3)
+    first = make_gcov(tmp_path / "a.h5", _speckled(rng, 0.1, 10))
+    second = make_gcov(tmp_path / "b.h5", _speckled(rng, 0.1, 10), date="2026-02-01T00:00:00Z")
+    change = run_analysis(manifest(tmp_path, first, second), tmp_path / "out")["measurements"]["change"]
+    assert [r["polarization"] for r in change["polarizations"]] == ["HHHH"]
+    assert change["leading_polarization"] is None
+
+
+def test_subset_cached_before_all_terms_were_read_is_not_reused(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from terra import acquire
+    monkeypatch.setattr(acquire, "get_settings", lambda: SimpleNamespace(inputs=tmp_path))
+    for name, flag in (("G__aoi-old.h5", {}), ("G__aoi-new.h5", {"all_terms": True})):
+        (tmp_path / name).write_bytes(b"x")
+        (tmp_path / f"{name}.provenance.json").write_text(json.dumps({"covered_bbox": [0, 0, 1, 1], **flag}))
+    assert acquire.find_subset("G", [0.1, 0.1, 0.9, 0.9]).name == "G__aoi-new.h5"

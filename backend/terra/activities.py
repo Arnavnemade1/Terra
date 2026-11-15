@@ -20,6 +20,7 @@ from .store import Store
 from .connector import request as connector_request
 
 SURFACE_CONDITIONS_TIMEOUT = 8.0
+WATER_CONTEXT_TIMEOUT = 40.0
 
 
 def safe_job_directory(identifier: str) -> Path:
@@ -213,6 +214,7 @@ async def verify_science(payload: dict) -> dict:
 async def publish_science(payload: dict) -> dict:
     """Publish existing computed artifacts without waiting for network enrichment."""
     from .agent import condition_bullets, measured_answer
+    from .ancillary import water_report
     directory = safe_job_directory(payload["id"])
     result = json.loads((directory / "result.json").read_text())
     result["surface_conditions"] = payload.get("surface_conditions") or result.get("surface_conditions") or {
@@ -231,6 +233,7 @@ async def publish_science(payload: dict) -> dict:
     result["narrative"] = narrative
     result["narrative_note"] = payload.get("narrative_note")
     result["context"] = payload.get("context")
+    result["water_context"] = payload.get("water_context")
     result["plan"] = payload.get("plan")
     result["timings"] = payload.get("timings", {})
     result["narrative_status"] = payload.get("narrative_status", "ready")
@@ -275,6 +278,7 @@ async def publish_science(payload: dict) -> dict:
     if conditions.get("note"):
         weather_lines.extend(["", str(conditions["note"])])
     report += "\n".join(weather_lines) + "\n"
+    report += water_report(result["water_context"])
     result["report"] = report
     temporary_report = directory / ".report.md.tmp"
     temporary_report.write_text(report)
@@ -390,9 +394,9 @@ async def narrate_findings(payload: dict) -> dict:
     async def context_for_result() -> dict:
         return payload.get("context") or await context_near(payload["bbox"])
 
-    context, conditions = await asyncio.gather(context_for_result(), _surface_conditions(payload, result, directory))
-    investigation = {**payload, "surface_conditions": conditions, "result": {**result, "surface_conditions": conditions}}
-    additions = {"context": context, "surface_conditions": conditions}
+    context, conditions, water = await asyncio.gather(context_for_result(), _surface_conditions(payload, result, directory), _water_context(directory))
+    investigation = {**payload, "surface_conditions": conditions, "water_context": water, "result": {**result, "surface_conditions": conditions, "water_context": water}}
+    additions = {"context": context, "surface_conditions": conditions, "water_context": water}
     if not available():
         return {**additions, "narrative": measured_answer(investigation, context), "narrative_status": "computed_summary",
                 "narrative_note": "The answer is generated directly from computed measurements and labelled model context; no language model is configured."}
@@ -402,6 +406,27 @@ async def narrate_findings(payload: dict) -> dict:
     except Exception as exc:
         return {**additions, "narrative": measured_answer(investigation, context), "narrative_status": "computed_summary",
                 "narrative_note": f"The language answer was unavailable or failed evidence checks ({type(exc).__name__}); the computed summary is shown."}
+
+
+async def _water_context(directory: Path) -> dict | None:
+    """JRC surface-water history of the newly water-like area; None when the analysis found no such area."""
+    from .ancillary import water_context
+    from .science import NEWLY_WATER_MASK
+    mask = directory / NEWLY_WATER_MASK
+    if not mask.is_file() or mask.is_symlink():
+        return None
+    cache = directory / "water-context.json"
+    if cache.is_file() and not cache.is_symlink():
+        try:
+            return json.loads(cache.read_text())
+        except (OSError, ValueError):
+            pass
+    try:
+        context = await asyncio.wait_for(asyncio.to_thread(water_context, mask), timeout=WATER_CONTEXT_TIMEOUT)
+    except Exception:
+        return {"status": "unavailable", "note": "JRC surface-water history could not be read within the time budget. The radar measurements are unchanged."}
+    _atomic_json(cache, context)
+    return context
 
 
 async def _surface_conditions(payload: dict, result: dict, directory: Path) -> dict:

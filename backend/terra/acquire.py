@@ -114,6 +114,8 @@ def find_subset(granule: str, bbox: list[float]) -> Path | None:
             source = json.loads(sidecar.read_text())
         except (OSError, ValueError):
             continue
+        if not source.get("all_terms"):
+            continue  # cached before every polarization was read
         b = source.get("covered_bbox") or []
         data = Path(str(sidecar)[: -len(".provenance.json")])
         if len(b) == 4 and data.is_file() and b[0] <= bbox[0] and b[1] <= bbox[1] and b[2] >= bbox[2] and b[3] >= bbox[3]:
@@ -229,9 +231,9 @@ def _acquire_subset(observation: dict, bbox: list[float], frequency: str = "A") 
             raise AcquisitionError("The area of interest is too large for this product's resolution. Draw an area smaller than about 70 km across.")
         r1 = r0 + ((r1 - r0) // k) * k
         c1 = c0 + ((c1 - c0) // k) * k
-        # Only the term the analysis uses (the first diagonal, HHHH when present) and the quality
-        # masks are read; other polarisations would double the transfer without changing results.
-        terms = [t for t in DIAGONALS if t in grid][:1]
+        # Every diagonal term the product carries (HH and HV, say) plus the quality masks, so change
+        # can be measured and compared in each polarization.
+        terms = [t for t in DIAGONALS if t in grid]
         if not terms or "mask" not in grid:
             raise AcquisitionError("The granule lacks diagonal covariance terms or its quality mask.")
         with h5py.File(temporary, "w") as dst:
@@ -275,7 +277,7 @@ def _acquire_subset(observation: dict, bbox: list[float], frequency: str = "A") 
                    "blocks containing any invalid sample are masked; identification copied unmodified"),
         "multilook": k, "native_spacing_m": [abs(float(dx)), abs(float(dy))], "pixel_spacing_m": [abs(float(dx)) * k, abs(float(dy)) * k],
         "frequency": frequency, "epsg": epsg, "pixel_window": {"row_start": r0, "row_stop": r1, "column_start": c0, "column_stop": c1},
-        "requested_bbox": bbox, "covered_bbox": list(covered), "terms": terms,
+        "requested_bbox": bbox, "covered_bbox": list(covered), "terms": terms, "all_terms": True,
         "acquired_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "seconds": round(time.monotonic() - started, 1),
         "bytes_read": handle.bytes_fetched, "source_size_bytes": handle.size,
         "local_sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "maturity": observation.get("maturity"),
