@@ -220,6 +220,25 @@ def operator(request: Request, authorization: str | None = Header(default=None))
     drone token. A request from another machine always needs the token (its address cannot be forged; headers can)."""
     expected = os.getenv("TERRA_DRONE_TOKEN", "")
     supplied = (authorization or "").removeprefix("Bearer ").strip()
+    workspace = request.headers.get("x-terra-workspace-token", "")
+    if workspace:
+        secret = os.getenv("TERRA_WORKSPACE_TOKEN", "")
+        if not secret or not hmac.compare_digest(workspace.encode(), secret.encode()):
+            raise HTTPException(403, "The simulation workspace connection could not be authenticated.")
+        path = request.url.path.removeprefix("/api/fleet")
+        allowed = (request.method == "GET" and (path in ("", "/operations") or path.startswith("/evidence/"))) or (
+            request.method == "POST" and (path in ("/area", "/command", "/tasks", "/dispatch") or
+            re.fullmatch(r"/drones/[A-Za-z0-9_-]{1,32}/(?:control|release)", path)))
+        if os.getenv("TERRA_FLEET") != "virtual" or not allowed:
+            raise HTTPException(403, "This workspace can operate the simulated fleet only. Aircraft connections require operator access.")
+        if request.headers.get("sec-fetch-site") != "same-origin" or (request.headers.get("origin") and not _workspace_origin(request.headers["origin"], request)):
+            raise HTTPException(403, "Open fleet controls from the Terra workspace.")
+        # Fail closed if a ground station later connects physical aircraft to this
+        # deployment. A public simulation capability must never become a pilot's.
+        if any(d["origin"] == "real" for d in fleet_db().drones()):
+            raise HTTPException(403, "Connected aircraft require authenticated operator access.")
+        request.state.fleet_access = "simulation"
+        return
     if supplied:
         if expected and hmac.compare_digest(supplied.encode(), expected.encode()):
             return
@@ -290,6 +309,8 @@ def _task_view(task: dict | None) -> dict | None:
 @router.post("/register", status_code=201)
 async def register(body: Register, authorization: str | None = Header(default=None)):
     await _db(_token, authorization, body.id)
+    if body.origin == "real" and os.getenv("TERRA_FLEET") == "virtual" and os.getenv("TERRA_WORKSPACE_TOKEN"):
+        raise HTTPException(403, "This deployment hosts a public simulation. Connect physical aircraft to an authenticated operator deployment.")
     db = fleet_db()
     await _db(db.register, body.model_dump())
     asyncio.create_task(ensure_coordinator(f"{body.id} joined"))
@@ -335,7 +356,7 @@ async def area_for_ground_stations(authorization: str | None = Header(default=No
 
 # ---------------------------------------------------------------- workspace
 @router.get("", dependencies=[Depends(operator)])
-async def fleet_state():
+async def fleet_state(request: Request):
     db = fleet_db()
     drones, tasks, operations, agents, messages, area, targets, jobs, notes, mode = await asyncio.gather(
         _db(db.drones), _db(db.tasks), _db(db.operations), _db(db.agents), _db(db.messages, 60), _db(db.area), _db(db.targets), _db(db.jobs), _db(db.notes, 80), _db(db.mode))
@@ -349,6 +370,8 @@ async def fleet_state():
         asyncio.create_task(ensure_coordinator("workspace opened"))
     return {
         "server_time": time.time(), "connections_enabled": bool(os.getenv("TERRA_DRONE_TOKEN")), "area": area, "targets": targets, "jobs": jobs,
+        "operator_access": getattr(request.state, "fleet_access", "operator") == "operator",
+        "simulation": {"managed": os.getenv("TERRA_FLEET") == "virtual", "aircraft_count": int(os.getenv("TERRA_VIRTUAL_FLEET", "5"))},
         "coordinator": {"running": bool(coordinator and coordinator["age_s"] < 15), "summary": (coordinator or {}).get("summary", {}), "age_s": (coordinator or {}).get("age_s")},
         "drones": [{**{k: d[k] for k in ("id", "name", "origin", "aircraft", "capabilities", "age_s", "link_state", "registered_at")}, "state": d["state"],
                     "track": tr, "task": _task_view(by_drone.get(d["id"])), "operation": ops.get(d["id"]),

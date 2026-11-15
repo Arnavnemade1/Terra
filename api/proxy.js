@@ -21,7 +21,7 @@ export default async function handler(req, res) {
   // Vite deployments need an explicit rewrite to match multiple path segments.
   // Vercel may expose the destination URL to the function, so carry the route
   // separately from provider query parameters and remove it before forwarding.
-  const route = incoming.searchParams.get('__terra_route');
+  const route = incoming.searchParams.get('__terra_route')?.replace(/\/+$/, '') ?? null;
   if (route !== null) {
     if (!route || route.split('/').some(part => !part || part === '.' || part === '..') || /[\\?#]/.test(route)) return res.status(400).json({ detail: 'Invalid API route.' });
     upstream.pathname = `/api/${route}`;
@@ -33,6 +33,9 @@ export default async function handler(req, res) {
   upstream.search = incoming.search;
   const headers = new Headers();
   for (const name of requestHeaders) if (req.headers[name]) headers.set(name, req.headers[name]);
+  if ((upstream.pathname === '/api/fleet' || upstream.pathname.startsWith('/api/fleet/')) && process.env.TERRA_WORKSPACE_TOKEN) {
+    headers.set('x-terra-workspace-token', process.env.TERRA_WORKSPACE_TOKEN);
+  }
   headers.set('x-forwarded-host', req.headers.host || '');
   headers.set('x-forwarded-proto', 'https');
   try {

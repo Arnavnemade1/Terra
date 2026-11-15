@@ -71,6 +71,26 @@ test('Google tiles receive only their provider parameters after Vercel adds its 
   await handler(request('GET', '/api/proxy?session=test-session&__terra_route=connector%2Fgoogle3d%2Ftile.glb'), new ResponseSink());
   assert.deepEqual(seen, ['https://backend.example/api/connector/google3d/root.json', 'https://backend.example/api/connector/google3d/tile.glb?session=test-session']);
 });
+test('Cesium terrain metadata accepts its trailing slash without leaking the rewrite capture', async t => {
+  configure(t, async url => {
+    assert.equal(url.href, 'https://backend.example/api/connector/terrain?f=pjson');
+    return new Response('{}');
+  });
+  await handler(request('GET', '/api/proxy?f=pjson&__terra_route=connector%2Fterrain%2F'), new ResponseSink());
+});
+test('the server adds a simulation capability only for fleet requests and ignores caller credentials', async t => {
+  const previous = process.env.TERRA_WORKSPACE_TOKEN;
+  process.env.TERRA_WORKSPACE_TOKEN = 'test-simulation-canary';
+  t.after(() => { if (previous === undefined) delete process.env.TERRA_WORKSPACE_TOKEN; else process.env.TERRA_WORKSPACE_TOKEN = previous; });
+  configure(t, async (url, options) => {
+    assert.equal(options.headers.get('x-terra-workspace-token'), url.pathname.startsWith('/api/fleet/') ? 'test-simulation-canary' : null);
+    return new Response('{}');
+  });
+  const fleet = request('POST', '/api/fleet/command', { action: 'resume' });
+  fleet.headers['x-terra-workspace-token'] = 'untrusted-caller';
+  await handler(fleet, new ResponseSink());
+  await handler(request(), new ResponseSink());
+});
 test('invalid configuration and backend failures do not disclose private error content', async t => {
   configure(t, async () => { throw new Error('sensitive upstream details'); });
   const res = new ResponseSink(); await handler(request(), res);

@@ -5,7 +5,7 @@ export default defineRailway(() => {
   const data = volume("terra-volume", { sizeMB: 500, region: "sfo" });
   const Terra = service("Terra", {
     source: github("Arnavnemade1/Terra", { branch: "main", checkSuites: false }),
-    build: { buildEnvironment: "V3", builder: "DOCKERFILE", dockerfilePath: "Dockerfile", watchPatterns: ["backend/**", "pyproject.toml", "Dockerfile", ".railway/**"] },
+    build: { buildEnvironment: "V3", builder: "DOCKERFILE", dockerfilePath: "Dockerfile", watchPatterns: ["backend/**", "scripts/drone_bridge.py", "pyproject.toml", "Dockerfile", ".railway/**"] },
     start: "python -m terra.runtime",
     healthcheck: "/api/ready",
     healthcheckTimeout: 180,

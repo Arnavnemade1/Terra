@@ -230,7 +230,7 @@ async def terrain_asset(request: Request, path: str = ""):
             if not 1 <= height <= 128 or not 1 <= width <= 128 or y + height > 2**z or x + width > 2**z:
                 raise HTTPException(404, "Terrain availability region not found.")
     allowed = {"f": {"json", "pjson"}, "blankTile": {"false", "true"}}
-    params = {}
+    params = {"f": "pjson"} if not path else {}
     for key, value in request.query_params.items():
         if key not in allowed or value not in allowed[key]:
             raise HTTPException(422, "Unsupported terrain parameter.")

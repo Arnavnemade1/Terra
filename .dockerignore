@@ -3,6 +3,8 @@
 !pyproject.toml
 !backend/
 !backend/**
+!scripts/
+!scripts/drone_bridge.py
 **/__pycache__/
 **/*.pyc
 **/.env

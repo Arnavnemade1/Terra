@@ -1,0 +1,38 @@
+/* Keep source identity and controls outside the image, with a restrained HUD. */
+.sensor.drone-feed { background: var(--surface); border-color: var(--rule-2); }
+.sensor.drone-feed:not(.expanded):not(.floating) { width: min(64%, 820px); }
+.sensor.drone-feed .camera-head {
+  position: relative; inset: auto; flex: none; min-height: 58px;
+  padding: 10px 12px; background: var(--surface); border-bottom: 1px solid var(--rule);
+}
+.sensor.drone-feed .camera-head > div:first-child {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px;
+}
+.sensor.drone-feed .camera-head em { grid-column: 1 / -1; justify-self: start; }
+.sensor.drone-feed .camera-head span { color: var(--fg-2); font-size: 12px; }
+.sensor.drone-feed .camera-head button { color: var(--fg-2); background: var(--surface-2); border-color: var(--rule-2); }
+.sensor.drone-feed .camera-head button:hover { color: var(--fg); background: var(--surface-3); }
+.sensor.drone-feed .hud-tl, .sensor.drone-feed .hud-tr { top: 18px; }
+.sensor.drone-feed .hud-tape { top: 8px; }
+.sensor.drone-feed .hud-bc { bottom: 18px; }
+.sensor.drone-feed .sensor-bar { padding: 8px 10px; background: var(--surface); border-color: var(--rule); }
+.sensor.drone-feed .sensor-modes { background: var(--bg); border-color: var(--rule-2); }
+.sensor.drone-feed .sensor-modes button.on { background: var(--accent); color: var(--accent-ink); }
+.sensor.drone-feed .sensor-palette, .sensor.drone-feed .gimbal-presets button.on {
+  color: var(--fg-2); background: var(--surface-2); border-color: var(--rule-2);
+}
+.sensor.drone-feed .sensor-palette.on { color: var(--accent-ink); background: var(--accent); }
+.sensor.drone-feed .camera-context { color: var(--fg-3); background: var(--bg); border-color: var(--rule); font-size: 10px; }
+.sensor.drone-feed .camera-state { background: var(--surface); border-color: var(--rule-2); color: var(--fg-2); line-height: 1.5; }
+.sensor.drone-feed .camera-state strong { color: var(--fg); font-size: 14px; }
+.sensor.drone-feed .camera-state p { margin: 6px 0 0; }
+@media (max-width: 1020px) {
+  .sensor.drone-feed:not(.expanded):not(.floating) { width: calc(100% - 28px); }
+}
+@media (max-width: 760px) {
+  .sensor.drone-feed:not(.expanded):not(.floating) { width: calc(100% - 12px); }
+  .sensor.drone-feed .camera-head { min-height: 58px; padding: 8px; }
+  .sensor.drone-feed .camera-head span { display: block; }
+  .sensor.drone-feed .camera-context { font-size: 9px; }
+  .sensor.drone-feed .hud-tl, .sensor.drone-feed .hud-tr { top: 10px; }
+}

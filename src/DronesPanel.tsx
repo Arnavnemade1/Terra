@@ -103,7 +103,7 @@ function AddDrone({ store, count }: { store: DroneStore; count: number }) {
 /** The fleet, the selected aircraft, its task and airspace, people's tasks, and the agents' shared log. */
 export default function DronesPanel({ store, selected, onSelect, onCamera, onFull, patches, places, regionName, regionBox, onMonitorHere, onProfile, onFocus, ops }: {
   store: DroneStore; selected: string | null; onSelect: (id: string) => void; onCamera: (id: string) => void; onFull: (id: string) => void; patches: Patch[]; places: Place[];
-  regionName: string; regionBox: Bounds; onMonitorHere: () => void; onProfile: (p: Profile) => void; onFocus: (lon: number, lat: number) => void;
+  regionName: string; regionBox: Bounds; onMonitorHere: () => Promise<void>; onProfile: (p: Profile) => void; onFocus: (lon: number, lat: number) => void;
   ops?: React.ReactNode;  // orchestration: deployment, fleet commands and the durable agents (FleetOps)
 }) {
   const [, tick] = useReducer((x: number) => x + 1, 0);
@@ -164,20 +164,23 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
     <nav className="dp-tabs" role="tablist" aria-label="Drone workspace">{([['fleet', 'Fleet', states.length], ['mission', 'Mission', null], ['notes', 'Notes', info.notes.length || null], ['log', 'Log', null]] as const).map(([k, label, n]) =>
       <button key={k} role="tab" aria-selected={tab === k} className={tab === k ? 'on' : ''} onClick={() => go(k)}>{label}{n ? <em>{n}</em> : null}</button>)}</nav>
 
+    {info.error && <div className="dp-connection" role="alert"><strong>Fleet connection unavailable</strong><p>{info.error}</p><button className="mini-btn" onClick={() => { void store.poll(); }}>Retry connection</button></div>}
+    {(tab === 'fleet' || tab === 'mission') && ops}
+
     {tab === 'fleet' && <div className="dp-body" role="tabpanel">
       <div className="dp-stats">
         <div><strong>{airborne}</strong><span>Airborne</span></div>
-        <div><strong>{states.filter(d => d.task?.status === 'active').length}</strong><span>On task</span></div>
+        <div><strong>{states.filter(d => d.task && d.task.kind !== 'return').length}</strong><span>Assigned</span></div>
         <div className={states.some(attention) ? 'attention' : ''}><strong>{states.filter(attention).length}</strong><span>Attention</span></div>
         <div><strong>{info.jobs.filter(j => j.assigned_drone).length}<small>/{info.jobs.length}</small></strong><span>Jobs covered</span></div>
       </div>
-      {!states.length && info.connections && <p className="card-note">No aircraft connected yet. Open Mission to deploy the fleet or add a drone.</p>}
+      {!states.length && !info.error && <div className="dp-empty" role="status"><Plane size={26} /><strong>{!store.ready ? 'Connecting to the fleet' : info.area ? 'Preparing the aircraft' : 'Plan your first flight'}</strong><p>{info.area ? 'Waiting for telemetry from the launch site. Flight progress will appear here.' : 'Choose Launch here above to start a mission over the selected landscape.'}</p></div>}
       <div className="dp-filters" role="group" aria-label="Filter aircraft">{(['all', 'airborne', 'attention'] as const).map(f => <button key={f} className={fleetFilter === f ? 'on' : ''} aria-pressed={fleetFilter === f} onClick={() => setFleetFilter(f)}>{f === 'all' ? 'All' : f === 'airborne' ? 'Airborne' : 'Attention'}</button>)}</div>
       <ul className="dp-cards">{visibleStates.map(d => { const on = d.id === selected; return <li key={d.id} className={`dp-card ${on ? 'on' : ''} ${tone(d)}`}>
         <button className="dp-card-main" onClick={() => onSelect(d.id)} aria-expanded={on}>
           <span className="dp-icon"><AircraftIcon aircraft={d.aircraft} /></span>
-          <span className="dp-id"><b>{d.callsign}</b><span>{d.name}</span><em className={`src-tag ${d.source}`}>{SOURCE[d.source].tag}</em></span>
-          <span className={`dp-pill ${tone(d)}`}>{d.status === 'lost' ? 'No signal' : d.status === 'stale' ? 'Delayed' : d.mission.status}</span>
+          <span className="dp-id"><span className="dp-identity"><b>{d.callsign}</b><em className={`src-tag ${d.source}`}>{SOURCE[d.source].tag}</em></span><span className="dp-name">{d.name || (d.aircraft === 'quad' ? 'Multirotor' : 'Fixed-wing')}</span></span>
+          <span className={`dp-pill ${tone(d)}`}>{d.status === 'lost' ? 'No signal' : d.status === 'stale' ? 'Delayed' : d.status === 'landed' ? (d.task && d.task.kind !== 'return' ? 'Takeoff queued' : 'On pad') : d.aglM < 30 && d.task?.kind !== 'return' ? 'Taking off' : d.mission.status}</span>
           <span className="dp-task" title={d.mission.task}>{d.mission.task}</span>
           <span className="dp-meters">
             <span className="dp-bat" title="Battery"><i><b style={{ width: `${Number.isFinite(d.batteryPct) ? d.batteryPct : 0}%` }} className={d.batteryPct < 30 ? 'low' : ''} /></i><small className="num">{Number.isFinite(d.batteryPct) ? `${Math.round(d.batteryPct)}%` : '—'}</small></span>
@@ -218,10 +221,11 @@ export default function DronesPanel({ store, selected, onSelect, onCamera, onFul
         <div className="profile-pick" role="group" aria-label="What the fleet is for">{PROFILES.map(p => <button key={p.key} className={profile === p.key ? 'on' : ''} disabled={!info.area}
           onClick={() => { if (p.key !== profile) onProfile(p.key); }} aria-pressed={profile === p.key}>{p.label}</button>)}</div>
         <p className="profile-note">{PROFILES.find(p => p.key === profile)?.note}</p>
-        {(!info.area || info.area.bbox.some((v, i) => Math.abs(v - regionBox[i]) > 1e-6)) && <button className="mini-btn" onClick={onMonitorHere}>Operate over {regionName.length > 26 ? `${regionName.slice(0, 26)}…` : regionName}</button>}
+        {(!info.area || info.area.bbox.some((v, i) => Math.abs(v - regionBox[i]) > 1e-6)) && <button className="mini-btn" onClick={() => { void onMonitorHere().catch(e => setSent(e instanceof Error ? e.message : 'The mission could not start.')); }}>Operate over {regionName.length > 26 ? `${regionName.slice(0, 26)}…` : regionName}</button>}
+        {sent && <p className="card-note" role="status">{sent}</p>}
       </section>
-      {ops}
-      {info.connections ? <AddDrone store={store} count={states.length} />
+      {info.connections && info.operatorAccess ? <AddDrone store={store} count={states.length} />
+        : info.simulation.managed ? <p className="card-note">Cloud simulation · {info.simulation.aircraft_count} virtual aircraft. Camera views render satellite imagery and terrain; they are not live aircraft footage.</p>
         : <p className="card-note">Drone connections are off: set TERRA_DRONE_TOKEN on the server, then add aircraft here.</p>}
       <p className="fleet-foot">Reserved airspace is published as ASTM F3548-shaped operational intents at <code>/api/fleet/operations</code>. Real aircraft are never flown from the browser.</p>
     </div>}

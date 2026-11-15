@@ -343,6 +343,29 @@ def test_other_machines_need_the_token_even_with_browser_headers(client, monkeyp
     assert client.get("/api/fleet", headers=AUTH).status_code == 200
 
 
+def test_cloud_proxy_can_run_only_a_simulation_and_never_issue_aircraft_credentials(client, monkeypatch):
+    monkeypatch.setattr("terra.fleet.api.LOCAL", {"127.0.0.1"})
+    monkeypatch.setenv("TERRA_FLEET", "virtual")
+    monkeypatch.setenv("TERRA_WORKSPACE_TOKEN", "test-workspace-capability")
+    headers = {"x-terra-workspace-token": "test-workspace-capability"}
+    assert client.get("/api/fleet").status_code == 403
+    assert client.get("/api/fleet", headers={"x-terra-workspace-token": "wrong"}).status_code == 403
+    response = client.get("/api/fleet", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["operator_access"] is False
+    assert response.json()["simulation"]["managed"] is True
+    assert "test-workspace-capability" not in response.text
+    assert client.post("/api/fleet/area", json=AREA, headers=headers).status_code == 200
+    assert client.post("/api/fleet/enroll", json={"id": "x", "name": "X"}, headers=headers).status_code == 403
+    assert client.get("/api/fleet/enrollments", headers=headers).status_code == 403
+    assert client.get("/api/fleet", headers={**headers, "origin": "https://attacker.example"}).status_code == 403
+    assert client.post("/api/fleet/register", json={"id": "real-1", "name": "Real", "origin": "real"}, headers=AUTH).status_code == 403
+    db = FleetDB(api.get_settings().database)
+    db.register({"id": "existing-real", "name": "Real", "origin": "real", "aircraft": "quad", "capabilities": {}})
+    assert client.get("/api/fleet", headers=headers).status_code == 403
+    assert client.get("/api/fleet", headers=AUTH).status_code == 200
+
+
 def test_operator_tasks_are_checked(client):
     _register(client, "d1"); _fly(client, "d1", 1)
     task = lambda **kw: client.post("/api/fleet/tasks", json={"drone_id": "d1", **kw})  # noqa: E731

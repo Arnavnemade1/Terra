@@ -370,15 +370,18 @@ export default function App() {
   const sameBox = (a: Bounds | null | undefined, b: Bounds) => Boolean(a) && a!.every((v, i) => Math.abs(v - b[i]) < 1e-6);
   useEffect(() => {
     if (!fleetReady || !droneStore.ready) return; const current = droneStore.info.area?.bbox;
-    if (current && !sameBox(current, region.bbox)) return;
-    const id = setTimeout(() => { void droneStore.publishArea(region.name, region.bbox, patches, places, undefined, fleetInvestigation); }, 900);
+    if (!current || !sameBox(current, region.bbox)) return;
+    const id = setTimeout(() => { void droneStore.publishArea(region.name, region.bbox, patches, places, undefined, fleetInvestigation).catch(() => {}); }, 900);
     return () => clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fleetReady, region.bbox.join(','), patches, places]);
-  const monitorHere = useCallback(() => { void droneStore.publishArea(region.name, region.bbox, patches, places, undefined, fleetInvestigation); }, [region, patches, places, fleetInvestigation]);
+  const monitorHere = useCallback(async () => {
+    await droneStore.publishArea(region.name, region.bbox, patches, places, undefined, fleetInvestigation);
+    await droneStore.command('resume');
+  }, [region, patches, places, fleetInvestigation]);
   const onFleetProfile = useCallback((p: FleetProfile) => {
     const a = droneStore.info.area; if (!a) return;
-    void droneStore.publishArea(a.name, a.bbox, sameBox(a.bbox, region.bbox) ? patches : [], sameBox(a.bbox, region.bbox) ? places : [], p, sameBox(a.bbox, region.bbox) ? fleetInvestigation : a.investigation_id);
+    void droneStore.publishArea(a.name, a.bbox, sameBox(a.bbox, region.bbox) ? patches : [], sameBox(a.bbox, region.bbox) ? places : [], p, sameBox(a.bbox, region.bbox) ? fleetInvestigation : a.investigation_id).catch(e => setError(e instanceof Error ? e.message : 'The flight profile could not be updated.'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [region, patches, places, fleetInvestigation]);
   const onFleetFocus = useCallback((lon: number, lat: number) => globe.current?.flyToPoint(lon, lat, 3500), []);
@@ -397,8 +400,9 @@ export default function App() {
   }), []);
   const launchDeployment = useCallback(async (name: string, profile: FleetProfile) => {
     if (!deploy?.area) return; const area = deploy.area;
-    try { await droneStore.publishArea(name, area, [], [], profile, null, deploy.pad ?? undefined); setDeploy(null); globe.current?.flyTo(area); }
-    catch { setError('The fleet could not be deployed there.'); }
+    await droneStore.publishArea(name, area, [], [], profile, null, deploy.pad ?? undefined);
+    await droneStore.command('resume');
+    setDeploy(null); globe.current?.flyTo(area);
   }, [deploy]);
   const [fleetCount, setFleetCount] = useState(0); const [liveDrones, setLiveDrones] = useState(0);
   useEffect(() => droneStore.subscribe(() => { const st = droneStore.states(); setFleetCount(st.filter(d => d.status === 'airborne').length); setLiveDrones(st.filter(d => d.source === 'real').length); }), []);
@@ -807,7 +811,7 @@ export default function App() {
         onFly={flyToSat} onSensor={openSensor} />}
       {mode === 'drones' && <DronesPanel store={droneStore} selected={selectedDrone} patches={patches} places={places} regionName={region.name} regionBox={region.bbox} onMonitorHere={monitorHere}
         onProfile={onFleetProfile} onFocus={onFleetFocus}
-        ops={<FleetOps store={droneStore} deploying={Boolean(deploy)} onDeploy={() => { setDeploy(d => d ? null : { stage: 'draw', area: null, pad: null }); setPicking(false); setDrawingProfile(false); stopFollowing(); }} />}
+        ops={<FleetOps store={droneStore} regionName={region.name} onLaunchHere={monitorHere} deploying={Boolean(deploy)} onDeploy={() => { setDeploy(d => d ? null : { stage: 'draw', area: null, pad: null }); setPicking(false); setDrawingProfile(false); stopFollowing(); }} />}
         onSelect={id => { setSelectedDrone(id); followDrone(id); }}
         onCamera={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: false }); }}
         onFull={id => { setSelectedDrone(id); setSensor(null); setFeed({ id, expanded: true }); }} />}

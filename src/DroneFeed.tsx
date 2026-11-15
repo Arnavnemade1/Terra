@@ -7,6 +7,7 @@ import { imagery, terrainUrl } from './tiles';
 import type { ThermalPalette as Palette } from './thermalPalette';
 import { ModelledThermalProvider, THERMAL_SHADER, celsiusAt, greyRange, viewRange } from './thermalCamera';
 import type { Bounds } from './types';
+import './droneFeed.css';
 
 export type Thermal = { png: string; bounds: Bounds; minC: number; maxC: number; date: string; source: string };
 type Mode = 'eo' | 'ir' | 'change';
@@ -90,7 +91,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const [rec, setRec] = useState(0);
   const [video, setVideo] = useState(false);
   const [videoState,setVideoState]=useState<'loading'|'ready'|'error'>('loading');
-  const [hudDetail,setHudDetail]=useState(true);
+  const [hudDetail,setHudDetail]=useState(false);
   const [help,setHelp]=useState(false);
   const [nadir,setNadir]=useState(false);
   const [tileQueue,setTileQueue]=useState(0);
@@ -102,9 +103,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const idRef = useRef(id); idRef.current = id;
   const pose = useRef<{ id: string; h: number; p: number; alt: number } | null>(null);
 
-  // One globe for the camera, kept for the life of the workspace. A WebGL context compiles its shaders and caches
-  // its tiles once, so the camera is created as soon as the Drones workspace opens, warms up out of sight (shaders,
-  // terrain and imagery around the aircraft), and opening it or switching aircraft only re-points it.
+  // One camera scene while the camera is open. Switching aircraft reuses it;
+  // closing the camera unmounts this component and releases its GPU resources.
   useEffect(() => {
     if (!mount.current) return; let disposed = false;
     const v = new C.Viewer(mount.current, {
@@ -149,7 +149,8 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       }
       const st = store.state(idRef.current); if (!st) return;
       const ground = scene.globe.getHeight(C.Cartographic.fromDegrees(st.lon, st.lat));
-      const height = Math.max(st.amslM, (ground ?? -1e9) + 8);
+      const simulatedHeight = st.source !== 'real' && ground !== undefined ? ground + st.aglM : st.amslM;
+      const height = Math.max(simulatedHeight, (ground ?? -1e9) + 8);
       const { aim: a, zoom: z } = live.current;
       // A stabilised gimbal: ease the view toward the commanded heading and pitch, and the height over terrain
       // that refines underneath, instead of snapping to each new sample.
@@ -183,14 +184,13 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
     return () => { disposed = true; tick(); stopQueue(); stopError(); clearInterval(ui); store.feedGroundAt = null; world.current?.destroy(); world.current = null; eoStage.current = null; irStage.current = null; layers.current = {}; if (!v.isDestroyed()) v.destroy(); viewer.current = null; };
   }, [store]);
 
-  // Shown: full frame rate. Parked: two frames a second at the detail the small view will show, so the tiles it
-  // needs are already loaded when it opens, for little cost while it waits.
+  // Bound the second scene to 30 fps and one pixel per CSS pixel in the preview.
   useEffect(() => {
     const v = viewer.current; if (!v) return;
     const dpr = window.devicePixelRatio || 1;
-    v.targetFrameRate = visible ? 60 : 30;
+    v.targetFrameRate = 30;
     v.useDefaultRenderLoop = visible;
-    v.resolutionScale = Math.min(dpr, visible ? 1.25 : 0.75);
+    v.resolutionScale = Math.min(dpr, expanded ? 1.25 : 1);
     v.scene.globe.maximumScreenSpaceError = visible ? 1.6 : 3;
     if (visible) return;
     const slow = setInterval(() => { if (!v.isDestroyed()) v.render(); }, 500);
@@ -322,7 +322,10 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
 
   // The window: drag its title bar to move it, its corner to resize it (kept inside the map; remembered).
   const frame = (el: HTMLElement) => (el.offsetParent as HTMLElement | null)?.getBoundingClientRect() ?? document.body.getBoundingClientRect();
-  const keep = (x: number, y: number, w: number, area: DOMRect, h: number) => ({ w: Math.max(320, Math.min(w, area.width - 16)), x: Math.max(8, Math.min(x, area.width - Math.min(w, area.width - 16) - 8)), y: Math.max(8, Math.min(y, area.height - Math.min(h, 120))) });
+  const keep = (x: number, y: number, w: number, area: DOMRect, h: number) => {
+    const width = Math.max(Math.min(320, area.width - 16), Math.min(w, area.width - 16));
+    return { w: width, x: Math.max(8, Math.min(x, area.width - width - 8)), y: Math.max(8, Math.min(y, area.height - Math.min(h, area.height - 16) - 8)) };
+  };
   const save = (v: { x: number; y: number; w: number }) => { setWin(v); try { localStorage.setItem('terra.cameraWindow', JSON.stringify(v)); } catch { /* per-viewer convenience only */ } };
   const startMove = (e: React.PointerEvent) => {
     const el = box.current; if (!el || expanded || (e.target as HTMLElement).closest('button')) return;
@@ -374,6 +377,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       <div ref={mount} className="sensor-canvas" />
       {hasVideo && video && <img className="drone-video" src={s.videoUrl} alt={`Live video from ${s.name}`} referrerPolicy="no-referrer" onLoad={()=>setVideoState('ready')} onError={()=>setVideoState('error')} />}
       {cameraError&&<div className="camera-state error" role="alert">{cameraError}</div>}
+      {!isLiveVideo && s.status === 'landed' && !cameraError && <div className="camera-state" role="status"><strong>On the launch pad</strong><p>{s.task && s.task.kind !== 'return' ? 'Takeoff queued. The camera will follow the aircraft as it climbs.' : 'Launch the fleet or assign a mission to begin the flight.'}</p></div>}
       {isLiveVideo&&videoState!=='ready'&&<div className="camera-state" role="status">{videoState==='error'?'The aircraft video stream is unavailable.':'Connecting to aircraft video…'}{videoState==='error'&&<button onClick={()=>setVideo(false)}>Use rendered view</button>}</div>}
       {stale&&<div className="camera-telemetry-warning" role="status">{s.status==='lost'?'Telemetry lost':'Telemetry delayed'} · last report {s.ageS!==undefined?`${Math.round(s.ageS)} s ago`:'unavailable'}</div>}
       {!stale&&criticalBattery&&<div className="camera-telemetry-warning" role="status">Battery critical · {Math.round(s.batteryPct)}% · {s.mission.status}</div>}
@@ -412,7 +416,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       </div>
       {mode === 'ir' && <button className="sensor-palette" onClick={() => setPalette(p => p === 'ironbow' ? 'white' : p === 'white' ? 'black' : 'ironbow')}>{PALETTES[palette]}</button>}
       {hasVideo && <button className={`sensor-palette ${video ? 'on' : ''}`} onClick={() => {setVideoState('loading');setVideo(v => !v);setMode('eo');setFlying(false);}}>{video ? 'Rendered view' : 'Live video'}</button>}
-      {s.source !== 'real' && <button className={`sensor-palette fly ${flying ? 'on' : ''}`} onClick={() => setFlying(f => !f)}
+      {s.source !== 'real' && <button className={`sensor-palette fly ${flying ? 'on' : ''}`} disabled={stale || s.status === 'landed'} onClick={() => setFlying(f => !f)}
         title={s.source === 'sitl' ? 'Fly this ArduPilot SITL aircraft with the keyboard (GUIDED mode setpoints; real aircraft are never flown from the browser)' : 'Fly this virtual aircraft with the keyboard (real aircraft are never flown from the browser)'}><Gamepad2 size={14} />{flying ? 'Flying' : 'Fly'}</button>}
       {!isLiveVideo&&<div className="gimbal-presets" role="group" aria-label="Camera direction"><button className={!nadir?'on':''} onClick={()=>{setNadir(false);setAim({az:0,el:0});}}>Mission target</button><button className={nadir?'on':''} onClick={()=>setNadir(true)}>Look down</button></div>}
       <span className="grow" />

@@ -5,6 +5,7 @@ import time
 import httpx
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from terra import gateway
 from terra.connector import ConnectorError
@@ -42,6 +43,17 @@ def upstream(monkeypatch, tmp_path):
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_terrain_metadata_defaults_to_json_instead_of_arcgis_html(monkeypatch):
+    seen = []
+    async def asset(provider, url, **options):
+        seen.append((provider, options.get("params")))
+        return b"{}"
+    monkeypatch.setattr(gateway, "_asset", asset)
+    request = Request({"type": "http", "query_string": b""})
+    run(gateway.terrain_asset(request))
+    assert seen == [("terrain", {"f": "pjson"})]
 
 
 def test_tiles_are_served_from_memory_then_disk_without_asking_again(upstream):

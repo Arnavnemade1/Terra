@@ -8,6 +8,7 @@
     "api/proxy.js": { "maxDuration": 30 }
   },
   "rewrites": [
+    { "source": "/api/:__terra_route*/", "destination": "/api/proxy" },
     { "source": "/api/:__terra_route*", "destination": "/api/proxy" },
     { "source": "/app", "destination": "/app.html" }
   ]

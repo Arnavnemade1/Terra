@@ -34,6 +34,7 @@ export type Patch = { rank: number; centre: [number, number]; bounds: Bounds; la
 export type Place = { name: string; lon: number; lat: number; kind: string; elevation_m: number | null };
 export type GroundAt = (lon: number, lat: number) => number | undefined;
 export type FleetInfo = {
+  operatorAccess: boolean; simulation: { managed: boolean; aircraft_count: number };
   connections: boolean; area: { name: string; bbox: Bounds; launch: [number, number]; profile?: Profile; investigation_id?: string | null } | null;
   coordinator: { running: boolean; summary: { round?: number; text?: string; online?: number; jobs?: number; assigned?: number; next_s?: number; pending_acks?: number; agents?: number; restarting?: string[]; mode?: string }; age_s: number | null };
   mode: FleetMode; agents: AgentView[];
@@ -89,7 +90,7 @@ export class DroneStore {
   private resume = new Map<string, { from: DroneState; at: number }>();
   private listeners = new Set<() => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  info: FleetInfo = { connections: false, area: null, coordinator: { running: false, summary: {}, age_s: null }, mode: { mode: 'normal', reason: null, set_by: null, since: null }, agents: [], messages: [], notes: [], jobs: [], targets: [], error: null };
+  info: FleetInfo = { operatorAccess: false, simulation: { managed: false, aircraft_count: 5 }, connections: false, area: null, coordinator: { running: false, summary: {}, age_s: null }, mode: { mode: 'normal', reason: null, set_by: null, since: null }, agents: [], messages: [], notes: [], jobs: [], targets: [], error: null };
   groundAt: GroundAt | null = null;
   /** Ground height from an open camera view, which has the finest terrain around its aircraft. */
   feedGroundAt: GroundAt | null = null;
@@ -109,7 +110,7 @@ export class DroneStore {
 
   async poll() {
     try {
-      const v = await api<{ server_time: number; connections_enabled: boolean; area: FleetInfo['area']; coordinator: FleetInfo['coordinator']; messages: FleetMessage[];
+      const v = await api<{ server_time: number; connections_enabled: boolean; operator_access?: boolean; simulation?: FleetInfo['simulation']; area: FleetInfo['area']; coordinator: FleetInfo['coordinator']; messages: FleetMessage[];
         notes?: FieldNote[]; jobs: FleetInfo['jobs']; targets: FleetInfo['targets']; drones: ServerDrone[]; mode?: FleetMode; agents?: AgentView[] }>('/fleet');
       const offset = v.server_time - Date.now() / 1000; this.offset = this.offset === null ? offset : this.offset * 0.8 + offset * 0.2;
       const seen = new Set<string>();
@@ -122,7 +123,7 @@ export class DroneStore {
       }
       for (const id of [...this.meta.keys()]) if (!seen.has(id)) { this.meta.delete(id); this.samples.delete(id); }
       const notes = v.notes ?? []; if (notes[0]?.id !== this.info.notes[0]?.id) this.notesVersion++;
-      this.info = { connections: v.connections_enabled, area: v.area, coordinator: v.coordinator, mode: v.mode ?? this.info.mode, agents: v.agents ?? [], messages: v.messages, notes, jobs: v.jobs, targets: v.targets, error: null };
+      this.info = { operatorAccess: v.operator_access ?? true, simulation: v.simulation ?? this.info.simulation, connections: v.connections_enabled, area: v.area, coordinator: v.coordinator, mode: v.mode ?? this.info.mode, agents: v.agents ?? [], messages: v.messages, notes, jobs: v.jobs, targets: v.targets, error: null };
       this.ready = true;
       const key = v.drones.map(d => `${d.id}:${d.task?.id}:${JSON.stringify(d.task?.params ?? null)}:${this.manual.has(d.id)}`).join('|');
       if (key !== this.routeKey) { this.routeKey = key; this.routes++; }
@@ -148,8 +149,11 @@ export class DroneStore {
     const current = this.info.area;
     const unchanged = current && current.bbox.every((v, i) => Math.abs(v - bbox[i]) < 1e-9) && (current.profile ?? 'change') === profile;
     if (body === this.published && unchanged) return; this.published = body;
-    await api('/fleet/area', { method: 'POST', body }).catch(() => { this.published = ''; });
-    void this.poll();
+    try {
+      const reply = await api<{ coordinator: boolean }>('/fleet/area', { method: 'POST', body });
+      if (!reply.coordinator) throw new Error('The area was saved, but the flight coordinator is offline. Please retry the launch.');
+    } catch (error) { this.published = ''; throw error; }
+    await this.poll();
   }
 
   /** Deploy the fleet anywhere: a launch site where you clicked and a square monitoring area around it. */
@@ -280,8 +284,9 @@ export class DroneStore {
       : { kind: 'idle', label: landed ? 'On the ground' : 'No task', status: landed ? 'Landed' : 'Idle', task: landed ? 'Waiting at the launch site' : 'Waiting for a task', aglM: height, speedMps: speed };
     return {
       id, callsign: d.id.toUpperCase().slice(0, 10), name: d.name !== d.id ? d.name : '', source: d.origin, aircraft, color: d.origin === 'real' ? '#9fe07a' : d.origin === 'sitl' ? '#8fc8ff' : '#f4f1e8',
-      // Connected autopilots already report AMSL. A coarse or unloaded map tile must not replace it.
-      mission, lon, lat, aglM: height, groundM: ground, amslM: !m && (d.origin !== 'virtual' || agl === null) ? alt : (ground ?? 0) + height, headingDeg: heading, speedMps: speed,
+      // Physical aircraft retain reported AMSL; simulated airframes follow the
+      // rendered terrain with their reported AGL, including SITL home offsets.
+      mission, lon, lat, aglM: height, groundM: ground, amslM: !m && (d.origin === 'real' || agl === null) ? alt : (ground ?? 0) + height, headingDeg: heading, speedMps: speed,
       pitchDeg: aircraft === 'quad' ? -Math.min(14, speed * 0.7) : 2, rollDeg: roll, gimbal: { headingDeg: gh, pitchDeg: gp },
       batteryPct: battery, minutesLeft: Number.isFinite(battery) ? (battery - 15) / (100 / Number(caps.endurance_min ?? 30)) : NaN,
       linkDbm: typeof st.link_dbm === 'number' ? st.link_dbm : NaN, flightS: Math.max(0, Date.now() / 1000 - d.registered_at),

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 import pytest
 
-from terra.runtime import runtime_environment
+from terra.runtime import child_environment, runtime_commands, runtime_environment
 from terra.runtime_health import HEARTBEAT, worker_ready, write_heartbeat
 
 api = importlib.import_module('terra.app')
@@ -38,6 +38,24 @@ def test_worker_heartbeat_expires_and_cannot_survive_a_different_container_boot(
     assert not worker_ready(tmp_path)
     path.write_text('unfinished data')
     assert not worker_ready(tmp_path)
+
+
+def test_hosted_simulation_is_supervised_and_receives_no_provider_credentials():
+    source = {'TEMPORAL_ADDRESS': 'temporal.internal:7233', 'PORT': '8080', 'TERRA_FLEET': 'virtual',
+              'TERRA_DRONE_TOKEN': 'test-drone-token', 'TERRA_WORKSPACE_TOKEN': 'test-workspace-token',
+              'OPENAI_API_KEY': 'test-provider-secret', 'EARTHDATA_TOKEN': 'test-earthdata-secret'}
+    env = runtime_environment(source)
+    assert env['TERRA_SERVER'] == 'http://127.0.0.1:8080'
+    command = runtime_commands(env)['fleet']
+    assert command[-4:] == ['--virtual', '5', '--rate', '2']
+    assert 'test-drone-token' not in ' '.join(command)
+    fleet = child_environment('fleet', env)
+    assert fleet['TERRA_DRONE_TOKEN'] == 'test-drone-token'
+    assert not {'OPENAI_API_KEY', 'EARTHDATA_TOKEN', 'TERRA_WORKSPACE_TOKEN'} & fleet.keys()
+    with pytest.raises(ValueError):
+        runtime_environment({**source, 'TERRA_VIRTUAL_FLEET': '50'})
+    with pytest.raises(ValueError):
+        runtime_environment({**source, 'TERRA_DRONE_TOKEN': ''})
 
 
 def test_deployment_is_not_ready_until_both_worker_and_temporal_are_healthy(monkeypatch, tmp_path):

@@ -113,6 +113,7 @@ class Virtual:
         self.launch = launch
         self.lon, self.lat = offset(launch[0], launch[1], 25 * math.cos(self.slot * 1.3), 25 * math.sin(self.slot * 1.3))
         self.agl, self.speed, self.landed, self.ground_since, self.task = 0.0, 0.0, True, time.monotonic(), None
+        self.battery, self.launch_at = 100.0, None  # a new simulated deployment gets a fresh battery
 
     def _route(self, kind: str, p: dict) -> list[tuple[float, float]]:
         if kind == "search":
@@ -178,7 +179,7 @@ class Virtual:
         # Take off when there is work, one aircraft at a time (a few seconds apart, as a ground crew launches them);
         # land when told to come home and over the pad.
         if self.landed and (control or (kind and kind != "return" and self.battery > 30)):
-            self.launch_at = getattr(self, "launch_at", None) or time.monotonic() + self.slot * 8
+            self.launch_at = getattr(self, "launch_at", None) or time.monotonic() + self.slot * 2
             if control or time.monotonic() >= self.launch_at:
                 self.landed, self.launch_at = False, None
         if self.landed:

@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
 COPY backend ./backend
+COPY scripts/drone_bridge.py ./scripts/drone_bridge.py
 RUN pip install --no-cache-dir . \
     && python -c "import rasterio, h5py, numpy, scipy, pyproj; import terra.science" \
     && mkdir -p /data
