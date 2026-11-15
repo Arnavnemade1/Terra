@@ -104,7 +104,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 /* ---------- top bar ---------- */
 .topbar { grid-area: top; position: relative; z-index: 20; display: flex; align-items: center; gap: 14px; padding: 0 10px 0 14px; background: var(--surface); border-bottom: 1px solid var(--rule-2); min-width: 0; }
 .brand { display: inline-flex; align-items: center; gap: 8px; flex: none; }
-.brand svg { width: 24px; height: 24px; }
+.brand img { width: 24px; height: 24px; display: block; }
 .brand b { font-size: 17px; font-weight: 650; letter-spacing: -0.02em; }
 .product { padding-left: 14px; border-left: 1px solid var(--rule-2); color: var(--fg-3); white-space: nowrap; flex: none; }
 .area-picker { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; flex: 0 1 auto; padding-left: 14px; border-left: 1px solid var(--rule-2); }

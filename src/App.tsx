@@ -618,7 +618,7 @@ export default function App() {
     {/* ------------------------------------------------ top bar */}
     <header className="topbar" onClick={e => e.stopPropagation()}>
       <button className="brand" onClick={() => globe.current?.home()} aria-label="Terra: show the whole Earth">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 19 L9.5 6 L13.5 12.5 L16 9 L22 19 Z" fill="#ff5a1f" /><path d="M9.5 6 L12 10.2 L10.6 11.6 L9.5 10.4 L8.2 11.8 L7.4 10.5 Z" fill="#ffd2bd" /></svg>
+        <img src="/favicon.svg" alt="" width="24" height="24" />
         <b>Terra</b></button>
       <span className="product">Surface Change Analysis</span>
       <div className="area-picker">

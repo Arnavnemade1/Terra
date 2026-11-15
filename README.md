@@ -45,6 +45,10 @@ Keys (all optional, all stay on the server):
 
 Tests: `npm test` (pytest) and `npm run build` (TypeScript and Vite).
 
+## Deployment
+
+The Vercel site serves the landing page at `/` and the workspace at `/app`. GitHub CI checks Python tests, the API proxy and the production build. See [deployment setup](docs/DEPLOYMENT.md) for connecting the persistent backend through `TERRA_API_ORIGIN`; credentials stay on that backend. The complete product specification is in [docs/PROJECT.md](docs/PROJECT.md).
+
 ## NASA data used
 
 - **NISAR L2 GCOV** (NASA and ISRO), searched and read through the Alaska Satellite Facility (ASF DAAC) and NASA Earthdata.
