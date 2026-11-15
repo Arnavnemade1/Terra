@@ -24,3 +24,6 @@
 .verify-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; }
 .verify-msg { margin: 0; font-size: 12px; color: var(--fg-2); }
 .verify-note { margin: 0; font-size: 11px; line-height: 1.45; color: var(--fg-3); }
+.verify-row.alternative-explanation { border-left-color: #8fc8ff; }
+.verify-overall.alternative-explanation { color: #8fc8ff; }
+.verify-field p.verify-alt { color: #8fc8ff; }

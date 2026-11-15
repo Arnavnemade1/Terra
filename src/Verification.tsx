@@ -6,10 +6,10 @@ import './verification.css';
 export type Signature = { hypothesis: string; mechanism: string; consistent_with: string[]; question: string; needs: string[]; confidence: 'strong' | 'moderate' | 'weak'; basis: string };
 export type SignedSpot = { rank: number; direction: 'increase' | 'decrease'; area_km2: number | null; mean_change_db: number | null; centre: [number, number]; bounds: Bounds; signature?: Signature; leading_polarization?: string | null };
 type Judged = { note_id: number; t: number; drone_id: string; verdict: 'supports' | 'contradicts' | 'inconclusive'; reasons: string[]; surface_c?: number | null; cover?: string | null };
-type Row = { target_id: string; observations: number; aircraft: string[]; counts: Record<string, number>; overall: string; latest: Judged[] };
+type Row = { target_id: string; observations: number; aircraft: string[]; counts: Record<string, number>; overall: string; latest: Judged[]; alternatives?: string[] };
 
 const ago = (t: number) => { const s = Math.max(0, Date.now() / 1000 - t); return s < 60 ? `${Math.round(s)} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
-const OVERALL: Record<string, string> = { supported: 'Supported in the field', contradicted: 'Contradicted in the field', mixed: 'Mixed field evidence', inconclusive: 'Observed, inconclusive', 'not yet observed': 'Not yet observed' };
+const OVERALL: Record<string, string> = { supported: 'Supported in the field', contradicted: 'Contradicted in the field', mixed: 'Mixed field evidence', inconclusive: 'Observed, inconclusive', 'alternative explanation': 'Another explanation fits better', 'not yet observed': 'Not yet observed' };
 
 /**
  * Radar to drones and back. Every changed patch shows what its polarimetric change is consistent with and the
@@ -51,6 +51,7 @@ export default function Verification({ jobId, spots, fleetArea, onSpot, onWatch 
         {row && <div className="verify-field">
           <span className={`verify-overall ${row.overall.replace(/ /g, '-')}`}>{row.overall === 'supported' ? <CheckCircle2 size={13} /> : row.overall === 'contradicted' ? <XCircle size={13} /> : <CircleDashed size={13} />}{OVERALL[row.overall] ?? row.overall}</span>
           {row.observations > 0 && <small>{row.counts.supports} support · {row.counts.contradicts} contradict · {row.counts.inconclusive} inconclusive · {row.aircraft.join(', ')}</small>}
+          {row.alternatives?.map(a => <p key={a} className="verify-alt">Alternative: {a}.</p>)}
           {row.latest[0] && <p>{row.latest[0].drone_id}, {ago(row.latest[0].t)}: {row.latest[0].reasons[0]}.</p>}
         </div>}
       </li>; })}</ol>
@@ -59,6 +60,6 @@ export default function Verification({ jobId, spots, fleetArea, onSpot, onWatch 
       {dispatched && <button className="secondary" onClick={onWatch}>Watch the fleet</button>}
     </div>
     {msg && <p className="verify-msg">{msg}</p>}
-    <p className="verify-note">Drones judge only measured values: ESA WorldCover (2021, before the change) and Landsat surface temperature at the ground their camera sees. Field evidence is for you to weigh; soil moisture, wind on water and viewing geometry can mimic these signatures.</p>
+    <p className="verify-note">Drones judge only measured values at the ground their camera sees: Sentinel-2 before and after the radar dates (snow, cloud and plumes are recognised and named), ESA WorldCover (2021) and Landsat surface temperature. Field evidence is for you to weigh; soil moisture, wind on water and viewing geometry can mimic these signatures.</p>
   </section>;
 }
