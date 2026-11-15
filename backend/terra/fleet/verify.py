@@ -29,8 +29,9 @@ def change_of(result: dict) -> dict:
 def targets_from(result: dict, sensors_available: set[str]) -> list[dict]:
     """Fleet targets for every changed patch, most decisive first, each with its verification brief."""
     out = []
+    from ..signatures import signature
     for spot in change_of(result).get("hotspots") or []:
-        sig = spot.get("signature") or {}
+        sig = spot.get("signature") or signature(spot.get("by_polarization") or {}, spot["direction"])
         lat, lon = spot["centre"]
         w, s, e, n = spot["bounds"]
         radius = min(3000.0, max(150.0, _metres(w, s, e, n) / 2))

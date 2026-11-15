@@ -274,7 +274,19 @@ def _with_rewrite(item: dict, snapshot: dict) -> dict:
     rewrite = snapshot.get("narrative_rewrite")
     if rewrite and isinstance(item.get("result"), dict):
         item = {**item, "result": {**item["result"], "narrative": rewrite, "narrative_status": "ready", "narrative_note": None}}
-    return item
+    return with_signatures(item)
+
+
+def with_signatures(item: dict) -> dict:
+    """Patches measured before polarimetric signatures existed get them from their stored per-polarization change."""
+    from .signatures import signature
+    change = ((item.get("result") or {}).get("measurements") or {}).get("change") or {}
+    spots = change.get("hotspots") or []
+    if not spots or all(s.get("signature") for s in spots):
+        return item
+    signed = [s if s.get("signature") else {**s, "signature": signature(s.get("by_polarization") or {}, s["direction"])} for s in spots]
+    result = item["result"]; measurements = result["measurements"]
+    return {**item, "result": {**result, "measurements": {**measurements, "change": {**change, "hotspots": signed}}}}
 
 
 @app.get("/api/investigations")
