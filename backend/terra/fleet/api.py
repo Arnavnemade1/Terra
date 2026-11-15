@@ -582,15 +582,26 @@ def _investigation(investigation_id: str) -> dict:
     return item
 
 
-@router.post("/dispatch", dependencies=[Depends(operator)])
-async def dispatch(body: Dispatch):
+class DispatchError(ValueError):
+    """A dispatch the operator has to fix (no patches, too large an area, launch too far away)."""
+
+
+class UnknownInvestigation(DispatchError):
+    """No investigation with that id."""
+
+
+async def dispatch_investigation(investigation_id: str, launch: list[float] | None = None) -> dict:
     """Send the fleet to verify an investigation: every changed patch becomes a target carrying its polarimetric
-    hypothesis, the question to answer and the sensors that help; the area is the patches' extent."""
+    hypothesis, the question to answer and the sensors that help; the area is the patches' extent. Used by the
+    dispatch endpoint and by an area watch once an operator approves its proposal."""
     from .verify import change_of, targets_from
-    item = await _db(_investigation, body.investigation_id)
+    try:
+        item = await _db(_investigation, investigation_id)
+    except HTTPException as exc:
+        raise UnknownInvestigation(str(exc.detail)) from exc
     spots = change_of(item.get("result") or {}).get("hotspots") or []
     if not spots:
-        raise HTTPException(422, "This investigation found no changed patches to verify.")
+        raise DispatchError("This investigation found no changed patches to verify.")
     db = fleet_db()
     sensors = {x for d in await _db(db.drones) for x in d["capabilities"].get("sensors", [])}
     targets = targets_from(item["result"], sensors)
@@ -598,15 +609,23 @@ async def dispatch(body: Dispatch):
     pad = max(0.015, 0.25 * max(e - w, n - s))
     bbox = [max(-180.0, w - pad), max(-90.0, s - pad), min(180.0, e + pad), min(90.0, n + pad)]
     if bbox[2] - bbox[0] > 2 or bbox[3] - bbox[1] > 2:
-        raise HTTPException(422, "The changed patches span more than 2 degrees; verify a smaller investigation.")
-    if body.launch and not (bbox[0] - 0.25 <= body.launch[0] <= bbox[2] + 0.25 and bbox[1] - 0.25 <= body.launch[1] <= bbox[3] + 0.25):
-        raise HTTPException(422, "Launch from inside the patches' area or close to it.")
+        raise DispatchError("The changed patches span more than 2 degrees; verify a smaller investigation.")
+    if launch and not (bbox[0] - 0.25 <= launch[0] <= bbox[2] + 0.25 and bbox[1] - 0.25 <= launch[1] <= bbox[3] + 0.25):
+        raise DispatchError("Launch from inside the patches' area or close to it.")
     title = (item.get("title") or "Investigation").split(" · ")[0]
-    area = await _db(db.set_area, f"{title} · field verification", bbox, targets, body.investigation_id, "change", body.launch)
+    area = await _db(db.set_area, f"{title} · field verification", bbox, targets, investigation_id, "change", launch)
     await _db(db.message, "operator", "all", "dispatch", {"text": f"Verifying {len(targets)} radar patches from {title}: " +
                                                           "; ".join(f"{t['label']}" for t in targets[:4]) + ("…" if len(targets) > 4 else "")})
     running = await ensure_coordinator("verification dispatch")
     return {"area": area, "targets": targets, "coordinator": running}
+
+
+@router.post("/dispatch", dependencies=[Depends(operator)])
+async def dispatch(body: Dispatch):
+    try:
+        return await dispatch_investigation(body.investigation_id, body.launch)
+    except DispatchError as exc:
+        raise HTTPException(404 if isinstance(exc, UnknownInvestigation) else 422, str(exc)) from exc
 
 
 @router.get("/evidence/{investigation_id}", dependencies=[Depends(operator)])
