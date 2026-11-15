@@ -1,104 +1,174 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { Activity, ArrowRight, Check, ChevronDown, Clock3, Cpu, GitBranch, Layers, Plane, RefreshCw, Search, ShieldCheck, X } from 'lucide-react';
+import { Activity, ArrowDown, ArrowLeft, ArrowUpRight, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, Clock3, Copy, Download, ExternalLink, Filter, GitBranch, HelpCircle, List, Moon, Orbit, RefreshCw, Search, Server, Settings2, Sun, Workflow, X, Zap } from 'lucide-react';
 import { api } from './types';
 import './agentOperations.css';
 
 type Availability = 'working' | 'ready' | 'waiting' | 'blocked' | 'stale' | 'unavailable' | 'finished' | 'failed';
-type Agent = { id: string; run_id: string; kind: 'coordinator' | 'aircraft' | 'watch' | 'investigation'; label: string; status: string; availability: Availability; stage: string; progress: number | null; started_at: string; updated_at: string | null; closed_at: string | null; heartbeat_age_s: number | null; next_s: number | null; next_at: string | null; round: number | null; task: string | null; eligible_jobs: number | null; offered_jobs: number | null; details_live: boolean; events: {stage?: string; status: string; at: string}[]; activities: {name: string; label: string; state: string; attempt: number; heartbeat_age_s: number | null}[] };
-type Snapshot = { observed_at: string; stale: boolean; limited: boolean; temporal: {connected: boolean; queue: string; worker_available: boolean; workflow_pollers: number | null; activity_pollers: number | null; worker_heartbeat: boolean}; summary: {total: number; running: number; working: number; ready: number; waiting: number; attention: number}; agents: Agent[] };
-const titles = {coordinator: 'Fleet coordination', aircraft: 'Aircraft agent', watch: 'Area watch', investigation: 'Investigation'};
-const icons = {coordinator: GitBranch, aircraft: Plane, watch: Clock3, investigation: Layers};
-const labels: Record<Availability, string> = {working: 'Working', ready: 'Available', waiting: 'Waiting', blocked: 'Needs input', stale: 'Heartbeat late', unavailable: 'Unavailable', finished: 'Finished', failed: 'Failed'};
-const words = (s: string) => s.replaceAll('_', ' ').replace(/^./, c => c.toUpperCase());
-const age = (s: number | null) => s === null ? '—' : s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
-const time = (s: string | null) => s ? new Date(s).toLocaleString(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '—';
+type Agent = { id: string; run_id: string; kind: string; workflow_type: string; label: string; status: string; availability: Availability; stage: string; progress: number | null; started_at: string; closed_at: string | null; heartbeat_age_s: number | null; next_s: number | null; next_at: string | null; round: number | null; task: string | null; eligible_jobs: number | null; offered_jobs: number | null; details_live: boolean; activities: {name: string; label: string; state: string; attempt: number; heartbeat_age_s: number | null}[] };
+type Snapshot = {observed_at:string; stale:boolean; temporal:{connected:boolean; namespace:string; queue:string; worker_available:boolean; workflow_pollers:number|null; activity_pollers:number|null; worker_heartbeat:boolean}; agents:Agent[]; summary:{running:number; working:number; ready:number; waiting:number; attention:number}};
+type Page = {executions:Agent[]; next_page_token:string|null; counts:Record<string,number>|null; namespace:string; queue:string};
+type Reference = {id:string; run_id:string};
+type HistoryEvent = {id:number; type:string; at:string; activity_type?:string; activity_id?:string; scheduled_event_id?:number; started_event_id?:number; initiated_event_id?:number; timer_id?:string; attempt?:number; workflow_type?:string; task_queue?:string};
+type History = {execution:Agent; events:HistoryEvent[]; limited:boolean; namespace:string; queue:string; parent:Reference|null; children:(Reference & {workflow_type:string})[]};
+type View = {name:string; status:string; type:string; search:string};
+const availability:Record<Availability,string> = {working:'Working',ready:'Available',waiting:'Waiting',blocked:'Needs input',stale:'Heartbeat late',unavailable:'Unavailable',finished:'Finished',failed:'Failed'};
+const STATUSES = ['Running','Completed','Failed','Canceled','Terminated','ContinuedAsNew','TimedOut'];
+const TYPES = ['InvestigationWorkflow','AreaWatchWorkflow','FleetCoordinatorWorkflow','DroneAgentWorkflow'];
+const statusKey = (s:string) => s.replaceAll('_','').toLowerCase();
+const statusLabel = (s:string) => s === 'continued_as_new' || s === 'ContinuedAsNew' ? 'Continued as new' : s === 'timed_out' || s === 'TimedOut' ? 'Timed out' : s.replace(/^./,c=>c.toUpperCase());
+const words = (s:string) => s.replaceAll('_',' ').replace(/([a-z])([A-Z])/g,'$1 $2').replace(/^./,c=>c.toUpperCase());
+const duration = (seconds:number|null) => seconds === null || !Number.isFinite(seconds) ? '—' : seconds < 1 ? `${Math.round(seconds*1000)}ms` : seconds < 60 ? `${seconds.toFixed(1)}s` : seconds < 3600 ? `${Math.floor(seconds/60)}m ${Math.floor(seconds%60)}s` : `${Math.floor(seconds/3600)}h ${Math.floor(seconds/60)%60}m`;
+const date = (s:string|null, mode:string) => !s ? '—' : mode === 'relative' ? `${duration(Math.max(0,(Date.now()-Date.parse(s))/1000))} ago` : new Date(s).toLocaleString(undefined,{month:'short',day:'numeric',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false,...(mode === 'utc' ? {timeZone:'UTC'} : {})});
+const saved = <T,>(key:string,fallback:T):T => {try{return JSON.parse(localStorage.getItem(key)||'null')??fallback;}catch{return fallback;}};
+const store = (key:string,value:unknown) => {try{localStorage.setItem(key,JSON.stringify(value));}catch{/* Device preference only. */}};
+const initialReference = ():Reference|null => {const p=new URLSearchParams(location.search);return p.get('workflowId')&&p.get('runId') ? {id:p.get('workflowId')!,run_id:p.get('runId')!}:null;};
+const executionUrl = (reference:Reference|null) => {const u=new URL(location.href);for(const key of ['workflowId','runId'])u.searchParams.delete(key);if(reference){u.searchParams.set('workflowId',reference.id);u.searchParams.set('runId',reference.run_id);}return u;};
+function download(value:unknown,name:string){const u=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);}
 
-export default function AgentOperations() {
-  const [open, setOpen] = useState(false);
-  useEffect(() => { document.dispatchEvent(new CustomEvent('terra:operations', { detail: open })); return () => { document.dispatchEvent(new CustomEvent('terra:operations', { detail: false })); }; }, [open]);
-  return <Dialog.Root open={open} onOpenChange={setOpen}>
-    <Dialog.Trigger asChild><button className="agents-trigger" aria-label="Open agent operations" title="Agent operations"><Activity size={15}/><span>Agents</span></button></Dialog.Trigger>
-    {open && <Dialog.Portal><Dialog.Overlay className="agents-scrim"/><Dialog.Content className="agent-operations" aria-describedby="agents-description"><Operations/><Dialog.Close className="agents-close icon-btn" aria-label="Close agent operations"><X size={19}/></Dialog.Close></Dialog.Content></Dialog.Portal>}
+export default function AgentOperations({onStartWorkflow}:{onStartWorkflow:()=>void}){
+  const [open,setOpen]=useState(()=>Boolean(initialReference()));
+  useEffect(()=>{document.dispatchEvent(new CustomEvent('terra:operations',{detail:open}));return()=>{document.dispatchEvent(new CustomEvent('terra:operations',{detail:false}));};},[open]);
+  const close=(value:boolean)=>{setOpen(value);if(!value)history.replaceState(null,'',executionUrl(null));};
+  return <Dialog.Root open={open} onOpenChange={close}><Dialog.Trigger asChild><button className="agents-trigger" aria-label="Open agent operations" title="Agent workflows"><Activity size={15}/><span>Agents</span></button></Dialog.Trigger>
+    {open&&<Dialog.Portal><Dialog.Overlay className="temporal-overlay"/><Dialog.Content data-terra-operations className="temporal-console" aria-describedby="temporal-description"><Operations onStartWorkflow={()=>{close(false);onStartWorkflow();}}/></Dialog.Content></Dialog.Portal>}
   </Dialog.Root>;
 }
 
-function Operations() {
-  const [data, setData] = useState<Snapshot | null>(null);
-  const [error, setError] = useState('');
-  const [refresh, setRefresh] = useState(0);
-  const [filter, setFilter] = useState('active');
-  const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState<string | null>(null);
-  useEffect(() => {
-    const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>;
-    const update = async () => {
-      if (document.hidden) { timer = setTimeout(update, 5000); return; }
-      try { const value = await api<Snapshot>('/agents', {signal: controller.signal}); if (!controller.signal.aborted) { setData(value); setError(''); } }
-      catch { if (!controller.signal.aborted) setError('Agent status could not be refreshed. The last snapshot is retained.'); }
-      if (!controller.signal.aborted) timer = setTimeout(update, 5000);
+function Operations({onStartWorkflow}:{onStartWorkflow:()=>void}){
+  const [theme,setTheme]=useState(()=>saved('terra.temporal.theme','dark'));
+  const [section,setSection]=useState<'workflows'|'queues'|'settings'>('workflows');
+  const [reference,setReference]=useState<Reference|null>(initialReference);
+  const [snapshot,setSnapshot]=useState<Snapshot|null>(null);
+  const [page,setPage]=useState<Page|null>(null);
+  const [error,setError]=useState('');
+  const [auto,setAuto]=useState(true);
+  const [refresh,setRefresh]=useState(0);
+  const [status,setStatus]=useState('');
+  const [type,setType]=useState('');
+  const [search,setSearch]=useState('');
+  const [searchValue,setSearchValue]=useState('');
+  const [tokens,setTokens]=useState<string[]>(['']);
+  const [pageIndex,setPageIndex]=useState(0);
+  const [pageSize,setPageSize]=useState(20);
+  const [timeMode,setTimeMode]=useState(()=>saved('terra.temporal.time','utc'));
+  const [loading,setLoading]=useState(false);
+  const [filterOpen,setFilterOpen]=useState(false);
+  const [views,setViews]=useState<View[]>(()=>saved('terra.temporal.views',[]));
+  const [saveOpen,setSaveOpen]=useState(false);
+  const [viewName,setViewName]=useState('');
+  const [selected,setSelected]=useState<Set<string>>(new Set());
+  const token=tokens[pageIndex]||'';
+  const reset=useCallback(()=>{setTokens(['']);setPageIndex(0);setSelected(new Set());},[]);
+  const select=useCallback((value:Reference|null)=>{setReference(value);setSection('workflows');history.replaceState(null,'',executionUrl(value));},[]);
+  useEffect(()=>{store('terra.temporal.theme',theme);},[theme]);
+  useEffect(()=>{store('terra.temporal.time',timeMode);},[timeMode]);
+  useEffect(()=>{const t=setTimeout(()=>{setSearch(searchValue);reset();},300);return()=>clearTimeout(t);},[searchValue,reset]);
+  useEffect(()=>{
+    const controller=new AbortController();let timer:ReturnType<typeof setTimeout>;
+    const update=async()=>{
+      if(document.hidden){timer=setTimeout(update,5000);return;}
+      setLoading(true);
+      const query=new URLSearchParams({status,workflow_type:type,identifier:search,page_size:String(pageSize),page_token:token});
+      const results=await Promise.allSettled([api<Snapshot>('/agents',{signal:controller.signal}),api<Page>(`/agents/executions?${query}`,{signal:controller.signal})]);
+      if(controller.signal.aborted)return;
+      const [health,list]=results;if(health.status==='fulfilled')setSnapshot(health.value);if(list.status==='fulfilled')setPage(list.value);
+      setError(list.status==='rejected'?'Workflow visibility could not be refreshed. Previously observed data is retained.':health.status==='fulfilled'&&health.value.stale?'Temporal is unavailable. Availability is unconfirmed.':'');setLoading(false);
+      if(auto)timer=setTimeout(update,5000);
     };
-    void update(); return () => { controller.abort(); clearTimeout(timer); };
-  }, [refresh]);
-  const counts = useMemo(() => {
-    const n = {coordinator:0,aircraft:0,watch:0,investigation:0};
-    data?.agents.filter(a => a.status === 'running').forEach(a => n[a.kind]++); return n;
-  }, [data]);
-  const rows = (data?.agents || []).filter(a => filter === 'active' ? a.status === 'running' : filter === 'attention' ? ['blocked','stale','unavailable','failed'].includes(a.availability) : true)
-    .filter(a => `${a.label} ${a.id} ${titles[a.kind]} ${a.stage}`.toLowerCase().includes(query.toLowerCase()));
-  const t = data?.temporal;
-  const detail = data?.agents.find(a => `${a.id}:${a.run_id}` === selected);
-  return <>
-    <header className="agents-heading"><div className="agents-eyebrow"><Activity size={14}/> LIVE OPERATIONS <span>Temporal</span></div>
-      <Dialog.Title>Agent operations</Dialog.Title>
-      <Dialog.Description id="agents-description">Follow durable workflows from satellite acquisition to verified evidence and fleet coordination.</Dialog.Description>
-      <div className={`agents-service ${t?.worker_available && !error ? 'available' : 'unavailable'}`}><i/>
-        <strong>{!data ? 'Connecting to Temporal…' : t?.worker_available ? 'Workers accepting work' : t?.connected ? 'No available workers confirmed' : 'Temporal unavailable'}</strong>
-        {data && <span>Observed {new Date(data.observed_at).toLocaleTimeString()} · updates every 5s</span>}
-      </div>
-    </header>
-    {(error || data?.stale) && <div role="status" className="agents-alert">{error || 'Temporal is unreachable. These are the last observed statuses; current availability is unknown.'}<button onClick={() => setRefresh(r => r + 1)}>Retry</button></div>}
-    <div className="agents-metrics" aria-label="Agent summary">{[['Durable workflows', data?.summary.running],['Working',data?.summary.working],['Available',data?.summary.ready],['Waiting',data?.summary.waiting],['Need attention',data?.summary.attention]].map(([label,value]) => <div key={label}><span>{label}</span><strong>{value ?? '—'}</strong></div>)}</div>
-    <div className="agents-flow" aria-label="Durable workflow architecture">
-      <Flow icon={Clock3} name="Area watches" count={counts.watch} sub="Pass → acquisition"/><ArrowRight/>
-      <Flow icon={Layers} name="Investigations" count={counts.investigation} sub="Measure → verify → report"/><ArrowRight/>
-      <Flow icon={ShieldCheck} name="Human approval" sub="Required for watch dispatch"/><ArrowRight/>
-      <Flow icon={GitBranch} name="Coordinator" count={counts.coordinator} sub={`${counts.aircraft} aircraft agents`}/>
+    void update();return()=>{controller.abort();clearTimeout(timer);};
+  },[status,type,search,token,pageSize,auto,refresh]);
+  const chooseStatus=(v:string)=>{setStatus(v);reset();};
+  const chooseType=(v:string)=>{setType(v);reset();};
+  const rows=(page?.executions||[]).map(a=>snapshot?.agents.find(v=>v.id===a.id&&v.run_id===a.run_id)||a);
+  const t=snapshot?.temporal;
+  const counts=page?.counts;
+  const total=counts?Object.values(counts).reduce((a,b)=>a+b,0):null;
+  const filteredCount=total;
+  const referenceAgent=rows.find(a=>a.id===reference?.id&&a.run_id===reference?.run_id)||snapshot?.agents.find(a=>a.id===reference?.id&&a.run_id===reference?.run_id);
+  const toggleRow=(key:string)=>setSelected(old=>{const next=new Set(old);if(next.has(key))next.delete(key);else next.add(key);return next;});
+  const saveView=()=>{if(!viewName.trim())return;const next=[...views.filter(v=>v.name!==viewName.trim()),{name:viewName.trim(),status,type,search}].slice(-50);setViews(next);store('terra.temporal.views',next);setViewName('');setSaveOpen(false);};
+  return <div className={`temporal-app ${theme==='light'?'temporal-light':''}`}>
+    <Dialog.Title className="temporal-sr-only">Temporal agent workflows</Dialog.Title><Dialog.Description id="temporal-description" className="temporal-sr-only">Inspect Terra's live Temporal workflow executions, event history, task queues, and worker availability.</Dialog.Description>
+    <aside className="temporal-sidebar"><div className="temporal-brand"><TemporalMark/><span>Temporal</span><small>Terra</small></div>
+      <div className="temporal-namespace"><label htmlFor="temporal-namespace">NAMESPACE</label><div><Orbit size={16}/><select id="temporal-namespace" aria-label="Namespace"><option>{page?.namespace||t?.namespace||'Connecting…'}</option></select></div></div>
+      <nav aria-label="Temporal navigation"><button className={section==='workflows'?'active':''} onClick={()=>{select(null);setSection('workflows');}}><Workflow size={18}/><span>Workflows</span></button><button className={section==='queues'?'active':''} onClick={()=>{select(null);setSection('queues');}}><Server size={18}/><span>Task Queues</span></button></nav>
+      <div className="temporal-sidebar-bottom"><a href="https://docs.temporal.io/web-ui" target="_blank" rel="noreferrer"><HelpCircle size={17}/><span>Documentation</span><ExternalLink size={12}/></a><button className={section==='settings'?'active':''} onClick={()=>setSection('settings')}><Settings2 size={17}/><span>View settings</span></button><button onClick={()=>setTheme(theme==='dark'?'light':'dark')} aria-label={theme==='dark'?'Switch to light theme':'Switch to dark theme'}>{theme==='dark'?<Sun size={17}/>:<Moon size={17}/>}<span>{theme==='dark'?'Light mode':'Dark mode'}</span></button><Dialog.Close className="temporal-return"><ArrowLeft size={17}/><span>Back to Terra</span></Dialog.Close></div>
+    </aside>
+    <div className="temporal-main"><header className="temporal-topbar"><div className="temporal-breadcrumb"><span>{page?.namespace||t?.namespace||'Namespace'}</span><ChevronRight size={14}/><button onClick={()=>select(null)}>{section==='queues'?'Task Queues':section==='settings'?'Settings':'Workflows'}</button>{reference&&section==='workflows'&&<><ChevronRight size={14}/><span className="temporal-breadcrumb-id">{reference.id}</span></>}</div><span className={`temporal-connection ${t?.worker_available&&!error?'connected':''}`}><i/>{error?'Degraded':t?.worker_available?'Connected':snapshot?'Connection degraded':'Connecting'}</span><Dialog.Close className="temporal-icon" aria-label="Close agent operations"><X size={18}/></Dialog.Close></header>
+      <main className="temporal-content">{error&&<div className="temporal-alert" role="status"><Activity size={16}/><span>{error}</span><button onClick={()=>setRefresh(r=>r+1)}>Retry</button></div>}
+      {section==='settings'?<ViewSettings theme={theme} setTheme={setTheme} timeMode={timeMode} setTimeMode={setTimeMode} views={views} clearViews={()=>{setViews([]);store('terra.temporal.views',[]);}}/>:section==='queues'?<Queues snapshot={snapshot} timeMode={timeMode}/>:reference?<Execution key={`${reference.id}:${reference.run_id}`} reference={reference} initial={referenceAgent} snapshot={snapshot} auto={auto} refresh={refresh} timeMode={timeMode} onBack={()=>select(null)} onNavigate={select}/>:<>
+        <div className="temporal-page-title"><div><h1>{total!==null?total.toLocaleString()+' ':''}Workflows</h1><button className="temporal-refresh" onClick={()=>setRefresh(r=>r+1)} disabled={loading}><RefreshCw size={17}/>{loading?'Refreshing…':'Refresh'}</button></div><label className="temporal-auto"><input type="checkbox" checked={auto} onChange={e=>setAuto(e.target.checked)}/>Auto refresh</label></div>
+        <p className="temporal-observed">{snapshot?date(snapshot.observed_at,timeMode):'Reading workflow executions…'}{timeMode==='utc'?' UTC':''}</p>
+        <div className="temporal-status-counts">{STATUSES.filter(s=>(counts?.[s]||0)>0).map(s=><button key={s} className={status===s?'selected':''} onClick={()=>chooseStatus(status===s?'':s)} aria-pressed={status===s}><Status status={s} count={counts?.[s]}/></button>)}</div>
+        <button className="temporal-primary temporal-start-workflow" onClick={onStartWorkflow}>Start Workflow</button>
+        <div className="temporal-table-card"><div className="temporal-view-toolbar"><div className="temporal-view-tabs"><span className="temporal-view-active" title="Workflow executions"><List size={19}/></span><button className={status==='Running'?'on':''} title="Running workflows" aria-label="Show running workflows" onClick={()=>chooseStatus(status==='Running'?'':'Running')}><Zap size={18}/></button><button title="Filter workflow types" aria-label="Filter workflow types" onClick={()=>setFilterOpen(v=>!v)}><GitBranch size={18}/></button><button title="Change time format" aria-label="Change time format" onClick={()=>setTimeMode(timeMode==='utc'?'local':timeMode==='local'?'relative':'utc')}><Clock3 size={18}/></button></div>
+          <div className="temporal-saved"><select aria-label="Saved views" value="" onChange={e=>{const v=views.find(v=>v.name===e.target.value);if(v){setStatus(v.status);setType(v.type);setSearchValue(v.search);reset();}}}><option value="">Saved Views ({views.length}/50)</option>{views.map(v=><option key={v.name} value={v.name}>{v.name}</option>)}</select><button title="Save this view" aria-label="Save current workflow view" onClick={()=>setSaveOpen(v=>!v)}><ChevronDown size={16}/></button></div></div>
+          {saveOpen&&<form className="temporal-save-form" onSubmit={e=>{e.preventDefault();saveView();}}><input autoFocus value={viewName} onChange={e=>setViewName(e.target.value)} placeholder="Name this view" aria-label="Saved view name" maxLength={60}/><button className="temporal-primary" disabled={!viewName.trim()}>Save view</button><button type="button" onClick={()=>setSaveOpen(false)}>Cancel</button></form>}
+          <div className="temporal-filter-toolbar"><button className="temporal-button" onClick={()=>setFilterOpen(v=>!v)} aria-expanded={filterOpen}><Filter size={17}/>Add Filter</button>{(status||type||search)&&<><span className="temporal-filter-chip">{statusLabel(status)||'All statuses'}{type&&` · ${type}`}{search&&` · ${search}`}<button onClick={()=>{setStatus('');setType('');setSearchValue('');reset();}} aria-label="Clear workflow filters"><X size={12}/></button></span></>}
+            <label className="temporal-id-search"><Search size={15}/><input aria-label="Filter workflow ID prefix" placeholder="Filter by Workflow ID prefix" value={searchValue} onChange={e=>setSearchValue(e.target.value)}/></label>{selected.size>0&&<button className="temporal-button" onClick={()=>download(rows.filter(a=>selected.has(a.run_id)),'workflow-executions.json')}><Download size={14}/>{selected.size} selected</button>}</div>
+          {filterOpen&&<div className="temporal-filter-fields"><label>Execution Status<select value={status} onChange={e=>chooseStatus(e.target.value)}><option value="">All statuses</option>{STATUSES.map(s=><option key={s} value={s}>{statusLabel(s)}</option>)}</select></label><label>Workflow Type<select value={type} onChange={e=>chooseType(e.target.value)}><option value="">All workflow types</option>{TYPES.map(s=><option key={s}>{s}</option>)}</select></label><p>Filters search executions retained by Temporal.</p></div>}
+          <div className="temporal-table-scroll"><table className="temporal-executions"><thead><tr><th className="temporal-checkbox"><input type="checkbox" aria-label="Select this page" checked={rows.length>0&&rows.every(r=>selected.has(r.run_id))} onChange={e=>setSelected(e.target.checked?new Set(rows.map(a=>a.run_id)):new Set())}/></th><th>Status</th><th>Workflow ID</th><th>Workflow Type</th><th>Start Time <ArrowDown size={12}/></th><th>Agent Availability</th><th>Run ID</th></tr></thead><tbody>{rows.map(a=><tr key={a.run_id}><td><input type="checkbox" aria-label={`Select ${a.id} ${a.run_id}`} checked={selected.has(a.run_id)} onChange={()=>toggleRow(a.run_id)}/></td><td><div className="temporal-status-cell"><Zap size={16}/><Status status={a.status}/></div></td><td><button className="temporal-workflow-link" onClick={()=>select(a)}>{a.id}</button></td><td><span title={a.workflow_type}>{a.workflow_type}</span></td><td className="temporal-time-cell">{date(a.started_at,timeMode)}</td><td><AvailabilityBadge agent={a}/></td><td><span className="temporal-run-id">{a.run_id}</span></td></tr>)}</tbody></table></div>
+          {!rows.length&&<div className="temporal-empty"><Workflow size={30}/><h3>{loading?'Loading workflows…':'No workflows found'}</h3><p>{error?'Retry to reconnect to Temporal.':'Change your filters to find another execution.'}</p></div>}
+          <div className="temporal-table-footer"><span>{rows.length?`${pageIndex*pageSize+1}–${pageIndex*pageSize+rows.length}`:'0'}{filteredCount!==null?` of ${filteredCount}`:' executions'}</span><label>Rows per page<select value={pageSize} onChange={e=>{setPageSize(Number(e.target.value));reset();}}>{[10,20,50,100].map(n=><option key={n}>{n}</option>)}</select></label><div><button className="temporal-icon" aria-label="First page" disabled={pageIndex===0} onClick={()=>setPageIndex(0)}><ChevronsLeft size={17}/></button><button className="temporal-icon" aria-label="Previous page" disabled={pageIndex===0} onClick={()=>setPageIndex(i=>i-1)}><ChevronLeft size={17}/></button><button className="temporal-icon" aria-label="Next page" disabled={!page?.next_page_token} onClick={()=>{if(page?.next_page_token){setTokens(old=>[...old.slice(0,pageIndex+1),page.next_page_token!]);setPageIndex(i=>i+1);setSelected(new Set());}}}><ChevronRight size={17}/></button></div></div>
+        </div><p className="temporal-footnote">Live executions from Temporal · {t?.queue||'Connecting to task queue'} · {snapshot?.summary.ready??0} agents available · {snapshot?.summary.attention??0} need attention</p>
+      </>}
+      </main>
     </div>
-    <div className={`agents-workspace ${selected ? 'has-selection' : ''}`}>
-      <section className="agents-registry" aria-label="Agent registry">
-        <div className="agents-toolbar"><div className="agents-filters" aria-label="Filter agents">{[['active','Active'],['attention','Needs attention'],['all','Recent history']].map(([id,label]) => <button key={id} aria-pressed={filter === id} onClick={() => setFilter(id)}>{label}</button>)}</div>
-          <button className="icon-btn" onClick={() => setRefresh(r => r + 1)} aria-label="Refresh agent statuses"><RefreshCw size={15}/></button>
-        </div>
-        <label className="agents-search"><Search size={15}/><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Find an agent, area, or workflow…" aria-label="Find an agent"/></label>
-        <div className="agents-columns" aria-hidden="true"><span>Agent / workflow</span><span>Status</span><span>Heartbeat</span></div>
-        <div className="agents-rows">{rows.map(a => { const Icon = icons[a.kind]; return <Fragment key={`${a.id}-${a.run_id}`}><button className={`agent-row ${selected === `${a.id}:${a.run_id}` ? 'selected' : ''}`} onClick={() => setSelected(selected === `${a.id}:${a.run_id}` ? null : `${a.id}:${a.run_id}`)} aria-expanded={selected === `${a.id}:${a.run_id}`}>
-          <span className={`agent-glyph ${a.kind}`}><Icon size={18}/></span><span className="agent-identity"><b>{a.label}</b><small>{titles[a.kind]} · {words(a.stage)}</small></span>
-          <span className={`agent-status ${a.availability}`}><i/>{labels[a.availability]}</span><span className="agent-heartbeat">{age(a.heartbeat_age_s)}</span><ChevronDown size={14}/>
-        </button>{selected === `${a.id}:${a.run_id}` && <div className="agent-inline-details"><Details agent={a}/></div>}</Fragment>; })}
-        {!rows.length && <div className="agents-empty"><Cpu size={26}/><b>{!data ? 'Reading workflow states…' : 'No agents in this view'}</b><p>{!data ? 'Connecting to the task queue and execution registry.' : filter === 'active' ? 'Launch a fleet mission, start an investigation, or watch an area to create durable work.' : 'Try another filter or search.'}</p></div>}
-        </div>
-        {data?.limited && <p className="agents-footnote">Showing the first 200 active workflows. Narrow this view as the registry grows.</p>}
-        <p className="agents-footnote">Recent history includes up to 30 executions, including completed runs. Heartbeats apply to fleet agents; other workflows report activity state.</p>
-      </section>
-      <aside className="agent-inspector">{detail ? <Details agent={detail}/> : <><div className="inspector-title"><Cpu size={18}/><h3>Worker availability</h3></div><p>Available means Temporal has recently observed workers polling for both workflows and activities.</p><dl><dt>Workflow pollers</dt><dd>{t?.workflow_pollers ?? 'Unknown'}</dd><dt>Activity pollers</dt><dd>{t?.activity_pollers ?? 'Unknown'}</dd><dt>Runtime heartbeat</dt><dd>{t?.worker_heartbeat ? 'Fresh' : 'Not confirmed'}</dd><dt>Task queue</dt><dd>{t?.queue || '—'}</dd></dl><div className="agent-durability"><ShieldCheck size={20}/><b>Work survives restarts</b><p>Temporal persists progress, retries failed activities, and resumes waiting workflows. Select an agent to inspect its execution.</p></div><RenderReadout/></> }</aside>
-    </div>
-  </>;
+  </div>;
 }
-function Flow({icon: Icon,name,sub,count}:{icon:typeof Activity;name:string;sub:string;count?:number}) { return <div className="agents-flow-step"><Icon size={17}/><span><b>{name}{count !== undefined && <em>{count}</em>}</b><small>{sub}</small></span></div>; }
-function Details({agent:a}:{agent:Agent}) {
-  const stages = a.kind === 'investigation' ? ['discover','prepare','analyze','verify','synthesize','complete'] : a.kind === 'watch' ? ['waiting_pass','checking','investigating','proposal','dispatched'] : [];
-  const current = stages.indexOf(a.stage);
-  return <><div className="inspector-title"><Activity size={18}/><h3>{a.label}</h3></div><span className={`agent-status ${a.availability}`}><i/>{labels[a.availability]}</span>
-    <dl><dt>Workflow state</dt><dd>{words(a.status)}</dd><dt>Current step</dt><dd>{words(a.stage)}</dd><dt>Started</dt><dd>{time(a.started_at)}</dd>{a.task && <><dt>Assignment</dt><dd>{a.task}</dd></>}{a.eligible_jobs !== null && <><dt>Eligible jobs</dt><dd>{a.eligible_jobs} / {a.offered_jobs}</dd></>}{a.round !== null && <><dt>Coordination round</dt><dd>{a.round}</dd></>}{a.next_s !== null && <><dt>Next check</dt><dd>Within {age(a.next_s)}</dd></>}{a.next_at && <><dt>Next satellite pass</dt><dd>{time(a.next_at)}</dd></>}</dl>
-    {stages.length > 0 && <ol className="agent-steps" aria-label="Workflow stages">{stages.map((s,i) => <li key={s} className={i === current ? 'current' : i < current ? 'done' : ''}><i>{i < current ? <Check size={11}/> : i + 1}</i><span>{words(s)}</span></li>)}</ol>}
-    <h4>Current activities</h4>{a.activities.length ? a.activities.map((v,i) => <div key={`${v.name}-${i}`} className="agent-activity"><b>{v.label}</b><small>{words(v.state)} · attempt {v.attempt}{v.heartbeat_age_s !== null && ` · heartbeat ${age(v.heartbeat_age_s)} ago`}</small></div>) : <p>{!a.details_live && a.status === 'running' ? 'Live activity details could not be confirmed yet.' : a.status === 'running' ? 'No activity executing at this instant. The workflow may be waiting on a timer, signal, or child workflow.' : 'This execution has ended.'}</p>}
-    <details className="agent-execution"><summary>Execution identifiers</summary><label>Workflow</label><code>{a.id}</code><label>Run</label><code>{a.run_id}</code></details>
-    {a.events.length > 0 && <><h4>Recent checkpoints</h4><ul className="agent-checkpoints">{a.events.slice().reverse().map((e,i) => <li key={i}><span>{words(e.stage || e.status)}</span><time>{time(e.at)}</time></li>)}</ul></>}
-  </>;
+
+// Temporal UI mark, MIT licensed; see docs/licenses/temporal-ui-MIT.txt.
+function TemporalMark(){return <svg width="29" height="29" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" clipRule="evenodd" d="M5.047 5.047c-1.273.184-2.401.486-3.256.884-.484.224-.912.495-1.229.819C.242 7.077 0 7.499 0 8s.242.923.562 1.25c.317.324.745.595 1.23.82.854.397 1.982.7 3.255.883.184 1.273.486 2.401.884 3.256.224.484.495.912.819 1.23.327.32.749.561 1.25.561.502 0 .924-.243 1.25-.563.324-.317.593-.746.818-1.23.397-.856.698-1.984.881-3.258 1.274-.183 2.402-.484 3.258-.881.484-.225.913-.494 1.23-.818.32-.327.563-.748.563-1.25 0-.501-.242-.923-.562-1.25-.317-.324-.745-.595-1.23-.82-.854-.397-1.982-.7-3.255-.883-.184-1.273-.486-2.401-.884-3.256C9.845 1.307 9.574.88 9.25.562 8.923.242 8.501 0 8 0s-.923.242-1.25.562c-.324.317-.595.745-.82 1.23-.397.854-.7 1.982-.883 3.255M6.42 4.9a21 21 0 0 1 3.161 0c-.172-1.038-.424-1.91-.72-2.546-.186-.4-.374-.673-.542-.839-.168-.162-.272-.182-.319-.182s-.152.02-.318.182c-.168.165-.357.439-.542.838-.296.636-.549 1.509-.72 2.547M4.9 9.58a21 21 0 0 1 0-3.161c-1.038.172-1.91.424-2.546.72-.4.186-.673.374-.839.542-.162.168-.182.272-.182.319s.02.152.182.318c.165.168.439.357.838.542.636.296 1.509.549 2.547.72m1.351-3.33a20 20 0 0 1 4.031.054c1.4.162 2.569.465 3.365.835.4.186.674.374.839.542.162.167.181.272.181.318 0 .047-.019.151-.181.317-.165.168-.44.356-.84.542-.797.37-1.967.671-3.367.833l-.526.061-.06.525c-.162 1.401-.464 2.57-.834 3.368-.186.4-.373.674-.542.84-.165.162-.27.181-.316.181-.047 0-.152-.02-.318-.181-.168-.166-.357-.44-.542-.839-.371-.797-.674-1.965-.836-3.365a20 20 0 0 1-.054-4.031"/></svg>;}
+function Status({status,count}:{status:string;count?:number}){return <span className={`temporal-status ${statusKey(status)}`}>{count!==undefined&&`${count} `}{statusLabel(status).toUpperCase()}</span>;}
+function AvailabilityBadge({agent:a}:{agent:Agent}){return <span className={`temporal-availability ${a.availability}`}><i/>{availability[a.availability]||'Unconfirmed'}{a.heartbeat_age_s!==null&&<small title="Agent heartbeat age">{duration(a.heartbeat_age_s)}</small>}</span>;}
+function CopyButton({value,label='Copy'}:{value:string;label?:string}){const [copied,setCopied]=useState(false);useEffect(()=>{if(!copied)return;const t=setTimeout(()=>setCopied(false),1500);return()=>clearTimeout(t);},[copied]);return <button className="temporal-icon temporal-copy" aria-label={copied?'Copied':label} title={copied?'Copied':label} onClick={()=>{void navigator.clipboard?.writeText(value).then(()=>setCopied(true)).catch(()=>{});}}>{copied?<Check size={14}/>:<Copy size={14}/>}</button>;}
+
+function Execution({reference,initial,snapshot,auto,refresh,timeMode,onBack,onNavigate}:{reference:Reference;initial?:Agent;snapshot:Snapshot|null;auto:boolean;refresh:number;timeMode:string;onBack:()=>void;onNavigate:(r:Reference)=>void}){
+  const [tab,setTab]=useState('timeline');
+  const [data,setData]=useState<History|null>(null);
+  const [error,setError]=useState('');
+  const [retry,setRetry]=useState(0);
+  const [selected,setSelected]=useState<number|null>(null);
+  const [descending,setDescending]=useState(false);
+  useEffect(()=>{setData(null);setSelected(null);},[reference.id,reference.run_id]);
+  useEffect(()=>{const c=new AbortController();let timer:ReturnType<typeof setTimeout>;const update=async()=>{if(document.hidden){timer=setTimeout(update,5000);return;}try{const value=await api<History>(`/agents/${encodeURIComponent(reference.id)}/history?run_id=${encodeURIComponent(reference.run_id)}`,{signal:c.signal});if(c.signal.aborted)return;setData(value);setError('');if(auto&&value.execution.status==='running')timer=setTimeout(update,5000);}catch{if(!c.signal.aborted)setError('Event history is temporarily unavailable.');}};void update();return()=>{c.abort();clearTimeout(timer);};},[reference.id,reference.run_id,auto,refresh,retry]);
+  const a=data?.execution||initial;
+  const events=useMemo(()=>descending?data?.events.slice().reverse()||[]:data?.events||[],[data,descending]);
+  const event=data?.events.find(e=>e.id===selected);
+  const lastEvent=data?.events.at(-1)?.id;
+  const elapsed=a?(Date.parse(a.closed_at||new Date().toISOString())-Date.parse(a.started_at))/1000:null;
+  return <section className="temporal-execution-detail"><button className="temporal-back" onClick={onBack}><ArrowLeft size={15}/>Workflows</button><div className="temporal-detail-title"><h1>{reference.id}</h1><CopyButton value={reference.id} label="Copy Workflow ID"/><CopyButton value={executionUrl(reference).href} label="Copy execution link"/><button className="temporal-icon" aria-label="Refresh execution" onClick={()=>setRetry(n=>n+1)}><RefreshCw size={15}/></button></div>
+    <div className="temporal-summary"><div><label>Status</label>{a?<Status status={a.status}/>:<span>Loading…</span>}</div><div><label>Run ID</label><span className="temporal-mono">{reference.run_id}<CopyButton value={reference.run_id} label="Copy Run ID"/></span></div><div><label>Workflow Type</label><span>{a?.workflow_type||'—'}</span></div><div><label>Task Queue</label><span className="temporal-link-text">{data?.queue||snapshot?.temporal.queue||'—'}</span></div><div><label>Start Time</label><span>{a?date(a.started_at,timeMode):'—'}</span></div><div><label>Close Time</label><span>{a?date(a.closed_at,timeMode):'—'}</span></div><div><label>Run Duration</label><span>{duration(elapsed)}</span></div><div><label>Agent Availability</label>{a?<AvailabilityBadge agent={a}/>:<span>—</span>}</div></div>
+    <div className="temporal-detail-tabs" role="tablist" aria-label="Execution details">{[['timeline','Timeline',null],['history','Event History',lastEvent],['relationships','Relationships',data?(data.children.length+(data.parent?1:0)):null],['workers','Workers',snapshot?.temporal.workflow_pollers],['activities','Pending Activities',a?.activities.length],['metadata','Metadata',null]].map(([id,label,count])=><button key={id} role="tab" aria-selected={tab===id} onClick={()=>{setTab(String(id));setSelected(null);}}>{label}{count!==null&&count!==undefined&&<span>{count}</span>}</button>)}</div>
+    {error&&<div className="temporal-alert" role="status"><Activity size={16}/><span>{error}</span><button onClick={()=>setRetry(n=>n+1)}>Retry</button></div>}
+    {!data&&!error&&<div className="temporal-empty"><Clock3 size={24}/><h3>Loading execution history…</h3></div>}
+    {tab==='timeline'&&data&&<Timeline data={data} onEvent={setSelected} selected={selected}/>}
+    {tab==='history'&&data&&<><div className="temporal-section-heading"><h2>Event History</h2><div><button className="temporal-button" onClick={()=>setDescending(v=>!v)}><ArrowDown size={14}/>{descending?'Newest first':'Oldest first'}</button><button className="temporal-button" onClick={()=>download(data.events,`${reference.id}-history.json`)}><Download size={15}/>Download JSON</button></div></div><div className="temporal-event-list"><div className="temporal-event-columns"><span>Event ID</span><span>Event Type</span><span>Time</span></div>{events.map(e=><button key={e.id} className={selected===e.id?'selected':''} onClick={()=>setSelected(selected===e.id?null:e.id)}><code>{e.id}</code><span><EventGlyph type={e.type}/>{words(e.type)}</span><time>{date(e.at,timeMode)}</time><ChevronRight size={14}/></button>)}</div></>}
+    {event&&(tab==='history'||tab==='timeline')&&<div className="temporal-event-inspector"><div><h3>Event {event.id} · {words(event.type)}</h3><button className="temporal-icon" aria-label="Close event details" onClick={()=>setSelected(null)}><X size={16}/></button></div><pre>{JSON.stringify(event,null,2)}</pre></div>}
+    {tab==='relationships'&&data&&<><div className="temporal-section-heading"><h2>Relationships</h2></div><div className="temporal-relationships">{data.parent&&<Relationship title="Parent Workflow" reference={data.parent} onNavigate={onNavigate}/>}<div className="temporal-relationship-current"><Workflow size={20}/><div><small>THIS EXECUTION</small><b>{reference.id}</b><Status status={a?.status||'unknown'}/></div></div>{data.children.map(c=><Relationship key={c.run_id} title="Child Workflow" reference={c} onNavigate={onNavigate}/>)}</div>{!data.parent&&!data.children.length&&<p className="temporal-muted">This execution has no recorded parent or pending child workflows.</p>}</>}
+    {tab==='workers'&&<Queues snapshot={snapshot} timeMode={timeMode} compact/>}
+    {tab==='activities'&&<><div className="temporal-section-heading"><h2>Pending Activities</h2></div>{a?.activities.length?<div className="temporal-table-card temporal-table-scroll"><table className="temporal-simple-table"><thead><tr><th>Activity Type</th><th>State</th><th>Attempt</th><th>Heartbeat</th></tr></thead><tbody>{a.activities.map((v,i)=><tr key={`${v.name}-${i}`}><td>{v.name}</td><td>{words(v.state)}</td><td>{v.attempt}</td><td>{v.heartbeat_age_s===null?'—':duration(v.heartbeat_age_s)+' ago'}</td></tr>)}</tbody></table></div>:<div className="temporal-empty"><Check size={26}/><h3>No pending activities</h3><p>{a?.status==='running'?'The workflow may be waiting on a timer, a signal, or a child workflow.':'This execution has ended.'}</p></div>}</>}
+    {tab==='metadata'&&a&&<><div className="temporal-section-heading"><h2>Execution Metadata</h2></div><div className="temporal-metadata"><dl>{[['Namespace',data?.namespace||snapshot?.temporal.namespace],['Current step',words(a.stage)],['Task',a.task],['Agent heartbeat',a.heartbeat_age_s===null?null:duration(a.heartbeat_age_s)+' ago'],['Coordination round',a.round],['Next check',a.next_s===null?null:duration(a.next_s)],['Next pass',a.next_at?date(a.next_at,timeMode):null],['Eligible jobs',a.eligible_jobs===null?null:`${a.eligible_jobs} / ${a.offered_jobs}`]].filter(([,v])=>v!==null&&v!==undefined).map(([key,value])=><div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl><p>Payload values and provider credentials stay private in this shared workspace.</p></div></>}
+    {data?.limited&&(tab==='timeline'||tab==='history')&&<p className="temporal-footnote">Showing the latest {data.events.length} events of this run. Event IDs retain their original Temporal sequence.</p>}
+  </section>;
 }
-function RenderReadout() {
-  const [marks,setMarks] = useState<PerformanceEntry[]>([]);
-  useEffect(() => {const read=()=>setMarks(performance.getEntriesByType('mark').filter(m=>m.name.startsWith('terra:')));read();const timer=setInterval(read,2000);return()=>clearInterval(timer);},[]);
-  return <div className="agents-render"><h4>Scene performance</h4>{[['terra:first-frame','First frame'],['terra:map-ready','Map ready'],['terra:terrain-ready','3D terrain']].map(([id,label]) => {const m=marks.find(x=>x.name===id);return <div key={id}><span>{label}</span><b>{m ? `${(m.startTime/1000).toFixed(1)}s` : '—'}</b></div>;})}<div><span>Photoreal load</span><b>{performance.getEntriesByName('terra:photoreal-load').length ? `${(performance.getEntriesByName('terra:photoreal-load').at(-1)!.duration / 1000).toFixed(1)}s` : '—'}</b></div><small>Measured in this browser, from navigation (Photoreal: from selection). Target: map ready within 15s.</small></div>;
+
+function EventGlyph({type}:{type:string}){return type.includes('Activity')?<Activity size={15} className="event-activity"/>:type.includes('Timer')?<Clock3 size={15} className="event-timer"/>:type.includes('Signal')?<Zap size={15} className="event-signal"/>:<Workflow size={15} className="event-workflow"/>;}
+function Timeline({data,onEvent,selected}:{data:History;onEvent:(id:number)=>void;selected:number|null}){
+  const [showTasks,setShowTasks]=useState(false);
+  const items=useMemo(()=>{
+    const starts=new Map<number,{event:HistoryEvent;end?:HistoryEvent;kind:string;name:string}>();
+    for(const e of data.events){if(e.type==='ActivityTaskScheduled'||e.type==='WorkflowTaskScheduled'||e.type==='TimerStarted')starts.set(e.id,{event:e,kind:e.type.startsWith('Activity')?'activity':e.type.startsWith('Timer')?'timer':'workflow',name:e.activity_type||(e.timer_id?`Timer ${e.timer_id}`:'Workflow Task')});
+      else{const key=e.scheduled_event_id||e.started_event_id;if(key&&starts.has(key)&&/(Completed|Failed|TimedOut|Canceled|Fired)$/.test(e.type))starts.get(key)!.end=e;}}
+    return [...starts.values()].filter(v=>showTasks||v.kind!=='workflow');
+  },[data,showTasks]);
+  const end=Date.parse(data.events.at(-1)?.at||data.execution.closed_at||new Date().toISOString());
+  const start=Date.parse(data.events[0]?.at||data.execution.started_at);const span=Math.max(1,end-start);
+  const position=(at:string)=>Math.max(0,Math.min(100,(Date.parse(at)-start)/span*100));
+  return <><div className="temporal-section-heading"><h2>Timeline</h2><label className="temporal-auto"><input type="checkbox" checked={showTasks} onChange={e=>setShowTasks(e.target.checked)}/>Show Workflow Tasks</label></div><div className="temporal-timeline-scroll"><div className="temporal-timeline"><div className="temporal-timeline-axis"><span>Event</span><div>{[0,.25,.5,.75,1].map(n=><span key={n} style={{left:`${n*100}%`}}>{duration(span*n/1000)}</span>)}</div></div>{items.map(v=>{const left=position(v.event.at),right=v.end?position(v.end.at):left;return <button key={v.event.id} className={`temporal-timeline-row ${selected===v.event.id?'selected':''}`} onClick={()=>onEvent(v.event.id)}><span><EventGlyph type={v.event.type}/><b>{v.name}</b><small>{v.event.id}</small></span><div><i className={`temporal-timeline-bar ${v.kind} ${v.end&&/(Failed|TimedOut)$/.test(v.end.type)?'failed':''}`} style={{left:`${left}%`,width:`${Math.max(.8,right-left)}%`}} title={`${v.name} · ${v.end?duration((Date.parse(v.end.at)-Date.parse(v.event.at))/1000):'Started'}`}/></div></button>;})}{!items.length&&<div className="temporal-empty"><Clock3 size={24}/><h3>No activity or timer spans in this history window</h3><p>Show Workflow Tasks or open Event History to inspect every recorded event.</p></div>}</div></div><div className="temporal-timeline-legend"><span><i className="event-activity"/>Activity</span><span><i className="event-timer"/>Timer</span><span><i className="event-workflow"/>Workflow Task</span></div></>;
 }
+function Relationship({title,reference,onNavigate}:{title:string;reference:Reference;onNavigate:(r:Reference)=>void}){return <div className="temporal-relationship"><GitBranch size={19}/><div><small>{title}</small><button className="temporal-workflow-link" onClick={()=>onNavigate(reference)}>{reference.id}<ArrowUpRight size={13}/></button><code>{reference.run_id}</code></div></div>;}
+function Queues({snapshot,timeMode,compact=false}:{snapshot:Snapshot|null;timeMode:string;compact?:boolean}){const t=snapshot?.temporal;return <section><div className="temporal-section-heading"><h1>{compact?'Workers':'Task Queues'}</h1></div><p className="temporal-muted">{t?.queue||'Connecting to task queue…'}</p><div className="temporal-table-card temporal-table-scroll"><table className="temporal-simple-table"><thead><tr><th>Task Queue</th><th>Type</th><th>Recent Pollers</th><th>Availability</th></tr></thead><tbody>{[['Workflow',t?.workflow_pollers],['Activity',t?.activity_pollers]].map(([kind,count])=><tr key={kind}><td className="temporal-link-text">{t?.queue||'—'}</td><td>{kind}</td><td>{count??'Unknown'}</td><td><span className={`temporal-availability ${Number(count)>0?'ready':'unavailable'}`}><i/>{Number(count)>0?'Polling':'Not confirmed'}</span></td></tr>)}</tbody></table></div><div className="temporal-worker-summary"><Server size={22}/><div><h3>{t?.worker_available?'Workers are polling this task queue':'Worker availability is not confirmed'}</h3><p>{t?.worker_heartbeat?'Runtime heartbeat is fresh.':'Runtime heartbeat is not confirmed.'} Last observed {snapshot?date(snapshot.observed_at,timeMode):'—'}.</p><p>Poller counts report recent connections; they do not represent free execution slots.</p></div></div></section>;}
+function ViewSettings({theme,setTheme,timeMode,setTimeMode,views,clearViews}:{theme:string;setTheme:(s:string)=>void;timeMode:string;setTimeMode:(s:string)=>void;views:View[];clearViews:()=>void}){return <section className="temporal-settings"><h1>View settings</h1><label>Theme<select value={theme} onChange={e=>setTheme(e.target.value)}><option value="dark">Dark</option><option value="light">Light</option></select></label><label>Time format<select value={timeMode} onChange={e=>setTimeMode(e.target.value)}><option value="utc">UTC</option><option value="local">Local</option><option value="relative">Relative</option></select></label><div><h3>Saved Views</h3><p>{views.length} of 50 saved in this browser.</p><button className="temporal-button" disabled={!views.length} onClick={clearViews}>Clear saved views</button></div><RenderReadout/></section>;}
+function RenderReadout(){return <section className="temporal-render-settings"><h3>Scene performance</h3>{[['terra:first-frame','First frame'],['terra:terrain-ready','Terrain ready'],['terra:map-ready','Usable map']].map(([id,label])=>{const mark=performance.getEntriesByName(id).at(-1);return <div key={id}><span>{label}</span><code>{mark?duration(mark.startTime/1000):'—'}</code></div>;})}<p>Measured in this browser from navigation. Target: a usable map within 15 seconds.</p></section>;}

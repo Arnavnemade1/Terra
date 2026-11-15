@@ -27,12 +27,13 @@ export class SceneBudget {
     this.removers.push(v.scene.globe.tileLoadProgressEvent.addEventListener((n: number) => { this.pending = n; }));
     this.removers.push(v.camera.moveStart.addEventListener(() => { this.moving = true; }));
     this.removers.push(v.camera.moveEnd.addEventListener(() => { this.moving = false; }));
-    let operationsOpen = false;
+    let operationsOpen = Boolean(document.querySelector('[data-terra-operations]'));
     const visibility = () => { v.useDefaultRenderLoop = !document.hidden && !operationsOpen; this.samples = []; this.lastFrame = 0; if (!document.hidden) v.scene.requestRender(); };
     const operations = (event: Event) => { operationsOpen = Boolean((event as CustomEvent).detail); visibility(); };
     document.addEventListener('terra:operations', operations);
     this.removers.push(() => document.removeEventListener('terra:operations', operations));
     document.addEventListener('visibilitychange', visibility);
+    visibility();
     this.removers.push(() => document.removeEventListener('visibilitychange', visibility));
     this.configure('balanced');
   }
