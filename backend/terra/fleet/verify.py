@@ -6,10 +6,16 @@ evidence: the drones' field notes inside each patch are judged against that hypo
 summarised per patch: how many observations, by which aircraft, supporting / contradicting / inconclusive, and why.
 Judgements use only measured values (ESA WorldCover before the change, Landsat surface temperature); a verdict is
 evidence for a person to weigh, never a classification.
+record / geojson: the evidence as kept with the investigation (its report shows it) and as a GeoJSON file of patches
+and observation points.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import time
+from datetime import datetime, timezone
 
 from ..signatures import judge
 
@@ -74,5 +80,56 @@ def evidence(result: dict, notes: list[dict], context: dict | None = None) -> li
                    "mixed" if sup and con else "inconclusive")
         rows.append({"target_id": t["id"], "label": t["label"], "lon": t["lon"], "lat": t["lat"], "brief": b, "observations": len(judged),
                      "aircraft": sorted({j["drone_id"] for j in judged}), "counts": counts, "overall": overall, "latest": judged[:5],
-                     "alternatives": sorted({j["alternative"] for j in judged if j.get("alternative")})})
+                     "alternatives": sorted({j["alternative"] for j in judged if j.get("alternative")}),
+                     # Every observation as a map point (lon, lat, verdict, note id), so the report can show where each look landed.
+                     "points": [[round(j["lon"], 6), round(j["lat"], 6), j["verdict"], j["note_id"]] for j in judged],
+                     "judged": judged})
     return rows
+
+
+METHOD = ("Each field note inside a patch is judged against the patch's polarimetric hypothesis using only measured values "
+          "(Sentinel-2 before and after the radar dates, ESA WorldCover 2021, Landsat surface temperature) at the ground point "
+          "under the aircraft's camera. Evidence to weigh, not a classification, and not on-site imagery.")
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def fingerprint(rows: list[dict]) -> str:
+    """What the evidence is made of (which notes, judged how): unchanged evidence is not stored again."""
+    seen = sorted((r["target_id"], j["note_id"], j["verdict"]) for r in rows for j in r.get("judged", []))
+    return hashlib.sha256(json.dumps(seen).encode()).hexdigest()[:16]
+
+
+def public(rows: list[dict]) -> list[dict]:
+    """The rows without the full observation lists (those go to the GeoJSON file)."""
+    return [{k: v for k, v in r.items() if k != "judged"} for r in rows]
+
+
+def record(rows: list[dict], aircraft: list[dict], artifact: str | None) -> dict:
+    """The field evidence as kept with the investigation, so the report and its data keep it after the fleet moves on."""
+    return {"recorded_at": _iso(time.time()), "fingerprint": fingerprint(rows), "observations": sum(r["observations"] for r in rows),
+            "totals": {k: sum(r["counts"][k] for r in rows) for k in ("supports", "contradicts", "inconclusive")},
+            "aircraft": aircraft, "patches": public(rows), "method": METHOD, "artifact": artifact}
+
+
+def geojson(investigation_id: str, title: str, rows: list[dict], aircraft: list[dict]) -> dict:
+    """Patches (polygons, with the field verdict) and every judged observation (points), for GIS tools."""
+    origin = {a["id"]: a.get("origin") for a in aircraft}
+    features = []
+    for r in rows:
+        b = r["brief"]; w, s, e, n = b["bounds"]
+        features.append({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]},
+                         "properties": {"kind": "patch", "patch": b["rank"], "direction": b["direction"], "hypothesis": b.get("hypothesis"),
+                                        "consistent_with": ", ".join(b.get("consistent_with") or []), "question": b.get("question"),
+                                        "mean_change_db": b.get("mean_change_db"), "area_km2": b.get("area_km2"), "field_verdict": r["overall"],
+                                        "observations": r["observations"], **r["counts"], "aircraft": ", ".join(r["aircraft"])}})
+        for j in r.get("judged", []):
+            features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [j["lon"], j["lat"]]},
+                             "properties": {"kind": "observation", "patch": b["rank"], "note_id": j["note_id"], "time": _iso(j["t"]),
+                                            "aircraft": j["drone_id"], "aircraft_origin": origin.get(j["drone_id"]), "verdict": j["verdict"],
+                                            "reasons": "; ".join(j["reasons"]), "alternative": j.get("alternative"),
+                                            "surface_c": j.get("surface_c"), "land_cover": j.get("cover")}})
+    return {"type": "FeatureCollection", "name": f"Terra field verification · {title}",
+            "properties": {"investigation_id": investigation_id, "generated": _iso(time.time()), "method": METHOD}, "features": features}

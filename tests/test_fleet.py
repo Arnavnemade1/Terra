@@ -512,6 +512,48 @@ def test_agents_judge_what_they_see_against_the_patch(client, monkeypatch, tmp_p
     assert two["overall"] == "not yet observed" and ev["totals"]["supports"] == 1
 
 
+def test_field_evidence_is_kept_with_the_investigation_and_its_report(client, monkeypatch, tmp_path):
+    import json
+    import numpy as np
+    _investigation_with_patches()
+    (api.get_settings().artifacts / "inv-etna").mkdir(parents=True, exist_ok=True)
+    client.post("/api/fleet/dispatch", json={"investigation_id": "inv-etna"})
+    assert client.get("/api/fleet/evidence/inv-etna").json()["recorded_at"] is None  # nothing observed yet: nothing kept
+    _register(client, "d0", origin="sitl"); _fly(client, "d0", 1, lon=15.06, lat=37.75, agl=120, gimbal={"heading_deg": 0, "pitch_deg": -89})
+    data = {"cover": {"codes": np.full((10, 10), 10, dtype=np.uint8), "bounds": [14.9, 37.6, 15.2, 37.85], "names": {10: "Tree cover"}}}
+    monkeypatch.setattr("terra.fleet.observe.area_data", lambda bbox, investigation: data)
+    monkeypatch.setattr(activities, "_elevation", lambda lon, lat: 1500.0)
+    db = FleetDB(tmp_path / "terra.db")
+    task = db.create_task("d0", "orbit", "Orbit Patch 1", {"lon": 15.06, "lat": 37.75, "radius_m": 200, "agl_m": 120}, "coordinator", "test", 0.9, "orbit:patch-1", None)
+    client.post(f"/api/fleet/tasks/{task['id']}/ack", json={"id": "d0", "status": "active"}, headers=AUTH)
+    activities.run_drone_agent_round({"drone_id": "d0", "round": 0})
+    # The workspace ties an aircraft to the patch it verifies through its task's job key.
+    assert next(d for d in client.get("/api/fleet").json()["drones"] if d["id"] == "d0")["task"]["job_key"] == "orbit:patch-1"
+
+    ev = client.get("/api/fleet/evidence/inv-etna").json()
+    assert ev["aircraft"] == [{"id": "d0", "name": "d0", "origin": "sitl"}] and ev["artifact"] == "field-verification.geojson"
+    one = next(p for p in ev["patches"] if p["target_id"] == "patch-1")
+    assert "judged" not in one and len(one["points"]) == 1 and one["points"][0][2] == one["latest"][0]["verdict"]
+    # Kept with the investigation: the report shows it after the fleet moves on, and the investigation API returns it.
+    kept = api.get_store().investigation("inv-etna")["field_verification"]
+    assert kept["observations"] == 1 and kept["aircraft"][0]["origin"] == "sitl" and kept["patches"][0]["target_id"] == "patch-1"
+
+    async def offline():
+        raise RuntimeError("no Temporal in tests")
+    monkeypatch.setattr(api, "temporal_client", offline)
+    assert client.get("/api/investigations/inv-etna").json()["field_verification"]["fingerprint"] == kept["fingerprint"]
+    # Unchanged evidence is not rewritten.
+    assert client.get("/api/fleet/evidence/inv-etna").json()["recorded_at"] == kept["recorded_at"]
+    # A GIS file of the patches and every judged observation, served with the investigation's other outputs.
+    reply = client.get("/api/investigations/inv-etna/artifacts/field-verification.geojson")
+    assert reply.status_code == 200
+    features = json.loads(reply.content)["features"]
+    patch = next(f for f in features if f["properties"]["kind"] == "patch" and f["properties"]["patch"] == 1)
+    point = next(f for f in features if f["properties"]["kind"] == "observation")
+    assert patch["geometry"]["type"] == "Polygon" and patch["properties"]["field_verdict"] == one["overall"]
+    assert point["geometry"]["coordinates"] == [pytest.approx(15.06, abs=0.01), pytest.approx(37.75, abs=0.01)] and point["properties"]["aircraft_origin"] == "sitl"
+
+
 def test_hosted_area_watches_share_the_simulation_capability_and_fail_closed(client, monkeypatch):
     monkeypatch.setattr("terra.fleet.api.LOCAL", {"127.0.0.1"})
     monkeypatch.setenv("TERRA_FLEET", "virtual")

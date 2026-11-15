@@ -20,7 +20,8 @@ another machine always need the token, and an aircraft's own token never grants 
   GET  /api/fleet/operations           reserved airspace as operational intents (ASTM F3548-shaped)
   POST /api/fleet/command              fleet-wide: hold (every airborne aircraft holds), recall (all return), resume
   POST /api/fleet/dispatch             verify an investigation: each changed patch becomes a target with its question
-  GET  /api/fleet/evidence/{id}        the drones' field evidence for each patch of an investigation, judged
+  GET  /api/fleet/evidence/{id}        the drones' field evidence for each patch of an investigation, judged (kept with
+                                       the investigation and written as field-verification.geojson when it changes)
   POST /api/fleet/enroll               a per-aircraft token and the command that connects it (this machine only)
   GET  /api/fleet/enrollments          issued aircraft tokens (never the tokens themselves)
   POST /api/fleet/enrollments/{id}/revoke   stop accepting an aircraft's token
@@ -30,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import math
@@ -304,7 +306,8 @@ async def ensure_coordinator(reason: str) -> bool:
 def _task_view(task: dict | None) -> dict | None:
     if not task:
         return None
-    return {k: task[k] for k in ("id", "kind", "label", "params", "status", "created_by", "reason", "created_at", "updated_at", "acked_at")}
+    # job_key names the coordinator's job (orbit:patch-3): the workspace uses it to tie an aircraft to the patch it verifies.
+    return {k: task.get(k) for k in ("id", "kind", "label", "params", "status", "created_by", "reason", "created_at", "updated_at", "acked_at", "job_key")}
 
 
 # ---------------------------------------------------------------- ground stations
@@ -650,6 +653,34 @@ async def field_evidence(investigation_id: str):
         notes = await asyncio.to_thread(enrich)
     rows = evidence(item.get("result") or {}, notes)
     totals = {k: sum(r["counts"][k] for r in rows) for k in ("supports", "contradicts", "inconclusive")}
-    return {"investigation_id": investigation_id, "patches": rows, "totals": totals,
-            "method": "Each field note inside a patch is judged against the patch's polarimetric hypothesis using only measured values "
-                      "(ESA WorldCover 2021, Landsat surface temperature). Evidence to weigh, not a classification."}
+    seen = {d for r in rows for d in r["aircraft"]}
+    known = {d["id"]: d for d in await _db(fleet_db().drones, 10 ** 9)} if seen else {}
+    aircraft = [{"id": d, "name": (known.get(d) or {}).get("name") or d, "origin": (known.get(d) or {}).get("origin")} for d in sorted(seen)]
+    recorded = await _db(_keep_evidence, item, rows, aircraft)
+    from .verify import METHOD, public
+    return {"investigation_id": investigation_id, "patches": public(rows), "totals": totals, "aircraft": aircraft, "method": METHOD,
+            "recorded_at": (recorded or {}).get("recorded_at"), "artifact": (recorded or {}).get("artifact")}
+
+
+def _keep_evidence(item: dict, rows: list[dict], aircraft: list[dict]) -> dict | None:
+    """Keep the latest field evidence with the investigation (its report and data show it after the fleet moves on) and
+    write it as field-verification.geojson beside the investigation's other outputs. Unchanged evidence is not rewritten."""
+    from ..config import get_settings
+    from ..store import Store
+    from .verify import fingerprint, geojson, record
+    store = Store(get_settings().database)
+    current = store.investigation(item["id"]) or item
+    kept = current.get("field_verification")
+    if not any(r["observations"] for r in rows) or (kept and kept.get("fingerprint") == fingerprint(rows)):
+        return kept
+    directory = get_settings().artifacts / item["id"]
+    artifact = None
+    if directory.is_dir() and not directory.is_symlink():
+        title = (item.get("title") or "Investigation").split(" · ")[0]
+        path = directory / "field-verification.geojson"; tmp = directory / ".field-verification.geojson.tmp"
+        tmp.write_text(json.dumps(geojson(item["id"], title, rows, aircraft), separators=(",", ":")))
+        tmp.replace(path); artifact = path.name
+    snapshot = record(rows, aircraft, artifact)
+    latest = store.investigation(item["id"]) or current  # re-read: keep anything saved meanwhile
+    store.save_investigation({**latest, "field_verification": snapshot})
+    return snapshot

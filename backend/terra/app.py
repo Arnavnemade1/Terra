@@ -293,6 +293,9 @@ def _with_rewrite(item: dict, snapshot: dict) -> dict:
     rewrite = snapshot.get("narrative_rewrite")
     if rewrite and isinstance(item.get("result"), dict):
         item = {**item, "result": {**item["result"], "narrative": rewrite, "narrative_status": "ready", "narrative_note": None}}
+    # The drones' field evidence, kept with the investigation once aircraft have looked at its patches (fleet/api.py).
+    if snapshot.get("field_verification"):
+        item = {**item, "field_verification": snapshot["field_verification"]}
     return with_signatures(item)
 
 
