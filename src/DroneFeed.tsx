@@ -100,6 +100,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   const keys = useRef(new Set<string>());
   const live = useRef({ zoom, aim, flying, nadir }); live.current = { zoom, aim, flying, nadir };
   const idRef = useRef(id); idRef.current = id;
+  const pose = useRef<{ id: string; h: number; p: number; alt: number } | null>(null);
 
   // One globe for the camera, kept for the life of the workspace. A WebGL context compiles its shaders and caches
   // its tiles once, so the camera is created as soon as the Drones workspace opens, warms up out of sight (shaders,
@@ -150,8 +151,18 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
       const ground = scene.globe.getHeight(C.Cartographic.fromDegrees(st.lon, st.lat));
       const height = Math.max(st.amslM, (ground ?? -1e9) + 8);
       const { aim: a, zoom: z } = live.current;
-      v.camera.setView({ destination: C.Cartesian3.fromDegrees(st.lon, st.lat, height),
-        orientation: { heading: (st.gimbal.headingDeg + a.az) * DEG, pitch: (live.current.nadir ? -90 : C.Math.clamp(st.gimbal.pitchDeg + a.el, -90, 20)) * DEG, roll: 0 } });
+      // A stabilised gimbal: ease the view toward the commanded heading and pitch, and the height over terrain
+      // that refines underneath, instead of snapping to each new sample.
+      const wantH = st.gimbal.headingDeg + a.az, wantP = live.current.nadir ? -90 : C.Math.clamp(st.gimbal.pitchDeg + a.el, -90, 20);
+      const g = pose.current;
+      if (!g || g.id !== idRef.current) pose.current = { id: idRef.current, h: wantH, p: wantP, alt: height };
+      else {
+        const ka = 1 - Math.exp(-dt / 0.2), kh = 1 - Math.exp(-dt / 0.5);
+        g.h += ((((wantH - g.h) % 360) + 540) % 360 - 180) * ka; g.p += (wantP - g.p) * ka;
+        g.alt += (height - g.alt) * kh; g.alt = Math.max(g.alt, (ground ?? -1e9) + 6);
+      }
+      const f = pose.current!;
+      v.camera.setView({ destination: C.Cartesian3.fromDegrees(st.lon, st.lat, f.alt), orientation: { heading: f.h * DEG, pitch: f.p * DEG, roll: 0 } });
       (v.camera.frustum as C.PerspectiveFrustum).fov = (FOV / z) * DEG;
       if (now - replant > 2500) { replant = now; world.current?.replant(); }
     });
@@ -177,7 +188,7 @@ export default function DroneFeed({ id, store, terrain, relief, reliefOptions, c
   useEffect(() => {
     const v = viewer.current; if (!v) return;
     const dpr = window.devicePixelRatio || 1;
-    v.targetFrameRate = 30;
+    v.targetFrameRate = visible ? 60 : 30;
     v.useDefaultRenderLoop = visible;
     v.resolutionScale = Math.min(dpr, visible ? 1.25 : 0.75);
     v.scene.globe.maximumScreenSpaceError = visible ? 1.6 : 3;
