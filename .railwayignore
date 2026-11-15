@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.venv
+.data
+.tools
+.vercel
+node_modules
+dist
+__pycache__
+.pytest_cache
+*.pem
+*.key

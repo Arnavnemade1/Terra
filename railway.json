@@ -1,0 +1,17 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "Dockerfile",
+    "watchPatterns": ["backend/**", "pyproject.toml", "Dockerfile", "railway.json"]
+  },
+  "deploy": {
+    "startCommand": "python -m terra.runtime",
+    "healthcheckPath": "/api/ready",
+    "healthcheckTimeout": 180,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 5,
+    "overlapSeconds": "0",
+    "drainingSeconds": 30
+  }
+}

@@ -16,6 +16,16 @@ Install the Python dependencies from `pyproject.toml`, mount persistent storage 
 
 Configure `TERRA_ALLOWED_HOSTS` with the backend hostname and `TERRA_ALLOWED_ORIGINS` with the Vercel production URL. Keep `EARTHDATA_TOKEN`, `OPENAI_API_KEY`, `GOOGLE_MAPS_TILES_KEY` and `TERRA_DRONE_TOKEN` on that host. If the Google key uses website restrictions, set `GOOGLE_MAPS_TILES_REFERER` to an allowed public page URL.
 
+### Railway
+
+The backend Docker image starts `python -m terra.runtime`: a supervised API and scientific worker in one container, sharing `/data`. Attach a Railway volume at `/data` and keep this service at one replica. The image excludes local credentials, datasets, frontend dependencies and desktop/SITL tooling. Set `TEMPORAL_ADDRESS` to the private Temporal service address; the production runtime requires it.
+
+Temporal runs as a separate private service backed by PostgreSQL. Its database credentials should use Railway variable references. Expose only the Terra HTTP service publicly on port 8000. No Temporal development server is started in the application image.
+
+The deployment readiness path is `/api/ready`. It returns 200 only when Temporal responds and the worker has a recent heartbeat from the same container boot. Startup retries the worker while Temporal initializes; SIGTERM stops both child processes. Worker concurrency is bounded to three activities and four workflow tasks in the image, with single-threaded native-library defaults.
+
+Add provider credentials through Railway's secret-variable interface or `railway variable set KEY --stdin --skip-deploys`, never as build arguments or command-line values. Set `TERRA_ALLOWED_ORIGINS` to both production Vercel origins. After the public Railway domain is ready, set Vercel's `TERRA_API_ORIGIN` to that HTTPS origin and redeploy both sites. `/api/health` should then report `temporal.connected: true` through the Vercel domain.
+
 Verify `/api/health` through Vercel: `temporal.connected` must be true for durable investigations. Verify `/api/connector/google3d/status` for Google imagery. The frontend loading successfully does not establish that these backend services are available.
 
 ## GitHub

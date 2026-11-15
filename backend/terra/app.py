@@ -201,6 +201,21 @@ async def health():
             "inputs_count": len(available_inputs()), "connector": connector.diagnostics()}
 
 
+@app.get('/api/ready')
+async def ready():
+    from .runtime_health import worker_ready
+    if not worker_ready(get_settings().data_dir):
+        return JSONResponse({'status': 'starting', 'worker': False}, status_code=503)
+    try:
+        client = await temporal_client()
+        from temporalio.api.workflowservice.v1 import GetSystemInfoRequest
+        await asyncio.wait_for(client.workflow_service.get_system_info(GetSystemInfoRequest()), timeout=2)
+    except Exception:
+        app.state.temporal = None
+        return JSONResponse({'status': 'starting', 'worker': True, 'temporal': False}, status_code=503)
+    return {'status': 'ready', 'worker': True, 'temporal': True}
+
+
 @app.get("/api/inputs")
 async def inputs():
     observations = await asyncio.to_thread(local_observations)

@@ -1,9 +1,12 @@
 """Run the scientific worker separately from the HTTP server."""
 import asyncio
 import logging
+import os
+from datetime import timedelta
 from temporalio.client import Client
 from temporalio.worker import Worker
 from .config import get_settings
+from .runtime_health import write_heartbeat
 from .workflows import InvestigationWorkflow
 from .fleet.workflows import DroneAgentWorkflow, FleetCoordinatorWorkflow
 from .fleet.activities import coordination_round, drone_agent_round
@@ -18,16 +21,24 @@ async def main() -> None:
     worker = Worker(client, task_queue=settings.task_queue, workflows=[InvestigationWorkflow, FleetCoordinatorWorkflow, DroneAgentWorkflow],
                     activities=[persist_snapshot, discover_inputs, prepare_inputs, compute_science,
                                 verify_science, publish_science, plan_investigation, narrate_findings, enrich_science,
-                                coordination_round, drone_agent_round], max_concurrent_activities=12,
-                    max_concurrent_workflow_tasks=8)
+                                coordination_round, drone_agent_round], max_concurrent_activities=int(os.getenv('TERRA_MAX_ACTIVITIES', '12')),
+                    max_concurrent_workflow_tasks=int(os.getenv('TERRA_MAX_WORKFLOW_TASKS', '8')),
+                    graceful_shutdown_timeout=timedelta(seconds=20))
     logging.info("TERRA scientific worker ready on queue %s", settings.task_queue)
     from .connector import close
     from .feeds import keep_warm
     warm = asyncio.create_task(keep_warm())  # live context is ready before the first investigation asks
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(5)
+            await asyncio.to_thread(write_heartbeat, settings.data_dir)
+    pulse = asyncio.create_task(heartbeat())
     try:
         await worker.run()
     finally:
         warm.cancel()
+        pulse.cancel()
+        await asyncio.gather(warm, pulse, return_exceptions=True)
         await close()
 
 

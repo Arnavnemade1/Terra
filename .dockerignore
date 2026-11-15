@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!pyproject.toml
+!backend/
+!backend/**
+**/__pycache__/
+**/*.pyc
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
