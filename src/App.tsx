@@ -21,6 +21,7 @@ import FleetOps, { DeployCard } from './FleetOps';
 import Verification, { type SignedSpot } from './Verification';
 import { patchOf } from './fieldEvidence';
 import Watch from './Watch';
+import Trends from './Trends';
 import AgentOperations from './AgentOperations';
 import { droneStore, type Patch, type Place, type Profile as FleetProfile } from './drones';
 import { nextApproach } from './geo';
@@ -336,15 +337,18 @@ export default function App() {
   // The timeline chooses which dated image is shown: the latest radar and true-colour view at or before the cursor.
   const radarNow = radar.length ? [...radar].reverse().find(l => Date.parse(String(l.date)) <= t) || radar[0] : undefined;
   const opticalNow = optical.length ? [...optical].reverse().find(o => Date.parse(o.date) <= t) || optical[0] : undefined;
+  // The long-term trend layer belongs to the area, not to an investigation, so it can show with or without one.
+  const [trendLayer, setTrendLayer] = useState<Overlay | null>(null);
   const overlays: Overlay[] = useMemo(() => {
-    if (!job || !result) return [];
+    if (!job || !result) return trendLayer ? [trendLayer] : [];
     const out: Overlay[] = [];
     if (opticalNow) out.push({ id: 'optical', url: artifactUrl(job, opticalNow.artifact_name), bounds: opticalNow.bounds as Bounds, alpha: ls.optical.value, show: ls.optical.on, smooth: true });
     if (radarNow) out.push({ id: 'radar', url: url(radarNow), bounds: radarNow.bounds, alpha: ls.radar.value, show: ls.radar.on });
     if (delta) out.push({ id: 'change', url: url(delta), bounds: delta.bounds, alpha: ls.change.value, show: ls.change.on });
+    if (trendLayer) out.push(trendLayer);
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [job?.id, result, radarNow?.id, opticalNow?.artifact_name, ls.optical, ls.radar, ls.change]);
+  }, [job?.id, result, radarNow?.id, opticalNow?.artifact_name, ls.optical, ls.radar, ls.change, trendLayer]);
   const marks: Mark[] = useMemo(() => ls.hotspots.on ? hotspots.map(h => ({ id: String(h.rank), bounds: h.bounds, centre: h.centre,
     // Full callouts for the three largest patches (and the one in focus); the rest carry their number only, so labels never pile up.
     label: h.rank <= 3 || focusSpot === h.rank ? `${h.rank} · ${h.direction === 'increase' ? 'Brighter' : 'Darker'} ${num(h.mean_change_db ?? NaN, 1, true)} dB` : String(h.rank),
@@ -784,6 +788,7 @@ export default function App() {
                 observations={observations} loading={loading} catalogError={catalogError} onRetry={() => setRefresh(r => r + 1)} selectedIds={selectedIds} onToggle={toggleObservation}
                 analysis={analysis} setAnalysis={a => { setAnalysis(a); if (a === 'backscatter') setSelectedIds(ids => ids.slice(0, 1)); }} manualBlocker={manualBlocker} onDetail={o => { setActiveObservation(o); setDetail(true); }} />
               <ContextBlock context={context} />
+              <Trends bbox={region.bbox} name={region.name} onLayer={setTrendLayer} />
             </>}
             {job && <section className="job">
               <div className="job-head">

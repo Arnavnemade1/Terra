@@ -913,3 +913,9 @@ details.more[open] summary { margin-bottom: 8px; }
 .render-status{position:absolute;z-index:4;left:14px;top:64px;display:flex;align-items:center;gap:7px;padding:6px 9px;border:1px solid #666a4b55;border-radius:5px;background:#141710dc;color:#b8c2a7;pointer-events:none;font-size:10px;line-height:1.2}
 .render-status i{width:5px;height:5px;border-radius:50%;background:#b6ca8f}.render-status i.loading,.render-status i.refining{background:#d9b77b}.render-status b{font:10px var(--mono);color:#d6dfc9}.render-status small{border-left:1px solid #687059;padding-left:7px;color:#9ba88a;font:9px var(--mono)}
 @media(max-width:650px){.render-status{top:58px;left:10px;padding:5px 7px}.render-status small{display:none}}
+
+/* Phones and tablets: the bottom row is full (readout and map controls), so the Timeline toggle sits one row up on
+   the right instead of on top of them. */
+@media (max-width: 1020px) {
+  .dock-toggle { left: auto; right: 8px; transform: none; bottom: calc(var(--chrome-bottom, 30px) + 52px); height: 44px; }
+}

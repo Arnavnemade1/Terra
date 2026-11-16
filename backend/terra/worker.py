@@ -12,6 +12,8 @@ from .fleet.workflows import DroneAgentWorkflow, FleetCoordinatorWorkflow
 from .fleet.activities import coordination_round, drone_agent_round
 from .watch import ACTIVITIES as WATCH_ACTIVITIES
 from .watch_workflows import AreaWatchWorkflow
+from .trend_workflows import WORKFLOWS as TREND_WORKFLOWS
+from .trend_activities import ACTIVITIES as TREND_ACTIVITIES
 from .activities import (persist_snapshot, discover_inputs, prepare_inputs, compute_science, verify_science,
                          publish_science, plan_investigation, narrate_findings, enrich_science)
 
@@ -20,10 +22,10 @@ async def main() -> None:
     settings = get_settings()
     settings.ensure_directories()
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
-    worker = Worker(client, task_queue=settings.task_queue, workflows=[InvestigationWorkflow, FleetCoordinatorWorkflow, DroneAgentWorkflow, AreaWatchWorkflow],
+    worker = Worker(client, task_queue=settings.task_queue, workflows=[InvestigationWorkflow, FleetCoordinatorWorkflow, DroneAgentWorkflow, AreaWatchWorkflow, *TREND_WORKFLOWS],
                     activities=[persist_snapshot, discover_inputs, prepare_inputs, compute_science,
                                 verify_science, publish_science, plan_investigation, narrate_findings, enrich_science,
-                                coordination_round, drone_agent_round, *WATCH_ACTIVITIES], max_concurrent_activities=int(os.getenv('TERRA_MAX_ACTIVITIES', '12')),
+                                coordination_round, drone_agent_round, *WATCH_ACTIVITIES, *TREND_ACTIVITIES], max_concurrent_activities=int(os.getenv('TERRA_MAX_ACTIVITIES', '12')),
                     max_concurrent_workflow_tasks=int(os.getenv('TERRA_MAX_WORKFLOW_TASKS', '8')),
                     graceful_shutdown_timeout=timedelta(seconds=20))
     logging.info("TERRA scientific worker ready on queue %s", settings.task_queue)
