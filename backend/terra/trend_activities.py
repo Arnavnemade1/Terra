@@ -426,6 +426,21 @@ def multilook_block(stack: np.ndarray, rows: list[int], columns: list[int], look
     return averaged[:, rows[0] - r0: rows[0] - r0 + (rows[1] - rows[0]), columns[0] - c0: columns[0] - c0 + (columns[1] - columns[0])]
 
 
+def area_wide_note(summary: dict) -> list[str]:
+    """A warning when nearly the whole area trends one way, which usually is not local surface change."""
+    median = summary.get("median_slope_db_per_year")
+    up, down = summary.get("increasing_share_of_significant"), summary.get("decreasing_share_of_significant")
+    if median is None or up is None or down is None or not math.isfinite(median):
+        return []
+    one_way = max(up, down)
+    if abs(median) < 0.3 or one_way < 0.8:
+        return []
+    direction = "brighter" if median > 0 else "darker"
+    return [f"Most of the area got {direction} together (median {median:+.2f} dB/yr; {one_way:.0%} of significant pixels "
+            f"trend the same way). An area-wide shift usually comes from season (soil moisture, vegetation) or calibration "
+            f"rather than local surface change; look for patches that differ from their surroundings."]
+
+
 def fit_tile(payload: dict) -> dict:
     """Fit the robust trend for one tile of the shared dataset and save its arrays for assembly.
 
@@ -592,7 +607,7 @@ def publish_trends(payload: dict) -> dict:
         "agents": agents,
         "summary": summary,
         "layers": layers,
-        "limitations": LIMITATIONS,
+        "limitations": area_wide_note(summary) + LIMITATIONS,
     }
     safe = _safe(result)
     temporary = directory / "result.json.tmp"

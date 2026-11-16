@@ -128,7 +128,8 @@ def test_tile_agents_and_publish_recover_a_known_slope(data_dir):
     assert [layer["id"] for layer in document["layers"]] == ["trend", "trend-significant"]
     assert document["layers"][0]["units"] == "dB/yr"
     assert document["layers"][1]["min"] == -3.0 and document["layers"][1]["max"] == 3.0
-    assert document["limitations"] == LIMITATIONS
+    # A uniform synthetic slope is exactly the area-wide case, so the warning leads; the standing limitations follow.
+    assert document["limitations"][1:] == LIMITATIONS and "area got darker together" in document["limitations"][0]
     assert any("straight-line" in item for item in document["limitations"])
     assert any("classical simulated annealing" in item for item in document["limitations"])
 
@@ -199,3 +200,11 @@ def test_multilook_is_seamless_across_tile_edges():
     assert np.allclose(tile, whole[:, 13:27, 9:31], equal_nan=True)
     # Speckle-like noise drops by about the square root of nine.
     assert np.nanstd(whole[:, 2:-2, 2:-2]) < 0.5 * np.nanstd(db)
+
+
+def test_area_wide_shift_is_called_out_and_local_change_is_not():
+    from terra.trend_activities import area_wide_note
+    shift = {"median_slope_db_per_year": 0.64, "increasing_share_of_significant": 0.955, "decreasing_share_of_significant": 0.045}
+    local = {"median_slope_db_per_year": 0.05, "increasing_share_of_significant": 0.55, "decreasing_share_of_significant": 0.45}
+    assert "season" in area_wide_note(shift)[0] and "+0.64" in area_wide_note(shift)[0]
+    assert area_wide_note(local) == []
