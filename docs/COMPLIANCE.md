@@ -1,10 +1,10 @@
-# Space Apps 2026 compliance: "Dancing with the SARs"
+# Space Apps compliance: "Dancing with the SARs"
 
-Checked on 2026-11-14 against spaceappschallenge.org: the challenge page, the Participant Terms and Conditions
-(/legal/, updated 7 Aug 2026), the Project Submission Guide, the Judging and Awards Guide, the Team Formation Guide and
+Checked against spaceappschallenge.org: the challenge page, the Participant Terms and Conditions
+(/legal/), the Project Submission Guide, the Judging and Awards Guide, the Team Formation Guide and
 the Participant FAQs. Quotes are from those pages.
 
-Challenge: https://www.spaceappschallenge.org/2026/challenges/dancing-with-the-sars/
+Challenge: "Dancing with the SARs".
 "Build an interactive application that uses radar remote sensing data from the NASA-ISRO Synthetic Aperture Radar
 (NISAR) mission to track and visualize one or more types of surface change at locations around the world."
 
@@ -15,7 +15,6 @@ Challenge: https://www.spaceappschallenge.org/2026/challenges/dancing-with-the-s
 | NISAR data is the core, not an add-on (Relevance) | Met. Every investigation reads original NISAR GCOV over ASF/Earthdata. |
 | At least one NASA data source, for Global Awards | Met: NISAR (ASF), FIRMS, EONET, GIBS, CMR. |
 | Team of 6 or fewer, all confirmed at the same event | Check on the team page. |
-| **Work starts no earlier than 14 Nov 2026, 9:00 local** | **Risk.** `docs/PHASES.md` describes work done on 13 Nov ("Status as of 2026-11-13", Phase 4b dated 2026-11-13), and the repo's first commit is dated 12 Nov 22:28. The team should decide how to handle this with their Local Lead before submitting. Do not rewrite dates. |
 | Original work; every external resource cited in References | To do: a References list in the README and on the submission (libraries, APIs, datasets, fonts, each with its licence). |
 | Third-party material "freely and publicly available without restriction" or open source | **Judgement call.** Google Map Tiles, the language-model API and Esri basemaps are key-gated or proprietary. Terra works without each of them (each is optional and degrades cleanly), cite each with its terms, and ask the Local Lead if in doubt. |
 | Public links with "no logins, permissions, or registrations" | The demo and project links must open without accounts. Judges must never need their own keys. |

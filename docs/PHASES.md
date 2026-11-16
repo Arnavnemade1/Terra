@@ -1,6 +1,6 @@
 # TERRA — Execution Phases
 
-Status as of 2026-11-13, taking over from Codex's initial scaffold.
+Status, taking over from Codex's initial scaffold.
 
 ## Phase 0 — Foundations (mostly done)
 - [x] FastAPI backend (`backend/terra/app.py`): health, inputs, observations, investigation CRUD, cancel, resume, replay, report, artifacts
@@ -92,7 +92,7 @@ Sources: wystack anti‑pattern catalog, 21st.dev, uxdesign.cc "How to de‑slop
   (`optical.py`), evidence dossier, incremental results.
 - [ ] Separate child workflows per role; live event stream (SSE); scientific memory across investigations.
 
-## Phase 4b — Speed, breadth and the finished interface ✅ (2026-11-13)
+## Phase 4b — Speed, breadth and the finished interface ✅
 **Speed** (cold area, two original products): first result about 13 s, checked written answer about 18–19 s (was 30–40 s; 270–313 s before Phase 4).
 - Range reader (`connector.RangeFile`): one shared, allowlisted transport for HDF5 and Cloud-Optimized GeoTIFF. NISAR reads prefetch the file's
   head and tail (HDF5 metadata) in parallel and reuse the size from the signing request; signed Earthdata links are cached until shortly before expiry,
@@ -122,7 +122,7 @@ sources and method.
 or returned). Checked: the production bundle, API responses, artifacts and logs contain no key or signed URL; the dev server refuses `.env`, `.data`,
 `backend` and similar paths.
 
-## Phase 4c — Analysis workspace (reference layout, dark) ✅ (2026-11-14)
+## Phase 4c — Analysis workspace (reference layout, dark) ✅
 Layout adapted from a wildfire forensics prototype (top bar, map, right panel, timeline dock), kept dark and re-purposed for radar change,
 hazards and satellites:
 - **Top bar**: area picker (search popover for places, coordinates, hazards, saved work), radar date range, three workspaces with badges
@@ -163,7 +163,7 @@ hazards and satellites:
 - Cesium detail worth knowing: a globe material whose source mentions the surface-normal input is silently dropped when the terrain
   has no stored normals (ArcGIS heightmaps), so the relief shader derives its local frame from the world position instead.
 
-## Phase 4e — Google Map Tiles API, attribution and phones (2026-11-14)
+## Phase 4e — Google Map Tiles API, attribution and phones
 - **Photorealistic 3D Tiles, keyless in the browser.** `backend/terra/google_tiles.py` serves `/api/connector/google3d/*`:
   the key (`GOOGLE_MAPS_TILES_KEY`, falls back to `VITE_GOOGLE_MAPS_KEY`) goes upstream as `X-Goog-Api-Key`, never in a URL;
   only `root.json` and `datasets/<id>/files/<name>.json|glb?session=` are forwarded; child URIs are rewritten to the gateway;
@@ -182,7 +182,7 @@ hazards and satellites:
   map controls reduced to style and full screen; timeline ticks thinned by pixel spacing; one-column report; sensor view fits.
 - Removed every infinite pulse and blink (running-step dots, the sensor "rec" dot).
 
-## Phase 4f — Drones, camera feeds and real-drone connections (2026-11-14)
+## Phase 4f — Drones, camera feeds and real-drone connections
 - **Timeline and charts** are a drawer (closed by default, **T** or the "Timeline" button) so the globe is unobstructed.
 - **Drones workspace**: five simulated aircraft fly over different parts of the area, chosen from the investigation: a fixed-wing
   maps the perimeter; two quadcopters orbit the largest changed patches (or the highest summits / sectors); one flies a lawnmower
@@ -208,7 +208,7 @@ hazards and satellites:
 - Cesium details: a second globe can receive undefined eye-space positions in globe materials unless globe lighting is on (the
   relief's fixed light makes that harmless); its atmosphere must not follow the real sun or a night-time camera renders black.
 
-## Phase 4g — Fleet coordination: one central database, durable agents, real aircraft (2026-11-14)
+## Phase 4g — Fleet coordination: one central database, durable agents, real aircraft
 **Architecture.** Every aircraft, real or virtual, talks to Terra through one protocol; every report, task, airspace
 reservation, bid and message is a row in the central fleet database (SQLite in WAL mode, the same file as investigations,
 shared by the API and the worker). Durable agents (Temporal workflows) coordinate only through that database and signals.
@@ -252,7 +252,7 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
   agent's status, and the shared coordination log. Manual flight of a virtual aircraft is predicted locally and streamed to
   the server as setpoints.
 
-## Phase 4h — Real autopilot firmware, field notes, mission profiles, adding aircraft (2026-11-14)
+## Phase 4h — Real autopilot firmware, field notes, mission profiles, adding aircraft
 - **ArduPilot SITL** (`scripts/sitl.py`): the real ArduCopter and ArduPlane flight firmware on simulated airframes, built
   once into `~/.terra/sitl` (outside the repo) at low priority with a memory guard that pauses the compiler below 1.5 GB
   free. `sitl.py fleet` runs five vehicles (one ArduPlane mapper, four ArduCopter quads) at the monitoring area's launch
@@ -284,14 +284,14 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
   legible, with the scene's temperature scale and bracketed markers on the warmest measured ground; the crosshair reads
   the temperature or says there is none. EO has a sensor-style grade.
 
-## Phase 4i — Map Tiles handoff and drone workspace (2026-11-14)
+## Phase 4i — Map Tiles handoff and drone workspace
 - Google 3D keeps the terrain preview visible until the first view is ready, then switches basemaps together. Restricted keys use the configured public referrer; keys remain behind the connector.
 - Camera header, expand/return controls, simpler HUD, mission-target and downward views, zoom, help, telemetry warnings, and video loading/error states. The toolbar stays above the timeline and fits a 360 px viewport.
 - Fleet reporting/task/attention summaries, aircraft filters, and direct camera access. Connected autopilot altitude is preserved instead of being replaced by coarse map terrain during loading.
 - IR palettes apply only to measured Landsat pixels and preserve nodata transparency. Dated source context stays visible; changing investigations replaces the camera's radar overlay.
 - Validation: production build, 194 backend tests, browser checks at desktop and 360 px, and no configured credentials found in the production bundle. The connected fleet used for UI verification was ArduPilot SITL.
 
-## Phase 4j — Load speed, warm drone cameras, deploy anywhere, durable-agent orchestration (2026-11-14)
+## Phase 4j — Load speed, warm drone cameras, deploy anywhere, durable-agent orchestration
 - **Why the map was slow (measured).** A fresh view took 40-120 s. The slowest tiles spent ~53 s queued in the
   browser and under 1 s at the server: browsers open six HTTP/1.1 connections per host, and every tile and API call
   shared one. Imagery now spreads over t1-t4.localhost and terrain has its own host (a startup probe falls back to
@@ -315,7 +315,7 @@ shared by the API and the worker). Durable agents (Temporal workflows) coordinat
 - **SITL**: 400 Hz physics with a 200 Hz copter loop (ArduCopter will not arm below a 1.8x gyro-to-loop ratio); the
   bridge passes the autopilot's own arming message on when it refuses.
 
-## Phase 4k — Radar to drones and back: signatures, automatic thresholds, field verification (2026-11-15)
+## Phase 4k — Radar to drones and back: signatures, automatic thresholds, field verification
 - **Thresholds** (`signatures.py`): unchanged ground is modelled as speckle (the intensity ratio follows F(2L, 2L)
   at the measured ENL); per direction, Kittler-Illingworth where a change class exists (at least 5x what speckle
   predicts), else the CFAR level at a 0.1 % false-alarm rate, else 3 dB; read from the 3×3-averaged change

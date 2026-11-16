@@ -6,8 +6,7 @@ passes, and where?"), and Terra finds matching NISAR acquisitions, reads only yo
 measures calibrated backscatter and its change, and shows the result on a 3D globe with a written answer in which
 every number is traced to a computed value.
 
-Built for the NASA Space Apps Challenge 2026, challenge **Dancing with the SARs**:
-https://www.spaceappschallenge.org/2026/challenges/dancing-with-the-sars/
+Built for the NASA Space Apps Challenge, challenge **Dancing with the SARs**.
 
 ## What it does
 

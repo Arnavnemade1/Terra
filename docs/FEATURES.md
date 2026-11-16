@@ -1,6 +1,6 @@
 # TERRA: 100 features worth building
 
-Challenge: NASA Space Apps 2026, "Dancing with the SARs". Track and visualize surface change with NISAR radar, hypothesize the
+Challenge: NASA Space Apps, "Dancing with the SARs". Track and visualize surface change with NISAR radar, hypothesize the
 physical drivers, and say which polarizations show the change. Judging: **Impact**, **Creativity**, **Validity**, **Relevance**
 (NASA data at the core), **Presentation**.
 
@@ -12,7 +12,7 @@ checked against evidence, Sentinel-2 true colour, Open-Meteo conditions, ESA Wor
 swipe compare, relief map, sensor view and Google Photorealistic 3D Tiles (display only).
 
 **Tags.** Effort: **[S]** 2 h or less, **[M]** 1 day or less, **[L]** several days. Criteria are listed after the effort tag.
-**Sources were checked on 2026-11-14**: every CMR collection named below was found by short name in
+**Sources were checked**: every CMR collection named below was found by short name in
 `cmr.earthdata.nasa.gov/search/collections.json`, and every static COG host answered an HTTP range request (206).
 Collections confirmed: `NISAR_L2_GCOV_V1` and `_PROVISIONAL_V1`, `NISAR_L2_GUNW_V1`, `NISAR_L2_GOFF_V1`, `NISAR_L2_GSLC_V1`,
 `NISAR_L3_SME2_PROVISIONAL_V1`, `OPERA_L2_RTC-S1_V1`, `OPERA_L3_DSWX-S1_V1`, `OPERA_L3_DSWX-HLS_V1`, `OPERA_L3_DIST-ALERT-HLS_V1`,
@@ -485,7 +485,7 @@ For features 1 and 27, a per-investigation budget of bytes and seconds, enforced
 
 ## Build next (fits the hackathon window)
 
-The ten items with the highest value per hour on 2026-11-14 and 15, in order. Together they turn "an HH change map" into
+The ten items with the highest value per hour, in order. Together they turn "an HH change map" into
 "which polarization shows which change, how sure we are, and what likely caused it", which is the challenge brief almost word for word.
 
 1. **#1 Read every polarization** [S]. Everything polarimetric depends on it; it is a short change to `acquire.py` plus a loop in

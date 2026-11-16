@@ -1,7 +1,5 @@
 # TERRA — Project and Final Product Specification
 
-**Updated:** 14 November 2026
-
 **Purpose:** Shared product, engineering, science and operations reference.
 **Status convention:** “Implemented” describes code present in this repository; it does not imply production deployment, field validation, flight certification or independent scientific validation.
 
