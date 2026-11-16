@@ -18,7 +18,7 @@ The finished product should answer:
 
 The final loop is **observe → investigate → verify → task → observe again**. The platform must retain the source, time, method and limitations of every result through that loop.
 
-Terra was conceived for NASA Space Apps. Its purpose extends across floods and wetlands, vegetation disturbance, volcanic surfaces, agriculture, urban change, coastlines, snow and ice. Ground displacement requires an additional interferometric pipeline; it cannot be inferred from the current backscatter method.
+Terra's purpose extends across floods and wetlands, vegetation disturbance, volcanic surfaces, agriculture, urban change, coastlines, snow and ice. Ground displacement requires an additional interferometric pipeline; it cannot be inferred from the current backscatter method.
 
 ## 2. Product principles
 

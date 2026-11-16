@@ -31,4 +31,4 @@ Use a stable agent id that says whose it is, e.g. `vir-claude-maptiles` or `arna
   (Map Tiles API policies), and the Google logo and data attributions must stay visible.
 - No infinite or pulsing animations. The UI must work at 360 px wide and up; run the checks in `docs/PHASES.md`.
 - Tests: `npm test` (pytest) and `npm run build` (TypeScript and Vite) must pass before you push.
-- Space Apps rules are summarised in `docs/COMPLIANCE.md`. Read it before writing anything that ships.
+- Data and API terms (Google Map Tiles) are summarised in `docs/COMPLIANCE.md`. Read them before writing anything that ships.

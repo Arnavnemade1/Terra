@@ -141,7 +141,6 @@ export function Landing() {
           primaryAction={{ label: "Open the satellite map", href: MAP }}
           secondaryAction={null}
           faces={[]}
-          note="Built for NASA Space Apps 2026"
         />
       </main>
 

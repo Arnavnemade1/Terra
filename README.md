@@ -6,8 +6,6 @@ passes, and where?"), and Terra finds matching NISAR acquisitions, reads only yo
 measures calibrated backscatter and its change, and shows the result on a 3D globe with a written answer in which
 every number is traced to a computed value.
 
-Built for the NASA Space Apps Challenge, challenge **Dancing with the SARs**.
-
 ## What it does
 
 - **Investigations.** Original NISAR GCOV (L2, geocoded backscatter) products are read over HTTP byte ranges from
@@ -105,10 +103,9 @@ Every external resource Terra uses, with its licence or terms. Data services are
 - **In building it.** Much of the code and documentation was written with AI coding agents (Anthropic Claude Code and
   OpenAI Codex), directed, reviewed and tested by the team. `docs/FEATURES.md` and `docs/COMPLIANCE.md` were drafted
   with AI assistance.
-- TODO (team): state in your own words how the idea and design were chosen, as the submission form asks.
 - No AI-generated images or video are part of the product. Any used in the demo must carry a visible watermark.
 
 ## Licence
 
-TODO (team decision): choose an OSI-approved licence and add `LICENSE`. Until then, Space Apps applies Apache-2.0
-to submitted material. Third-party data and software keep their own licences listed above.
+TODO (team decision): choose an OSI-approved licence and add `LICENSE`.
+Third-party data and software keep their own licences listed above.

@@ -1,8 +1,7 @@
 # TERRA: 100 features worth building
 
-Challenge: NASA Space Apps, "Dancing with the SARs". Track and visualize surface change with NISAR radar, hypothesize the
-physical drivers, and say which polarizations show the change. Judging: **Impact**, **Creativity**, **Validity**, **Relevance**
-(NASA data at the core), **Presentation**.
+Goal: track and visualize surface change with NISAR radar, hypothesize the physical drivers, and say which polarizations
+show the change.
 
 **What already exists** (see `docs/PHASES.md`, so none of it is proposed again): original GCOV HDF5 subsets read over HTTP byte
 ranges (`acquire.py`), one diagonal term per run (HH when present), gamma0 dB and later-minus-earlier change, a fixed 3 dB descriptive
@@ -131,7 +130,7 @@ assigns *hypotheses*, which the writer may cite only as hypotheses. Files: `pola
 
 **22. "Which polarization shows it" report** · [S] · Relevance, Validity
 For each hotspot and the whole area, the change in each polarization divided by its expected speckle standard deviation (from
-ENL, feature 2). The polarization with the larger standardized change is named, with both values. This answers the challenge's
+ENL, feature 2). The polarization with the larger standardized change is named, with both values. This answers the
 polarization question with numbers. Files: `polarimetry.py`, `agent.py`, `src/Analysis.tsx`.
 
 **23. Object-based change with superpixels** · [M] · Validity
@@ -263,7 +262,7 @@ Add the GIBS layer `NISAR_L2_Geocoded_Polarimetric_Covariance` through the exist
 globe then shows real NISAR imagery everywhere before an investigation starts. It is labelled browse imagery, never measured.
 Files: `gateway.py`, `src/liveLayers.ts`, `src/App.tsx`.
 
-## 5. Hazards and applications by challenge theme (14)
+## 5. Hazards and applications by theme (14)
 
 **51. Flood extent with HAND filtering** · [M] · Impact, Validity
 Flood = water on the later date (feature 26) minus JRC permanent water (feature 41), keeping only pixels with Height Above Nearest
@@ -325,7 +324,7 @@ Save an area; the worker polls ASF every few hours. When a new GCOV arrives on t
 same-track date and raises a browser notification with the measured summary. This uses the existing Temporal worker and SQLite store.
 Files: `workflows.py`, `activities.py`, `store.py`, `src/App.tsx`.
 
-**64. Theme presets for each challenge theme** · [S] · Relevance, Presentation
+**64. Theme presets for each theme** · [S] · Relevance, Presentation
 One-click presets (floods and wetlands, forest loss and fire, crops, soil moisture, ice, earthquakes and subsidence). Each sets the
 polarizations, threshold method, ancillary layers, change classes and the limitation text for that theme, and is passed to the planner.
 Files: `agent.py` (`PLANNER`), `src/Analysis.tsx`.
@@ -442,14 +441,14 @@ Phase 4 open item. Stream workflow stages, bytes read and partial results over S
 as it happens. Files: `app.py`, `workflows.py`, `src/App.tsx`.
 
 **91. Demo cache for featured sites** · [S] · Presentation
-`scripts/` task that pre-acquires the Pacaya-Samiria pair and stack and two more featured sites into `.data`, so the judged demo
+`scripts/` task that pre-acquires the Pacaya-Samiria pair and stack and two more featured sites into `.data`, so the demo
 works even if Earthdata or ASF is slow. The cache is reused only if the hashes match the provenance. Files: new `scripts/warm_demo.py`.
 
 **92. Guided demo story mode** · [M] · Presentation
 Phase 7 item. A scripted, skippable walkthrough: globe, area, before and after, polarization report, hotspots, verified answer, with
 captions taken from the actual result. Honours `prefers-reduced-motion`. Files: `src/App.tsx`, `src/Globe.tsx`.
 
-**93. Static judge build** · [M] · Presentation, Impact
+**93. Static demo build** · [M] · Presentation, Impact
 Export finished investigations (JSON, COG tiles, PNGs) to a static bundle with the frontend in read-only mode, deployable without
 Earthdata credentials or a worker. Files: `scripts/`, `vite.config.ts`, `src/App.tsx`.
 
@@ -465,7 +464,7 @@ licences, the method and its limits, plus an open-source `LICENSE` and `CITATION
 A Jupyter notebook that calls `terra.science.run_analysis` on the cached Pacaya-Samiria inputs and reproduces the published numbers.
 Science readers can audit the method without the UI. Files: new `notebooks/pacaya_samiria.ipynb`.
 
-**97. Docker Compose for judges** · [M] · Presentation
+**97. Docker Compose for reviewers** · [M] · Presentation
 API, worker, Temporal dev server and the built frontend in one `docker compose up`, with `.env.example` listing which keys are optional.
 Files: new `docker-compose.yml`, `Dockerfile`.
 
@@ -475,7 +474,7 @@ Files: new `e2e/demo.spec.ts`, `package.json`.
 
 **99. Per-user Earthdata Login** · [M] · Impact
 Earthdata OAuth so each user's own token reads NISAR data, instead of one server token. This is required before any public
-deployment beyond the judged demo. Files: `acquire.py`, `app.py`, `connector.py`.
+deployment beyond the demo. Files: `acquire.py`, `app.py`, `connector.py`.
 
 **100. Parallel, cancellable stack reads with a byte budget** · [S] · Presentation, Impact
 For features 1 and 27, a per-investigation budget of bytes and seconds, enforced in `RangeFile`, with partial stacks reported honestly
@@ -483,15 +482,15 @@ For features 1 and 27, a per-investigation budget of bytes and seconds, enforced
 
 ---
 
-## Build next (fits the hackathon window)
+## Build next
 
 The ten items with the highest value per hour, in order. Together they turn "an HH change map" into
-"which polarization shows which change, how sure we are, and what likely caused it", which is the challenge brief almost word for word.
+"which polarization shows which change, how sure we are, and what likely caused it".
 
 1. **#1 Read every polarization** [S]. Everything polarimetric depends on it; it is a short change to `acquire.py` plus a loop in
-   `run_analysis`. Without it, the challenge's polarization question cannot be answered.
-2. **#2 ENL plus #22 "which polarization shows it"** [S + S]. Answers the challenge's polarization question directly, with numbers scaled by
-   speckle. This is what judges look for under Relevance.
+   `run_analysis`. Without it, the polarization question cannot be answered.
+2. **#2 ENL plus #22 "which polarization shows it"** [S + S]. Answers the polarization question directly, with numbers scaled by
+   speckle.
 3. **#13 cross-pol ratio and #15 dual-pol composite** [S + S]. Cheap, physically meaningful layers. The composite is the single best
    presentation image for the canopy and water story.
 4. **#21 Four-quadrant change classes with hypothesized drivers** [S]. Directly meets "hypothesize physical drivers" and keeps it
@@ -503,11 +502,10 @@ The ten items with the highest value per hour, in order. Together they turn "an 
 7. **#41 JRC surface water context** [S]. One COG window read through the existing pattern in `terrain.py`; it turns "new water" into
    "water where there has never been any", which supports the flood claim.
 8. **#81 Threshold sensitivity curve plus #80 null test** [S + S]. Two cheap checks that show the result is not a threshold artefact. Few
-   hackathon entries show their false-alarm rate.
+   change maps show their false-alarm rate.
 9. **#50 GIBS NISAR browse layer** [S]. Real NISAR imagery on the globe from the first second, through the existing gateway. A strong
    Relevance and Presentation gain for minutes of work.
-10. **#95 README, licence and citation** [S]. Judges and reviewers open the repository; currently there is no README. Open-source is a
-    stated requirement.
+10. **#95 README, licence and citation** [S]. Reviewers open the repository; currently there is no README. Open source.
 
 Next tier, if time remains: #20 (pairwise test with FDR), #26 (split-based Otsu water), #49 (change per land-cover class), #92 (story mode).
 
