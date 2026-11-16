@@ -103,6 +103,8 @@ from .operations import router as operations_router  # noqa: E402
 app.include_router(operations_router)
 from .watch_api import router as watch_router  # noqa: E402  (after the fleet router: it reuses the operator check)
 app.include_router(watch_router)
+from .trends_api import router as trends_router  # noqa: E402
+app.include_router(trends_router)
 # *.localhost always resolves to this machine; the workspace spreads map tiles over a few such names so the browser
 # opens more than six connections at once (it allows six per host over HTTP/1.1).
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "*.localhost", "127.0.0.1", "[::1]", *filter(None, os.getenv("TERRA_ALLOWED_HOSTS", "").split(","))])
